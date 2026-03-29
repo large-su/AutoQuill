@@ -1,0 +1,28 @@
+# AutoQuill
+
+# 校准文件（每个人的屏幕不同）
+coordinates.json
+
+# 调试截图
+screenshots/
+
+# 运行日志
+zhihu_auto_*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
