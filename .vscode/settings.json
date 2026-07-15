@@ -1,0 +1,18 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python.defaultInterpreterPath": "C:\\Users\\10162\\miniconda3\\envs\\feature_wx\\python.exe",
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.profiles.windows": {
+        "PowerShell (feature_wx)": {
+            "source": "PowerShell",
+            "args": [
+                "-NoLogo",
+                "-ExecutionPolicy",
+                "Bypass"
+            ],
+            "overrideName": true
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "PowerShell (feature_wx)"
+}

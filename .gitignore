@@ -1,28 +1,16 @@
-# AutoQuill
+# 敏感配置（含 API Key）
+config/llm_providers.json
 
-# 校准文件（每个人的屏幕不同）
-coordinates.json
+# 运行时数据
+data/coordinates.json
+data/knowledge_base.json
+data/raw_materials.jsonl
 
-# 调试截图
+# 运行产物
+logs/
+output/
 screenshots/
-
-# 运行日志
-zhihu_auto_*.log
 
 # Python
 __pycache__/
 *.pyc
-*.pyo
-.venv/
-venv/
-env/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db

@@ -1,0 +1,37 @@
+[
+	{
+		"name": "DeepSeek",
+		"vendor": "deepseek",
+		"apiKey": "sk-995eb97437314dbe850ab52f437e67e1",
+		"models": [
+			{
+				"id": "deepseek-chat",
+				"name": "DeepSeek-V3",
+				"baseUrl": "https://api.deepseek.com",
+				"maxInputTokens": 65536,
+				"maxOutputTokens": 8192
+			},
+			{
+				"id": "deepseek-reasoner",
+				"name": "DeepSeek-R1",
+				"baseUrl": "https://api.deepseek.com",
+				"maxInputTokens": 65536,
+				"maxOutputTokens": 8192
+			}
+		]
+	},
+	{
+		"name": "SiliconFlow-DeepSeek",
+		"vendor": "siliconflow",
+		"apiKey": "sk-your-siliconflow-key-here",
+		"models": [
+			{
+				"id": "Pro/deepseek-ai/DeepSeek-V3",
+				"name": "SLF-DeepSeek-V3",
+				"baseUrl": "https://api.siliconflow.cn/v1",
+				"maxInputTokens": 65536,
+				"maxOutputTokens": 8192
+			}
+		]
+	}
+]

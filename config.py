@@ -1,143 +1,237 @@
 # ============================================================
-# 知乎自动化 - 配置文件 v1.0
+# AutoQuill 配置文件 v2.3
 #
-# 所有等待时间和关键参数集中在此，方便调试。
-# 如果某个环节太慢或太快，直接改这里的数值即可。
+# 框架级通用配置 + 知乎故事应用的向后兼容 re-export
+# 知乎专用 prompt 已迁移至 applications/zhihu_story/prompts.py
+# 知乎专用参数已迁移至 applications/zhihu_story/config.py
 # ============================================================
 
 import random
 import time
 
 # ============================================================
-# 模式设置
+# 向后兼容 re-exports（知乎故事专用配置，v2.3 重构中迁移）
+# 下游代码无需修改：from config import FILTER_PROMPT 等仍然有效
+# ============================================================
+from applications.zhihu_story.config import *
+from applications.zhihu_story.prompts import *
+from applications.image_gen.config import *
+
+# ============================================================
+# LLM 调用模式（框架级——决定走 API 还是浏览器）
 # ============================================================
 
-# 选题模式：
-#   "manual"  = 手动选题（脚本导航到推荐页后暂停，你自己选问题点进去）
-#   "auto"    = 全自动选题（OCR 解析+评分+自动点击最优问题）
-QUESTION_SELECT_MODE = "auto"
+# "api" = API 直接调用（推荐，快速稳定）
+# "web" = 浏览器操作网页版（免费但慢）
+LLM_MODE = "api"
 
 # ============================================================
-# URL
+# LLM API 配置
 # ============================================================
 
-ZHIHU_RECOMMEND_URL = "https://www.zhihu.com/creator/featured-question/recommend"
-DEEPSEEK_URL = "https://chat.deepseek.com/"
+# 模型服务商注册表
+# 所有 API Key、模型列表、地址等集中管理在 config/llm_providers.json 中
+# 首次使用请复制 config/llm_providers.example.json → config/llm_providers.json 并填入你的 Key
+#
+# 切换模型只需修改下面两行，无需改动其他代码：
+
+# LLM_PROVIDER = "DeepSeek"          # 故事生成用的服务商名称（对应 JSON 中的 name）
+# LLM_MODEL_ID = "deepseek-v4-flash"     # 故事生成用的模型 ID（对应 JSON 中 models[].id）
+# KB_PROVIDER  = "DeepSeek"          # 知识库任务用的服务商（配方提炼、题材分类、评分等）
+# KB_MODEL_ID  = "deepseek-v4-flash"     # 知识库任务用的模型 ID
+LLM_PROVIDER = "XiaomiMimo"          # 故事生成用的服务商名称（对应 JSON 中的 name）
+LLM_MODEL_ID = "mimo-v2.5-pro"    # 故事生成用的模型 ID（mimo-v2.5-pro 或 mimo-v2.5）
+KB_PROVIDER  = "XiaomiMimo"          # 知识库任务用的服务商（配方提炼、题材分类、评分等）
+KB_MODEL_ID  = "mimo-v2.5"    # 知识库/评分用更快模型，正文仍用 pro
+
+# --- 以下为自动加载逻辑，一般无需修改 ---
+import json as _json, os as _os
+
+_PROVIDERS_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "config", "llm_providers.json")
+
+def _load_provider_config(provider_name, model_id):
+    """从 config/llm_providers.json 中解析指定服务商和模型的完整配置"""
+    if not _os.path.exists(_PROVIDERS_FILE):
+        raise FileNotFoundError(
+            f"未找到 {_PROVIDERS_FILE}！\n"
+            f"请复制 config/llm_providers.example.json 为 config/llm_providers.json 并填入 API Key。"
+        )
+    with open(_PROVIDERS_FILE, 'r', encoding='utf-8') as f:
+        providers = _json.load(f)
+
+    for p in providers:
+        if p["name"] == provider_name:
+            api_key = p.get("apiKey", "")
+            for m in p.get("models", []):
+                if m["id"] == model_id:
+                    cfg = dict(m)
+                    cfg["apiKey"] = api_key
+                    cfg["baseUrl"] = m.get("baseUrl", "")
+                    cfg["model"] = model_id
+                    cfg["provider"] = provider_name
+                    cfg["extra_body"] = dict(m.get("extra_body") or {})
+                    return cfg
+            # 找到服务商但没匹配到模型 → 用服务商下第一个模型的 baseUrl 兜底
+            first_url = p["models"][0]["baseUrl"] if p["models"] else ""
+            return {
+                "apiKey": api_key,
+                "baseUrl": first_url,
+                "model": model_id,
+                "provider": provider_name,
+                "extra_body": {},
+            }
+
+    raise ValueError(f"config/llm_providers.json 中未找到服务商「{provider_name}」")
+
+def _load_provider(provider_name, model_id):
+    """兼容旧调用：返回 api_key, base_url, model。"""
+    cfg = _load_provider_config(provider_name, model_id)
+    return cfg.get("apiKey", ""), cfg.get("baseUrl", ""), cfg.get("model", model_id)
+
+# 解析故事生成模型
+LLM_PROVIDER_CONFIG = _load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
+LLM_API_KEY = LLM_PROVIDER_CONFIG.get("apiKey", "")
+LLM_API_BASE_URL = LLM_PROVIDER_CONFIG.get("baseUrl", "")
+LLM_API_MODEL = LLM_PROVIDER_CONFIG.get("model", LLM_MODEL_ID)
+LLM_API_EXTRA_BODY = dict(LLM_PROVIDER_CONFIG.get("extra_body") or {})
+
+# 解析知识库模型（可以和故事生成用不同的服务商/模型）
+KB_PROVIDER_CONFIG = _load_provider_config(KB_PROVIDER, KB_MODEL_ID)
+# 如果 KB 用了不同的服务商，其 key/url 通过 KB_LLM_API_KEY / KB_LLM_BASE_URL 暴露
+KB_LLM_API_KEY = KB_PROVIDER_CONFIG.get("apiKey", "")
+KB_LLM_BASE_URL = KB_PROVIDER_CONFIG.get("baseUrl", "")
+KB_LLM_MODEL = KB_PROVIDER_CONFIG.get("model", KB_MODEL_ID)
+KB_LLM_EXTRA_BODY = dict(KB_PROVIDER_CONFIG.get("extra_body") or {})
+
+# API 请求参数
+LLM_API_MAX_TOKENS = int(LLM_PROVIDER_CONFIG.get("maxOutputTokens") or 65536)
+LLM_API_TEMPERATURE = 0.9      # 温度：越高越有创意（0.0-2.0）
+LLM_API_TIMEOUT = 300          # 兼容旧配置；流式请求主要使用下面两个超时
+LLM_API_CONNECT_TIMEOUT = 20   # API 建连超时
+LLM_API_STREAM_READ_TIMEOUT = 60  # Socket 读超时；服务端心跳会重置该计时
+LLM_API_STREAM_FIRST_TOKEN_TIMEOUT = 45  # 建立流式响应后，45 秒未收到正文 token 则失败
+LLM_API_STREAM_IDLE_TIMEOUT = 60  # 已开始生成后，连续 60 秒无正文 token 则失败
+LLM_API_FREQUENCY_PENALTY = 0  # 频率惩罚：同一篇内已出现多次的词,再出现的概率降低(减少重复句式)
+LLM_API_PRESENCE_PENALTY = 0   # 存在惩罚:已出现过的词,后续一律降低概率(鼓励用新词新表达)
+
+# ============================================================
+# Web LLM 驱动配置
+# ============================================================
+# 切换网站只需改 WEB_DRIVER_NAME，新增网站在 WEB_DRIVERS 中添加条目
+
+WEB_DRIVER_NAME = "DeepSeek"       # 当前使用的 Web 驱动："DeepSeek" / "Aizex"
+
+WEB_DRIVERS = {
+    "DeepSeek": {
+        "url": "https://chat.deepseek.com/",
+        "chat_placeholder": "给 DeepSeek 发送消息",
+        "copy_icon": "images/deepseek_copy_icon.png",
+        # 模式切换
+        "mode": "expert",          # "fast" = 快速模式 / "expert" = 专家模式
+        "deep_think": False,       # 深度思考（R1）
+        "smart_search": False,     # 智能搜索
+        # 等待时间
+        "wait_load": 4.0,
+        "wait_after_paste": 0.5,
+        "wait_after_send": 1.5,
+        "wait_before_url_cache": 3,
+        "wait_copy_click": 0.6,
+        "wait_scroll_end": 0.8,
+        # 生成完成检测
+        "wait_first_reply": 0,     # DeepSeek 响应快，不需要初始等待
+        "poll_interval": 5,
+        "stable_count": 2,
+        "max_wait": 360,
+        "pagedown_per_cycle": 1,   # 每次 OCR 前按一次 PageDown（防止鼠标误触中断自动滚动）
+        # 并行模式参数（1 = 走旧的串行逻辑；>1 启用并行）
+        # ⚠️ DeepSeek 网页端限制同一账号最多 2 个并发生成，超过会排队/失败
+        # 所以这里实际有意义的值只能是 1 或 2
+        "parallel_tabs": 2,
+        "consecutive_fail_threshold": 2,      # 连续失败 N 次后重置该 slot 的会话
+        "scan_interval": 2,                   # 主循环每轮扫描间隔（秒）
+    },
+    "Aizex": {
+        "url": "https://leopard-x.memofun.net/",
+        "chat_placeholder": "有问题，尽管问",
+        "copy_icon": "images/aizex_copy_icon.png",
+        "completion_icon": "images/aizex_completion_icon.png",
+        # 模型选择（通过校准坐标打开菜单，OCR 定位模型名称）
+        "model": "GPT-5.5 Thinking Extended",
+        "model_menu": {
+            "_top_level": [
+                "Auto", "GPT-5.5 Thinking", "GPT-5.5 Thinking Extended",
+            ],
+            "Grok 系列": ["Grok 4.2 Expert", "Grok 4.2 Auto", "Grok 4.2 Fast"],
+            "Claude 系列": ["Claude Sonnet 4.6 Thinking", "Claude Opus 4.7 Thinking", "Claude Opus 4.6 Thinking"],
+            "Gemini 系列": [
+                "Gemini 3 Flash Thinking", "Gemini 3 Flash",
+                "Gemini 3.1 Pro", "Gemini 3.1 Pro [API]",
+            ],
+            "香蕉模型 [Nano Banana]": ["Nano Banana Pro", "Nano Banana 2"],
+            "DeepSeek 系列": [],
+        },
+        # 等待时间
+        "wait_load": 4.0,
+        "wait_after_paste": 0.5,
+        "wait_after_send": 1.5,
+        "wait_before_url_cache": 8,   # Aizex 响应慢
+        "wait_copy_click": 0.6,
+        "wait_scroll_end": 0.8,
+        # 生成完成检测（页面不自动滚动，需主动 PageDown）
+        "wait_first_reply": 6,        # 模型初始思考静默期
+        "poll_interval": 5,
+        "pagedown_per_cycle": 5,      # 每次OCR前按几次PageDown
+        "stable_count": 3,            # 连续3次PageDown后不变→完成
+        "max_wait": 360,
+        # 并行模式参数（1 = 走旧的串行逻辑；>1 启用并行）
+        # Aizex 没有已知并发限制，可按网络/机器性能调整
+        "parallel_tabs": 3,                   # 并行 tab 数（1-8）
+        "consecutive_fail_threshold": 2,      # 连续失败 N 次后重置该 slot 的会话
+        "scan_interval": 2,                   # 主循环每轮扫描间隔（秒）
+    },
+}
 
 # ============================================================
 # 全局键鼠参数
 # ============================================================
 
-PYAUTOGUI_PAUSE = 0.2          # pyautogui 每步默认暂停（秒），越小越快
-MOUSE_MOVE_DURATION = (0.2, 0.5)  # 鼠标移动时长范围（秒）
+PYAUTOGUI_PAUSE = 0.1
+MOUSE_MOVE_DURATION = (0.1, 0.25)
 
 # ============================================================
-# 各环节等待时间（秒） — 这是调试的核心区域
+# 各环节等待时间（秒）—— 通用操作
 # ============================================================
 
 # --- 通用操作 ---
-WAIT_HOTKEY = (0.3, 0.8)       # 按快捷键后的等待（如 Ctrl+L、Ctrl+C）
-WAIT_PASTE = (0.3, 0.8)        # 粘贴后的等待
-WAIT_PAGE_LOAD = (1.5, 3.0)    # 页面导航后等待加载（打开新 URL）
-WAIT_TAB_OPEN = (1.0, 2.0)     # 打开新标签页后等待
+WAIT_HOTKEY = (0.05, 0.15)
+WAIT_PASTE = (0.1, 0.2)
+WAIT_PAGE_LOAD = (1.5, 2.2)
+WAIT_TAB_OPEN = (1.0, 1.5)
 
 # --- 步骤 1：选题 ---
-WAIT_RECOMMEND_PAGE = 2.0      # 推荐问题页面加载等待
-WAIT_QUESTION_ENTER = 1.0      # 点击问题后等待页面跳转开始
-WAIT_ANSWER_LOAD_POLL = 1.0    # 回答加载检测：每次 OCR 轮询间隔
-WAIT_ANSWER_LOAD_MAX = 10.0    # 回答加载检测：最长等待时间
+WAIT_RECOMMEND_PAGE = 2.0
+WAIT_QUESTION_ENTER = 0.7
 
 # --- 步骤 2：OCR 提取 ---
-WAIT_BEFORE_OCR = 0.8          # 开始 OCR 前的短暂等待（确保页面渲染完）
-WAIT_EXPAND_CLICK = 1.5        # 点击"展开阅读全文"后等待展开
-WAIT_PAGE_DOWN = 0.6           # 每次 Page Down 后等待渲染
-WAIT_SCROLL_NEXT_ANSWER = 0.6  # 翻页找下一个回答时每次等待
-
-# --- 步骤 3：DeepSeek ---
-WAIT_DEEPSEEK_LOAD = 3.0       # DeepSeek 页面首次加载等待
-WAIT_DS_INPUT_CLICK = 0.3      # 点击输入框后等待
-WAIT_DS_AFTER_PASTE = 0.5      # 粘贴提示词后等待（发送前）
-WAIT_DS_AFTER_SEND = 1.5       # 按 Enter 发送后等待
-WAIT_DS_FIRST_REPLY = 6.0      # 等待 DeepSeek 回复"收到"（很快，固定等待）
-WAIT_DS_COPY_CLICK = 0.6       # 点击复制按钮后等待
-WAIT_DS_SCROLL_END = 0.8       # 按 End 滚到底部后等待
-
-# --- 步骤 4：粘贴到知乎 ---
-WAIT_ZHIHU_PAGE_LOAD = 2.5     # 知乎问题页重新加载等待
-WAIT_WRITE_ANSWER_CLICK = 1.5  # 点击"写回答"后等待编辑器出现
-WAIT_EDITOR_CLICK = 0.3        # 点击编辑器区域后等待
-WAIT_AFTER_PASTE = 1.5         # 粘贴故事后等待（弹窗出现前）
-WAIT_CONFIRM_CLICK = 0.3       # 点击"确认并解析"后等待
-WAIT_DRAFT_SAVE = 5            # 等待草稿自动保存
+WAIT_BEFORE_OCR = 0.3
+WAIT_EXPAND_CLICK = 0.5
+WAIT_PAGE_DOWN = 0.18
+WAIT_SCROLL_NEXT_ANSWER = 0.2
 
 # --- 轮次间 ---
-WAIT_BETWEEN_CYCLES = (10, 30) # 两轮之间的随机等待范围（秒）
+WAIT_BETWEEN_CYCLES = (1.5, 3)
 
 # ============================================================
 # OCR 参数
 # ============================================================
 
-OCR_MAX_SCROLLS = 30           # Page Down 最大翻页次数
-
-# ============================================================
-# 自动选题参数
-# ============================================================
-
-MIN_ANSWER_LENGTH = 500        # 回答最少字符数，低于此跳到下一个
-MAX_ANSWER_RETRIES = 3         # 最多尝试几个回答
-
-# ============================================================
-# DeepSeek 自动检测完成
-# ============================================================
-
-DEEPSEEK_POLL_INTERVAL = 5     # 每 N 秒 OCR 一次检测是否完成
-DEEPSEEK_STABLE_COUNT = 2      # 连续 N 次结果一致 → 完成
-DEEPSEEK_MAX_WAIT = 360        # 最长等待秒数
-
-# ============================================================
-# DeepSeek Prompt
-# ============================================================
-
-DEEPSEEK_SYSTEM_PROMPT = """**Role**: 请你扮演一位顶尖的故事创作大师！
-
-**Background**: 用户是一位内容创作者，希望我能学习给定的高赞文章的行文风格，为其重新构思并创作一个全新的、高质量、具有爆款潜质的故事。用户提供了详细的创作要求，包括格式、结构、文风和具体的吸睛技巧。
-
-**Skills**: 
-
-1. 深度学习与写作能力：能够快速学习给定参考文章的语言风格，可以像写作高手那样获得新的爆款故事灵感再进行撰写，而不是微调原故事或洗稿。
-
-2.爆款故事架构能力：精通故事创作原理，擅长设计强烈的冲突、意想不到的反转和持续不断的悬念。
-
-3.去AI化写作：具备纯熟的写作技巧，能使用精炼、流畅的短句和自然的对话，使最终作品毫无"AI感"。
-
-**Goals**: 
-
-1全新构思：基于参考文章，构思一个全新的故事（一定注意故事的情节设定要避开参考文章，不能一致！！！！！！）。情节设计跌宕起伏、引起读者共鸣。请注意，故事要注意逻辑性合理，可以考虑化用融入近期高讨论度社会事件以增加故事的讨论度。
-
-2结构搭建：爆款文章结构通常包括开篇引言（短句切入，不超过8句话，迅速抓住读者眼球，让人产生强烈的深入阅读欲望。）、章节（每节500-800字）
-
-3内容创作：以行云流水的笔触一气呵成地完成故事创作，严格遵守所有文风和格式约束，确保作品质量。在确保故事逻辑没问题的前提下，一定不要平铺直叙记流水账。切忌为了凑字数而凑字数，核心要义是保证故事情节精彩，而不是一味追求字数！
-
-4悬念与互动：故事可在中途或高潮处留下强悬念，吸引读者想了解后续催更而点赞。【双击免费快速解锁后续】。
-
-**Constrains**:
-
-1开头引言铁律：必须在第1节之前添加一个引言。引言必须严格遵守"爆款开头铁律"，迅速抓住读者眼球，让人产生强烈的深入阅读欲望。（注意格式：文章不需要给题目，开篇也不需要出现‘引言’二字，直接开始写引言内容即可）
-
-2章节与字数：章节标题统一设置为加粗的二级标题格式，如 1、2、3。故事章节不少于5节，每节字数控制在500-800字之间。每小节末尾建议留悬念。
-
-3格式规范：
-
-全文必须使用严格的Markdown格式。每个自然段结束后必须换行，并在下一段开始前留出一个空行（即按两次回车），严禁合并段落。对话引号统一使用半角「」，弹幕、系统提示、人物心声、短信、书面内容等使用方括号【】，省略号使用标准格式……，单句成行，尽量使用短句，确保语言精练流畅，避免冗长复杂的句式。
-
-请以"高赞文章"为风格蓝本，严格遵守上述所有目标和约束，创作一个全新的、高质量、高互动潜力的故事。从开篇第一个字开始，就要牢牢抓住读者！我下一步将把"高赞文章"及其"全新文章主题"发给你，如果你明白，请仅回复收到！等待我给你具体参考再开始写！"""
+OCR_MAX_SCROLLS = 10
 
 # ============================================================
 # 辅助函数
 # ============================================================
 
 def random_delay(delay_range):
-    """在给定范围内随机等待"""
     if isinstance(delay_range, (int, float)):
         time.sleep(delay_range)
         return delay_range

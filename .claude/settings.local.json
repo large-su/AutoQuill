@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(python -m py_compile \"e:\\\\知乎\\\\AutoQuillV2.3-结构化重构-自进化系统\\\\llm_api.py\")",
+      "Bash(python -c \"from applications.image_gen.config import IMAGE_OUTPUT_DIR, CONTEXT_SAVE_AS_KEY, SAVE_DIALOG_WAIT; print\\(f'IMAGE_OUTPUT_DIR={IMAGE_OUTPUT_DIR}'\\); print\\(f'CONTEXT_SAVE_AS_KEY={CONTEXT_SAVE_AS_KEY}'\\); print\\(f'SAVE_DIALOG_WAIT={SAVE_DIALOG_WAIT}'\\); print\\('✓ 图像生成 config 导入成功'\\)\")"
+    ]
+  }
+}
