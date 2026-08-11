@@ -1,7 +1,6 @@
 """知乎专用感知函数 — 回答检测、Footer 解析、推荐页解析、内容提取。
 
 架构位置：Application Layer — zhihu_story
-对应文档：agent_framework_architecture_manifesto.md
 
 所有对 ocr_utils 通用原语的引用均为函数内懒导入，避免循环依赖。
 """

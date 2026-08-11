@@ -1,10 +1,22 @@
 # 敏感配置（含 API Key）
 config/llm_providers.json
 
+# 浏览器登录态（含会话 Cookie，等同账号凭证）
+config/browser_state.json
+data/browser_profile/
+
 # 运行时数据
 data/coordinates.json
 data/knowledge_base.json
 data/raw_materials.jsonl
+data/collected_stories.jsonl
+data/stories/
+data/usage_history.jsonl
+data/usage_report.png
+
+# 个人资产（作者蒸馏档案、元学习知识库——只留本地，不入库）
+data/authors/
+data/meta/
 
 # 运行产物
 logs/
@@ -14,3 +26,12 @@ screenshots/
 # Python
 __pycache__/
 *.pyc
+
+# 草稿记录（含历史 API Key 备注）
+config/1.txt
+
+# Playwright MCP 运行日志与页面快照（调试产物）
+.playwright-mcp/
+
+# 个人编辑器配置（含本机路径）
+.vscode/

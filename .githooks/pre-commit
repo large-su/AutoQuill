@@ -1,0 +1,22 @@
+#!/bin/sh
+# 防呆提交钩子：阻止把疑似真实 API Key 提交进仓库
+#
+# 真实 key 形如 sk- 后跟 24+ 位十六进制（DeepSeek/SiliconFlow 等）
+# 模板文件里的占位符（sk-your-xxx-key-here / sk-placeholder-*）不含
+# 十六进制串，不会误伤。
+#
+# 启用：git config core.hooksPath .githooks
+
+# 只检查本次提交新增的行（^+），历史中的旧 key 不在此列
+if git diff --cached | grep -qE '^\+.*sk-[0-9a-fA-F]{24,}'; then
+    echo "============================================================"
+    echo " 提交被阻止：暂存区检测到疑似真实 API Key（sk- + 24 位 hex）"
+    echo ""
+    echo " 本地密钥请只放在 config/llm_providers.json"
+    echo "   （该文件在 .gitignore 中，永远不会被提交）"
+    echo " 模板 config/llm_providers.example.json 只允许占位符"
+    echo "   （sk-your-xxx-key-here 形式）"
+    echo "============================================================"
+    exit 1
+fi
+exit 0

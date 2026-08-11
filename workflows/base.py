@@ -22,111 +22,19 @@ class WorkflowBase:
 
     子类需实现：
         select_topic()         → 返回 URL
-        extract_content(url)   → 返回 (title, content, footer)
+        extract_content()      → 返回 (title, content, footer, url)
                                  footer: 读者互动数据 + 发表时间的 dict，
                                  采集失败时为 None（不影响 title/content）
         publish(story, title, url, md_path)
         collect_materials_batch(target)  → 返回 [{title, answer, url, index, footer}, ...]
 
     基类提供：
-        generate_story()       → API/Web 模式分发
-        extract_recipe()       → 配方提炼
+        generate_story()       → API/Web 模式分发（采样模式：片段直接注入）
         run_single()           → 单次生成即发布
         run_batch(target)      → 批量：收集→生成→评分→发布
     """
 
     name = "base"
-
-    # ============================================================
-    # 异步配方提炼基础设施（采集阶段边采边炼，时间重叠）
-    # ============================================================
-
-    def _init_async_recipe_extraction(self):
-        """初始化异步配方提炼线程池（采集循环开始前调用）。"""
-        from concurrent.futures import ThreadPoolExecutor
-        self._recipe_executor = ThreadPoolExecutor(max_workers=3)
-        self._recipe_futures = []  # list of (material_index, future)
-
-    def _fire_recipe_extraction(self, title, answer, material_index):
-        """异步发起单篇配方提炼（非阻塞，采集循环内调用）。"""
-        if not hasattr(self, '_recipe_executor') or self._recipe_executor is None:
-            return
-        from kb_manager import extract_single_recipe
-        future = self._recipe_executor.submit(
-            extract_single_recipe, title, answer  # 使用默认 timeout=90s
-        )
-        self._recipe_futures.append((material_index, future))
-
-    def _collect_async_recipes(self, materials):
-        """等待所有异步提炼完成，绑定配方到 materials（采集结束后调用）。"""
-        if not hasattr(self, '_recipe_futures') or not self._recipe_futures:
-            return 0
-
-        from kb_manager import save_kb, load_kb
-
-        pending = len(self._recipe_futures)
-        log.info(f"\n  等待 {pending} 个异步配方提炼完成...")
-
-        bound = 0
-        new_recipes_for_kb = []
-
-        for mat_idx, future in self._recipe_futures:
-            try:
-                recipe = future.result(timeout=60)
-            except Exception:
-                recipe = None
-
-            if recipe and 0 <= mat_idx < len(materials):
-                m = materials[mat_idx]
-                recipe["source_title"] = m["title"][:80]
-                recipe["_source_idx"] = mat_idx
-                recipe["added_at"] = datetime.now().strftime("%Y-%m-%d")
-                recipe["times_used"] = 0
-                recipe["avg_score"] = None
-                recipe["score_history"] = []
-                recipe["score_count"] = 0
-
-                m["recipe"] = recipe
-                m["genre"] = recipe.get("genre", "其他")
-                new_recipes_for_kb.append(recipe)
-                bound += 1
-
-        # 统一写入 KB（避免并发竞态）
-        if new_recipes_for_kb:
-            try:
-                kb = load_kb()
-                max_id = 0
-                for r in kb.get("recipes", []):
-                    rid = r.get("id", "recipe_000")
-                    try:
-                        num = int(rid.split("_")[1])
-                        max_id = max(max_id, num)
-                    except (IndexError, ValueError):
-                        pass
-                for recipe in new_recipes_for_kb:
-                    max_id += 1
-                    recipe["id"] = f"recipe_{max_id:03d}"
-                kb["recipes"].extend(new_recipes_for_kb)
-                kb["stats"]["sources_analyzed"] = (
-                    kb["stats"].get("sources_analyzed", 0) + len(new_recipes_for_kb)
-                )
-                save_kb(kb)
-                log.info(f"  ✓ 新增 {len(new_recipes_for_kb)} 个配方（总计 {len(kb['recipes'])} 个）")
-
-                from config import KB_MERGE_TRIGGER
-                if len(kb["recipes"]) >= KB_MERGE_TRIGGER:
-                    log.info(f"  知识库条目（{len(kb['recipes'])}）已达压缩阈值（{KB_MERGE_TRIGGER}），"
-                             f"建议运行：python kb_manager.py --compress")
-            except Exception as e:
-                log.warning(f"  KB 写入异常（配方已绑定到素材，不影响生成）：{e}")
-
-        # 清理
-        self._recipe_executor.shutdown(wait=False)
-        self._recipe_futures = []
-        self._recipe_executor = None
-
-        log.info(f"  异步配方绑定成功：{bound}/{len(materials)}")
-        return bound
 
     # ============================================================
     # 子类必须实现
@@ -137,10 +45,11 @@ class WorkflowBase:
         raise NotImplementedError
 
     def extract_content(self, fast_mode=False):
-        """步骤2：提取内容，返回 (title, content, footer)
+        """步骤2：提取内容，返回 (title, content, footer, url)
 
         footer 为读者互动数据 + 发表时间的 dict（参与元学习入池）；
-        采集失败时为 None，主流程照常运行。
+        采集失败时为 None，主流程照常运行。url 为最终实际提取的问题
+        页 URL（内部重选题时必须返回新 URL）。
         """
         raise NotImplementedError
 
@@ -180,8 +89,9 @@ class WorkflowBase:
         from llm_api import generate_story
 
         meta = getattr(self, "_meta_knowledge", None)
+        author = getattr(self, "author", None)
         story = generate_story(question_title, top_answer, recipe=recipe,
-                               meta_knowledge=meta)
+                               meta_knowledge=meta, author=author)
         if not story:
             log.error("API 生成失败")
             from desktop_utils import focus_edge
@@ -202,7 +112,7 @@ class WorkflowBase:
           - True  → 两轮生成（长文模式：大纲 → 正文）
         """
         try:
-            from config import LONG_FORM_MODE
+            from applications.zhihu_story.config import LONG_FORM_MODE
         except ImportError:
             LONG_FORM_MODE = False
 
@@ -216,48 +126,19 @@ class WorkflowBase:
     def _generate_web_short_form(self, question_title, top_answer, recipe=None):
         """Web 短文模式：单轮 prompt 直接出正文"""
         from web_drivers import get_driver
-        from llm_api import build_story_prompt
+        from llm_api import build_story_prompt, _load_author_profile_or_none
 
         meta = getattr(self, "_meta_knowledge", None)
+        author = getattr(self, "author", None)
         full_prompt, mode_str = build_story_prompt(
             question_title, top_answer, recipe,
             meta_knowledge=meta,
+            author_profile=_load_author_profile_or_none(author),
         )
         log.info(f"  Prompt 模式：{mode_str}")
 
         driver = get_driver()
         return driver.generate(full_prompt)
-
-    def extract_recipe(self, title, answer):
-        """从参考文章提炼配方，返回 recipe dict 或 None"""
-        from config import LLM_API_KEY
-        try:
-            from config import KB_ENABLE
-        except ImportError:
-            return None
-
-        if not KB_ENABLE or not LLM_API_KEY:
-            return None
-
-        try:
-            from kb_manager import extract_and_store
-            new_recipes = extract_and_store(
-                [{"title": title, "answer": answer}]
-            )
-            if isinstance(new_recipes, list) and new_recipes:
-                recipe = new_recipes[0]
-                log.info(f"  使用配方：[{recipe.get('genre', '?')}] "
-                         f"{recipe.get('perspective', '')} "
-                         f"{recipe.get('hook', '?')[:25]}")
-                return recipe
-            else:
-                log.info("  未提炼出配方，使用参考文章模式")
-        except ImportError:
-            log.info("  知识库未安装，使用参考文章模式")
-        except Exception as e:
-            log.warning(f"  配方提炼出错（{e}），回退到参考文章模式")
-
-        return None
 
     # ============================================================
     # 保存故事文件（通用）
@@ -286,9 +167,10 @@ class WorkflowBase:
     # ============================================================
 
     def run_single(self):
-        """传统模式：选题→提取→配方→生成→校验→发布"""
-        from config import MIN_ANSWER_LENGTH, LLM_MODE
-        from llm_api import (
+        """传统模式：选题→提取→采样生成→校验→发布"""
+        from applications.zhihu_story.config import MIN_ANSWER_LENGTH
+        from config import LLM_MODE
+        from core.story_text import (
             validate_story_format,
             clean_story_output,
             fix_story_format,
@@ -296,11 +178,13 @@ class WorkflowBase:
 
         url = self.select_topic()
         # footer（读者互动数据）在单条流程中用不上（此流程不走元学习入池），
-        # 但签名必须对齐 extract_content 的三元组返回值
-        title, answer, _footer = self.extract_content()
+        # 但签名必须对齐 extract_content 的返回值。★ url 取 extract_content
+        # 返回的最终 URL：不可回答重选题后，实际提取的题可能与首次选题
+        # 不同（线上发布曾导航到被跳过的旧题而失败）
+        title, answer, _footer, url = self.extract_content()
 
-        recipe = self.extract_recipe(title, answer)
-        story = self.generate_story(title, answer, recipe=recipe)
+        # 采样模式：参考文章片段直接注入（零 LLM 提炼），不再走配方
+        story = self.generate_story(title, answer)
 
         if story and LLM_MODE == "web":
             story = fix_story_format(clean_story_output(story))
@@ -316,7 +200,7 @@ class WorkflowBase:
         if not is_valid:
             # ★ 检查是否启用格式重试
             try:
-                from config import ENABLE_FORMAT_RETRY
+                from applications.zhihu_story.config import ENABLE_FORMAT_RETRY
             except ImportError:
                 ENABLE_FORMAT_RETRY = True
 
@@ -326,7 +210,7 @@ class WorkflowBase:
                 return False
 
             log.warning(f"格式不合规（{fmt_score}/10），重试一次...")
-            retry_story = self.generate_story(title, answer, recipe=recipe)
+            retry_story = self.generate_story(title, answer)
             
             if retry_story and LLM_MODE == "web":
                 retry_story = fix_story_format(clean_story_output(retry_story))
@@ -360,7 +244,6 @@ class WorkflowBase:
         流水线批量模式：
 
         阶段1：收集素材
-        阶段1.5：配方提炼
         阶段2：生成故事（API并行 / Web串行或并行）
         阶段2.5：格式检测 + 重试
         阶段3：评分 → 择优发布
@@ -377,12 +260,15 @@ class WorkflowBase:
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from config import (
-            LLM_MODE, LLM_API_KEY, DEFAULT_BATCH_PUBLISH_COUNT,
-            WAIT_BETWEEN_CYCLES
+            LLM_MODE,
+            WAIT_BETWEEN_CYCLES,
+        )
+        from applications.zhihu_story.config import (
+            DEFAULT_BATCH_PUBLISH_COUNT,
         )
         from config import random_delay
-        from llm_api import (
-            generate_story_parallel, score_stories,
+        from llm_api import generate_story_parallel, score_stories
+        from core.story_text import (
             validate_story_format, clean_story_output, fix_story_format
         )
         from desktop_utils import (
@@ -396,7 +282,7 @@ class WorkflowBase:
 
         # ===== 解析 use_meta + 加载元知识 =====
         try:
-            from config import META_INJECT_DEFAULT, META_LEARN_ENABLE
+            from applications.zhihu_story.config import META_INJECT_DEFAULT, META_LEARN_ENABLE
         except ImportError:
             META_INJECT_DEFAULT = False
             META_LEARN_ENABLE = False
@@ -467,84 +353,9 @@ class WorkflowBase:
         time_phase1 = time.time() - time_phase1_start
         log.info(f"  阶段1耗时：{time_phase1:.1f}s")
 
-        # ===== 阶段1.5：配方提炼 =====
-        # ★ 优先走异步流水线（采集过程中已边采边炼，此处只收集结果）
-        #    若异步未启用，回退到旧的串行批处理模式
-        try:
-            from config import KB_ENABLE
-        except ImportError:
-            KB_ENABLE = False
-
-        if KB_ENABLE and LLM_API_KEY:
-            time_phase15_start = time.time()
-            log.info(f"\n{'─'*50}")
-            log.info("阶段1.5：配方提炼（从参考文章现提现用）")
-            log.info(f"{'─'*50}")
-
-            # ★ 优先收集异步提炼结果
-            async_bound = self._collect_async_recipes(materials)
-
-            if async_bound > 0:
-                # 异步模式成功：未绑定的素材标记为无配方
-                for m in materials:
-                    if not m.get("recipe"):
-                        m["recipe"] = None
-                        log.info(f"  {m['index']}. → 未提炼出配方，"
-                                 f"使用参考文章模式")
-            else:
-                # 异步未启用或全部失败 → 回退到串行批处理
-                try:
-                    from kb_manager import extract_and_store
-
-                    articles = [{"title": m["title"], "answer": m["answer"]}
-                                for m in materials]
-                    new_recipes = extract_and_store(articles)
-
-                    if isinstance(new_recipes, int):
-                        log.warning("  kb_manager 返回了数量而非配方列表")
-                        for m in materials:
-                            m["recipe"] = None
-                    else:
-                        log.info(f"  提炼出 {len(new_recipes)} 个配方")
-                        bound = 0
-                        for recipe in new_recipes:
-                            src_idx = recipe.get("_source_idx")
-                            if src_idx is not None and 0 <= src_idx < len(materials):
-                                m = materials[src_idx]
-                                if not m.get("recipe"):
-                                    m["recipe"] = recipe
-                                    m["genre"] = recipe.get("genre", "其他")
-                                    bound += 1
-                                    log.info(
-                                        f"  {m['index']}. "
-                                        f"[{recipe.get('genre', '?')}] "
-                                        f"{recipe.get('perspective', '')} → "
-                                        f"{recipe.get('hook', '?')[:25]}"
-                                    )
-                            recipe.pop("_source_idx", None)
-
-                        for m in materials:
-                            if not m.get("recipe"):
-                                m["recipe"] = None
-                                log.info(f"  {m['index']}. → 未提炼出配方，"
-                                         f"使用参考文章模式")
-
-                        log.info(f"  绑定成功：{bound}/{len(materials)}")
-
-                except ImportError as e:
-                    log.info(f"  kb_manager 导入失败（{e}），跳过配方提炼")
-                    for m in materials:
-                        m["recipe"] = None
-                except Exception as e:
-                    log.warning(f"  配方提炼出错（{e}），跳过")
-                    for m in materials:
-                        m["recipe"] = None
-
-            time_phase15 = time.time() - time_phase15_start
-            log.info(f"  阶段1.5耗时：{time_phase15:.1f}s")
-        else:
-            for m in materials:
-                m["recipe"] = None
+        # 采样模式：参考文章片段直接注入（零 LLM 提炼），不再绑定配方
+        for m in materials:
+            m["recipe"] = None
 
         # ===== 阶段2：生成故事 =====
         log.info(f"\n{'─'*50}")
@@ -575,12 +386,12 @@ class WorkflowBase:
 
         # 段落分布分析
         try:
-            from config import ENABLE_PARAGRAPH_ANALYSIS
+            from applications.zhihu_story.config import ENABLE_PARAGRAPH_ANALYSIS
         except ImportError:
             ENABLE_PARAGRAPH_ANALYSIS = False
         if ENABLE_PARAGRAPH_ANALYSIS:
             try:
-                from llm_api import plot_paragraph_distribution
+                from core.story_text import plot_paragraph_distribution
                 plot_paragraph_distribution(generated)
             except Exception as e:
                 log.warning(f"  段落分布分析出错（{e}），跳过")
@@ -610,7 +421,7 @@ class WorkflowBase:
         if non_compliant:
             # ★ 检查是否启用格式重试
             try:
-                from config import ENABLE_FORMAT_RETRY
+                from applications.zhihu_story.config import ENABLE_FORMAT_RETRY
             except ImportError:
                 ENABLE_FORMAT_RETRY = True
 
@@ -790,7 +601,7 @@ class WorkflowBase:
 
         base_workers = min(len(materials), self._get_gen_concurrency())
         try:
-            from config import (
+            from applications.zhihu_story.config import (
                 STORY_GENERATE_CONCURRENCY_AUTO,
                 STORY_GENERATE_CONCURRENCY_MIN,
                 STORY_GENERATE_CONCURRENCY_MAX,
@@ -855,6 +666,7 @@ class WorkflowBase:
                         mat['title'], mat['answer'], mat['index'],
                         progress, recipe=mat.get('recipe'),
                         meta_knowledge=meta,
+                        author=getattr(self, "author", None),
                     )
                     future_to_mat[future] = mat
 
@@ -928,7 +740,7 @@ class WorkflowBase:
         from config import WEB_DRIVER_NAME, WEB_DRIVERS
         
         try:
-            from config import LONG_FORM_MODE
+            from applications.zhihu_story.config import LONG_FORM_MODE
         except ImportError:
             LONG_FORM_MODE = False
 
@@ -944,7 +756,7 @@ class WorkflowBase:
 
     def _batch_generate_web_serial(self, materials):
         """Web 串行生成（原有逻辑，单 tab 复用同一会话）"""
-        from llm_api import clean_story_output, fix_story_format
+        from core.story_text import clean_story_output, fix_story_format
 
         for i, mat in enumerate(materials):
             log.info(f"\n  Web 串行生成 {i+1}/{len(materials)}："
@@ -973,9 +785,8 @@ class WorkflowBase:
 
     def _batch_generate_web_parallel(self, materials, drv_cfg):
         """Web 并行生成（独立 Edge 窗口 + N 个 tab）"""
-        from llm_api import (
-            build_story_prompt, clean_story_output, fix_story_format
-        )
+        from llm_api import build_story_prompt, _load_author_profile_or_none
+        from core.story_text import clean_story_output, fix_story_format
         from web_drivers.parallel_runner import ParallelWebRunner
 
         # 并行 tab 数不超过任务数
@@ -988,11 +799,13 @@ class WorkflowBase:
 
         # 构造 (prompt, meta) 任务列表
         meta = getattr(self, "_meta_knowledge", None)
+        author_profile = _load_author_profile_or_none(
+            getattr(self, "author", None))
         tasks = []
         for mat in materials:
             full_prompt, _mode = build_story_prompt(
                 mat['title'], mat['answer'], recipe=mat.get('recipe'),
-                meta_knowledge=meta,
+                meta_knowledge=meta, author_profile=author_profile,
             )
             tasks.append((full_prompt, mat))
 
@@ -1031,7 +844,8 @@ class WorkflowBase:
                          print_progress_fn, reset_progress_fn):
         """API 并行重试不合规文章"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from llm_api import generate_story_parallel, validate_story_format
+        from llm_api import generate_story_parallel
+        from core.story_text import validate_story_format
 
         retried_ok = 0
         retry_progress = {}
@@ -1063,6 +877,7 @@ class WorkflowBase:
                     mat['title'], mat['answer'], mat['index'],
                     retry_progress, recipe=mat.get('recipe'),
                     meta_knowledge=meta,
+                    author=getattr(self, "author", None),
                 )
                 future_to_mat[future] = mat
 
@@ -1126,7 +941,7 @@ class WorkflowBase:
         from config import WEB_DRIVER_NAME, WEB_DRIVERS
 
         try:
-            from config import LONG_FORM_MODE
+            from applications.zhihu_story.config import LONG_FORM_MODE
         except ImportError:
             LONG_FORM_MODE = False
 
@@ -1144,7 +959,7 @@ class WorkflowBase:
 
     def _batch_retry_web_serial(self, non_compliant, compliant):
         """Web 串行重试不合规文章（原有逻辑）"""
-        from llm_api import (
+        from core.story_text import (
             clean_story_output, fix_story_format, validate_story_format
         )
 
@@ -1184,8 +999,9 @@ class WorkflowBase:
 
     def _batch_retry_web_parallel(self, non_compliant, compliant, drv_cfg):
         """Web 并行重试不合规文章"""
-        from llm_api import (
-            build_story_prompt, clean_story_output,
+        from llm_api import build_story_prompt, _load_author_profile_or_none
+        from core.story_text import (
+            clean_story_output,
             fix_story_format, validate_story_format
         )
         from web_drivers.parallel_runner import ParallelWebRunner
@@ -1203,11 +1019,13 @@ class WorkflowBase:
                  f"（重试任务 {len(non_compliant)} 个）")
 
         meta = getattr(self, "_meta_knowledge", None)
+        author_profile = _load_author_profile_or_none(
+            getattr(self, "author", None))
         tasks = []
         for mat in non_compliant:
             full_prompt, _mode = build_story_prompt(
                 mat['title'], mat['answer'], recipe=mat.get('recipe'),
-                meta_knowledge=meta,
+                meta_knowledge=meta, author_profile=author_profile,
             )
             tasks.append((full_prompt, mat))
 

@@ -1,21 +1,14 @@
 # ============================================================
-# AutoQuill 配置文件 v2.3
+# AutoQuill 配置文件 v3.0
 #
-# 框架级通用配置 + 知乎故事应用的向后兼容 re-export
-# 知乎专用 prompt 已迁移至 applications/zhihu_story/prompts.py
-# 知乎专用参数已迁移至 applications/zhihu_story/config.py
+# 框架级通用配置。应用专属参数请直接引用：
+#   applications/zhihu_story/config.py    知乎故事创作参数
+#   applications/zhihu_story/prompts.py   知乎故事提示词
+#   applications/image_gen/config.py      图像生成参数
 # ============================================================
 
 import random
 import time
-
-# ============================================================
-# 向后兼容 re-exports（知乎故事专用配置，v2.3 重构中迁移）
-# 下游代码无需修改：from config import FILTER_PROMPT 等仍然有效
-# ============================================================
-from applications.zhihu_story.config import *
-from applications.zhihu_story.prompts import *
-from applications.image_gen.config import *
 
 # ============================================================
 # LLM 调用模式（框架级——决定走 API 还是浏览器）
@@ -35,14 +28,14 @@ LLM_MODE = "api"
 #
 # 切换模型只需修改下面两行，无需改动其他代码：
 
-# LLM_PROVIDER = "DeepSeek"          # 故事生成用的服务商名称（对应 JSON 中的 name）
-# LLM_MODEL_ID = "deepseek-v4-flash"     # 故事生成用的模型 ID（对应 JSON 中 models[].id）
-# KB_PROVIDER  = "DeepSeek"          # 知识库任务用的服务商（配方提炼、题材分类、评分等）
-# KB_MODEL_ID  = "deepseek-v4-flash"     # 知识库任务用的模型 ID
-LLM_PROVIDER = "XiaomiMimo"          # 故事生成用的服务商名称（对应 JSON 中的 name）
-LLM_MODEL_ID = "mimo-v2.5-pro"    # 故事生成用的模型 ID（mimo-v2.5-pro 或 mimo-v2.5）
-KB_PROVIDER  = "XiaomiMimo"          # 知识库任务用的服务商（配方提炼、题材分类、评分等）
-KB_MODEL_ID  = "mimo-v2.5"    # 知识库/评分用更快模型，正文仍用 pro
+LLM_PROVIDER = "DeepSeek"          # 故事生成用的服务商名称（对应 JSON 中的 name）
+LLM_MODEL_ID = "deepseek-v4-pro"    # 故事生成用的模型 ID
+KB_PROVIDER  = "DeepSeek"          # 知识库任务用的服务商（配方提炼、题材分类、评分等）
+# ★ 曾用 deepseek-v4-flash：该模型是推理模型，reasoning_content 会吃光
+# 全部输出预算（max_tokens 2700 → reasoning 2700，content 恒为空），
+# 配方提炼 0/1 双失败。thinking=false 等参数实测无效，改回 pro 才能
+# 完整输出配方 JSON（长文本生成任务与 flash 的推理行为不兼容）
+KB_MODEL_ID  = "deepseek-v4-pro"    # 知识库/评分模型，正文同用 pro
 
 # --- 以下为自动加载逻辑，一般无需修改 ---
 import json as _json, os as _os

@@ -880,18 +880,50 @@ def summarize_answer_report(
     return summary
 
 
+def _is_edge_browser_window(name, cls):
+    """Edge 浏览器窗口：类名 Chrome_WidgetWin_1 且标题以 Edge 结尾。
+
+    （Claude 等 Electron 应用同为 Chrome_WidgetWin_1，但标题不以 Edge 结尾，
+    不会误判。）
+    """
+    return "chrome_widgetwin" in cls.lower() and name.lower().endswith("edge")
+
+
+def _find_edge_window(automation):
+    """前台是 Edge 则用之；否则在顶层窗口中找一个 Edge 浏览器窗口。"""
+    window = automation.GetForegroundControl()
+    try:
+        name = _one_line(_safe_property(window, "Name"))
+        cls = _one_line(_safe_property(window, "ClassName"))
+    except Exception:
+        name, cls = "", ""
+    if _is_edge_browser_window(name, cls):
+        return window
+
+    for top in automation.GetRootControl().GetChildren():
+        try:
+            n = _one_line(_safe_property(top, "Name")) or ""
+            c = _one_line(_safe_property(top, "ClassName")) or ""
+        except Exception:
+            continue
+        if _is_edge_browser_window(n, c):
+            return top
+    raise RuntimeError("未找到 Edge 浏览器窗口（请保持一个 Edge 窗口可见）")
+
+
 def _read_live_web_records() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Read the foreground Edge RootWebArea without invoking any UI control."""
+    """Read the Edge RootWebArea without invoking any UI control.
+
+    Prefers the foreground window; falls back to scanning top-level windows
+    for an Edge browser window (so collection works while other windows
+    hold focus, e.g. author-page batch collection).
+    """
     try:
         import uiautomation as automation
     except ImportError as exc:
         raise RuntimeError(f"uiautomation 不可用：{exc}") from exc
 
-    window = automation.GetForegroundControl()
-    window_name = _one_line(_safe_property(window, "Name"))
-    window_class = _one_line(_safe_property(window, "ClassName"))
-    if "edge" not in window_name.lower() and "chrome_widgetwin" not in window_class.lower():
-        raise RuntimeError("当前前台窗口不是 Microsoft Edge")
+    window = _find_edge_window(automation)
 
     root_control = None
     for control, _ in _iter_tree(window, MAX_TREE_NODES):

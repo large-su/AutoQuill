@@ -1,18 +1,27 @@
 # ============================================================
-# workflows/zhihu.py — 知乎工作流
+# workflows/zhihu.py — 知乎工作流（DOM 驱动）
 #
-# 实现知乎平台专属的 4 个步骤：
-#   步骤1：从知乎推荐页选题
-#   步骤2：OCR 提取知乎问答内容
-#   步骤3：（继承基类）生成故事
-#   步骤4：通过知乎编辑器导入发布
+# 实现知乎平台专属的 4 个步骤。所有浏览器操作与检测均经
+# browser_adapter 的 DOM 语义接口完成，与物理鼠标/屏幕坐标/OCR
+# 完全解绑（运行期间用户可干其他事，换分辨率/换电脑不受影响）：
+#   步骤1：选题  —— 推荐页 DOM 卡片解析（含热度标签）+ 规则筛选 + 评分
+#   步骤2：提取  —— 问题页首答 DOM 提取 + 「撤销删除」DOM 检测
+#   步骤3：（继承基类）生成故事（可注入作者技能，见 AUTHOR_PROFILE）
+#   步骤4：发布  —— 写回答 → 编辑器直接写入故事全文；成功判定走
+#                    服务端草稿 API 轮询（前端 toast 在程序化写入后
+#                    不可靠，以草稿内容为准——可验证）
 #
-# 以及批量素材收集逻辑。
+# 降级通道（仅 DOM 主通道失败时启用）：
+#   - 提取：UIA/OCR 旧屏幕通道（_extract_answer_with_fallback）
+#   - 发布：无 —— 导入文档上传（set_input_files）不可靠（上传 API 全
+#     200 但服务端草稿不更新），编辑器直接写入是唯一可验证通道
+#
+# 批量素材收集：滚动推荐页 → 解析卡片 → 新开 tab 提取，
+# 结构与原 OCR 版一致（外层刷新循环 / 内层逐屏滚动）。
 # ============================================================
 
-import pyautogui
-import time
 import os
+import time
 import logging
 
 from workflows.base import WorkflowBase
@@ -21,188 +30,199 @@ log = logging.getLogger(__name__)
 
 
 class ZhihuWorkflow(WorkflowBase):
-    """知乎平台工作流"""
+    """知乎平台工作流：浏览器操作全部走 DOM 通道。"""
 
     name = "zhihu"
 
+    def __init__(self):
+        from applications.zhihu_story.config import AUTHOR_PROFILE
+        # 作者技能注入：生成时把该作者的蒸馏技能 profile 注入 prompt
+        self.author = AUTHOR_PROFILE or None
+
     # ============================================================
-    # 步骤1：选题
+    # 浏览器通道（全局共享单例）
+    # ============================================================
+
+    def _browser(self):
+        from applications.zhihu_story.browser_adapter import get_browser
+        return get_browser()
+
+    def _require_login(self, browser):
+        if not browser.is_logged_in():
+            raise RuntimeError(
+                "知乎登录态失效，请先运行：\n"
+                "  python -m applications.zhihu_story.browser_adapter --login")
+
+    # ============================================================
+    # 步骤1：选题（DOM）
     # ============================================================
 
     def select_topic(self):
-        """从知乎推荐页选题，返回问题页 URL"""
-        from config import (
-            ZHIHU_RECOMMEND_URL, QUESTION_SELECT_MODE,
-            WAIT_RECOMMEND_PAGE, WAIT_FOCUS_SETTLE
-        )
-        from desktop_utils import (
-            focus_edge, navigate_to_url, grab_current_url,
-            get_bounds
-        )
-        from config import random_mouse_duration
+        from applications.zhihu_story.config import QUESTION_SELECT_MODE
 
         log.info("=" * 50)
-        log.info(f"步骤 1：选题（{QUESTION_SELECT_MODE}）")
+        log.info(f"步骤 1：选题（{QUESTION_SELECT_MODE}，DOM 通道）")
         log.info("=" * 50)
 
-        focus_edge()
-        time.sleep(WAIT_FOCUS_SETTLE)
-        navigate_to_url(ZHIHU_RECOMMEND_URL)
-        time.sleep(WAIT_RECOMMEND_PAGE)
-
-        lx, rx, ty, by = get_bounds()
+        browser = self._browser()
+        self._require_login(browser)
 
         if QUESTION_SELECT_MODE == "auto":
-            return self._select_auto(lx, rx, ty, by)
-        else:
-            return self._select_manual(lx, rx, ty, by)
+            return self._select_auto(browser)
+        return self._select_manual(browser)
 
-    def _scan_recommend_page(self, lx, rx, ty, by):
-        """扫描推荐页：OCR 解析 + 飙升补标 + 分离飙升/普通。
+    def _scan_recommend(self, browser, retries=2):
+        """DOM 扫描推荐页：卡片解析（含热度标签）→ 评分。
 
-        返回: (all_questions, hot_questions, normal_questions)
-              解析失败返回 (None, None, None)
+        返回 (all_qs, hot_qs, normal_qs)；重试仍失败返回 (None, None, None)。
+        推荐页偶尔风控/加载抖动导致卡片为空，重试可自愈。
         """
-        from ocr_utils import parse_recommend_questions
+        for attempt in range(retries + 1):
+            browser.open_recommend_page()
+            all_qs = browser.get_recommend_questions(max_cards=40)
+            if all_qs:
+                for q in all_qs:
+                    q["score"] = self._dom_score(q)
+                hot_qs = [q for q in all_qs if q.get("is_hot")]
+                normal_qs = [q for q in all_qs if not q.get("is_hot")]
+                return all_qs, hot_qs, normal_qs
+            log.warning(f"  推荐页解析为空（第 {attempt + 1}/"
+                        f"{retries + 1} 次），等待后重试")
+            time.sleep(3)
+        return None, None, None
 
-        all_qs = parse_recommend_questions(lx, ty, rx, by)
+    @staticmethod
+    def _dom_score(q):
+        """DOM 卡片评分：主信号×(次信号+1)，热度标签 ×2。
+
+        两种候选页信号不同，自适应：
+          - 创作中心推荐页：关注/回答（followers/answers）
+          - 首页推荐流：赞/评论（likes/comments）
+        含义一致——互动越强越优先。"""
+        main = q.get("likes") or q.get("followers") or 0
+        sec = q.get("comments") or q.get("answers") or 0
+        score = main * (sec + 1)
+        if q.get("is_hot"):
+            score *= 2
+        return score
+
+    def _select_auto(self, browser):
+        """全自动选题：DOM 解析 → 热度检测 → 规则筛选 → 评分选最优。
+
+        筛选为空（整页无故事类问题）时滚动推荐页扩池重扫，最多
+        MAX_SELECT_SCREENS 屏；仍无命中则明确报错——绝不静默选非
+        故事热门话题（线上曾因此选到「美伊战争」）。
+        """
+        from applications.zhihu_story.config import (
+            ENABLE_STORY_FILTER, MAX_SELECT_SCREENS)
+
+        all_qs, hot_qs, normal_qs = self._scan_recommend(browser)
         if not all_qs:
-            return None, None, None
+            raise RuntimeError(
+                "推荐页 DOM 解析为空（登录态/网络/页面结构，可重试）")
 
-        self._scan_hot_labels(all_qs, lx, rx, ty, by)
-
-        hot_qs = [q for q in all_qs if q['is_hot']]
-        normal_qs = [q for q in all_qs if not q['is_hot']]
-
-        return all_qs, hot_qs, normal_qs
-
-    def _select_auto(self, lx, rx, ty, by):
-        """全自动选题：OCR 解析 → 飙升检测 → 规则筛选 → 评分选最优"""
-        from config import (
-            WAIT_QUESTION_ENTER, WAIT_ANSWER_LOAD_TRIGGER, WAIT_AFTER_HOME
-        )
-        from config import random_mouse_duration
-        from desktop_utils import grab_current_url
-
-        all_qs, hot_qs, normal_qs = self._scan_recommend_page(lx, rx, ty, by)
-        if not all_qs:
-            raise RuntimeError("推荐页解析失败")
-
-        log.info(f"  OCR 解析到 {len(all_qs)} 个问题"
+        log.info(f"  DOM 解析到 {len(all_qs)} 个问题"
                  f"（飙升 {len(hot_qs)} / 普通 {len(normal_qs)}）")
-        for i, q in enumerate(all_qs):
-            hot_flag = " [飙升]" if q['is_hot'] else ""
+        for i, q in enumerate(all_qs[:15]):
+            hot_flag = " [飙升]" if q.get("is_hot") else ""
+            sig = (f"赞={q.get('likes')} 评={q.get('comments')}"
+                   if q.get("likes") is not None else
+                   f"关注={q.get('followers')} 答={q.get('answers')}")
             log.info(f"    {i+1}. {q['title'][:35]}{hot_flag} "
-                     f"score={q['score']:.0f} "
-                     f"click=({q['click_x']},{q['click_y']})")
+                     f"score={q['score']:.0f} {sig}")
 
         best = self._pick_best(all_qs, hot_qs, normal_qs)
+
+        # 筛选为空 → 滚动扩池重扫（瀑布流要滚动才渲染更多卡片）
+        seen = {q["href"] for q in all_qs}
+        screen = 0
+        while (best is None and ENABLE_STORY_FILTER
+               and screen < MAX_SELECT_SCREENS):
+            screen += 1
+            log.warning(f"  规则筛选无命中，滚动第 {screen}/"
+                        f"{MAX_SELECT_SCREENS} 屏找故事类问题")
+            browser.scroll_feed()
+            fresh = [q for q in browser.get_recommend_questions(max_cards=60)
+                     if q.get("href") not in seen]
+            if not fresh:
+                continue
+            seen.update(q["href"] for q in fresh)
+            for q in fresh:
+                q["score"] = self._dom_score(q)
+            all_qs = all_qs + fresh
+            hot_qs = hot_qs + [q for q in fresh if q.get("is_hot")]
+            normal_qs = normal_qs + [q for q in fresh
+                                     if not q.get("is_hot")]
+            best = self._pick_best(all_qs, hot_qs, normal_qs)
+
+        if best is None:
+            raise RuntimeError(
+                "推荐页扫描多屏均未发现故事类问题（关键词白名单无"
+                "命中）。可重试（推荐页内容会刷新），或把 "
+                "QUESTION_SELECT_MODE 改为 manual 手动选题。")
 
         log.info("")
         log.info("最终候选（前5）：")
         final_pool = hot_qs if hot_qs else all_qs
-        final_pool.sort(key=lambda q: q['score'], reverse=True)
+        final_pool.sort(key=lambda q: q["score"], reverse=True)
         for i, q in enumerate(final_pool[:5]):
-            hot = " 🔥飙升" if q['is_hot'] else ""
-            story = " [故事]" if q.get('is_story') else ""
+            hot = " [飙升]" if q.get("is_hot") else ""
+            story = " [故事]" if q.get("is_story") else ""
             marker = " ← 选择" if q is best else ""
+            sig = (f"赞={q.get('likes')} 评={q.get('comments')}"
+                   if q.get("likes") is not None else
+                   f"关注={q.get('followers')} 答={q.get('answers')}")
             log.info(f"  {i+1}. {q['title'][:40]}{hot}{story}{marker}")
-            log.info(f"     {q['views']:.0f}浏览 {q['answers']:.0f}回答 "
-                     f"{q['followers']:.0f}关注 score={q['score']:.0f}")
+            log.info(f"     {sig} score={q['score']:.0f}")
 
         log.info("")
         log.info(f"✓ 最终选择：{best['title'][:50]}...")
-        log.info(f"  点击坐标：({best['click_x']}, {best['click_y']})")
+        browser.open_question(best["href"])
+        return best["href"]
 
-        pyautogui.click(best['click_x'], best['click_y'],
-                        duration=random_mouse_duration())
-        time.sleep(WAIT_QUESTION_ENTER)
-
-        log.info("触发回答加载（PageDown）...")
-        pyautogui.press('pagedown')
-        time.sleep(WAIT_ANSWER_LOAD_TRIGGER)
-        pyautogui.hotkey('ctrl', 'Home')
-        time.sleep(WAIT_AFTER_HOME)
-        return grab_current_url()
-
-    def _select_manual(self, lx, rx, ty, by):
-        """手动选题：OCR 解析供参考，用户自行点击"""
-        from desktop_utils import wait_for_user, grab_current_url
-        from config import WAIT_ANSWER_LOAD_TRIGGER, WAIT_AFTER_HOME
-
-        all_qs, hot_qs, normal_qs_raw = self._scan_recommend_page(lx, rx, ty, by)
+    def _select_manual(self, browser):
+        """手动选题：DOM 解析供参考，输入编号进入（无需鼠标）。"""
+        all_qs, hot_qs, normal_qs = self._scan_recommend(browser)
+        if not all_qs:
+            raise RuntimeError(
+                "推荐页 DOM 解析为空（登录态/网络/页面结构，可重试）")
 
         # 规则筛选（替代 LLM 筛选）
-        normal_qs_filtered = self._apply_story_filter(normal_qs_raw or [])
+        normal_filtered = self._apply_story_filter(normal_qs) or normal_qs
+        candidates = hot_qs + normal_filtered
+        candidates.sort(key=lambda q: (bool(q.get("is_hot")), q["score"]),
+                        reverse=True)
 
-        if hot_qs:
-            log.info("  🔥 飙升问题（优先）：")
-            for i, q in enumerate(hot_qs):
-                story = " [故事]" if q.get('is_story') else ""
-                log.info(f"    {i+1}. {q['title'][:40]} 🔥{story} | "
-                         f"{q['views']:.0f}浏览 {q['answers']:.0f}回答")
+        log.info("  候选问题（按热度/评分排序）：")
+        for i, q in enumerate(candidates[:15]):
+            hot = " [飙升]" if q.get("is_hot") else ""
+            story = " [故事]" if q.get("is_story") else ""
+            log.info(f"    {i+1}. {q['title'][:40]}{hot}{story} "
+                     f"| 赞={q.get('likes')} 评={q.get('comments')}")
 
-        # 展示普通问题：优先用筛选结果，被清空则回退展示原始列表
-        display_qs = normal_qs_filtered if normal_qs_filtered else normal_qs_raw
-        if display_qs:
-            log.info("  普通问题：")
-            for i, q in enumerate(display_qs[:5]):
-                story = " [故事]" if q.get('is_story') else ""
-                log.info(f"    {i+1}. {q['title'][:40]}{story} | "
-                         f"{q['views']:.0f}浏览 {q['answers']:.0f}回答")
-
-        if hot_qs:
-            log.info("  💡 建议优先选择飙升问题")
-
-        log.info(">>> 请手动选择问题并点击进入。")
-        wait_for_user("选好后按 Enter >> ", auto_focus=True)
-
-        log.info("触发回答加载（PageDown）...")
-        pyautogui.press('pagedown')
-        time.sleep(WAIT_ANSWER_LOAD_TRIGGER)
-        pyautogui.hotkey('ctrl', 'Home')
-        time.sleep(WAIT_AFTER_HOME)
-        return grab_current_url()
-
-    def _scan_hot_labels(self, questions, lx, rx, ty, by):
-        """独立扫描屏幕上的飙升/火爆标签并补标到对应问题"""
-        from ocr_utils import find_text_on_screen
-
-        left_col_right = lx + int((rx - lx) * 0.55)
-        extend_left = max(lx - 100, 0)
-
-        for keyword in ["飙升", "火爆", "热门"]:
-            pos = find_text_on_screen(
-                keyword,
-                region=(extend_left, ty,
-                        left_col_right - extend_left, by - ty)
-            )
-            if pos:
-                log.info(f"  独立扫描发现「{keyword}」标签 "
-                         f"at ({pos[0]}, {pos[1]})")
-                for q in questions:
-                    if abs(pos[1] - q['click_y']) < 50 and not q['is_hot']:
-                        q['is_hot'] = True
-                        log.info(f"  补标飙升：{q['title'][:30]}...")
+        log.info(">>> 请输入要进入的问题编号（回车默认第 1 个）")
+        choice = input(">> ").strip()
+        idx = int(choice) - 1 if choice.isdigit() else 0
+        if not 0 <= idx < len(candidates):
+            raise RuntimeError(f"编号超出范围（1-{len(candidates)}）")
+        best = candidates[idx]
+        browser.open_question(best["href"])
+        return best["href"]
 
     def _apply_story_filter(self, questions):
-        """规则筛选：用关键词白/黑名单过滤非故事类问题（替代 LLM 筛选）。"""
+        """规则筛选：用关键词白名单过滤非故事类问题（替代 LLM 筛选）。"""
         if not questions:
             return questions
-        from config import ENABLE_STORY_FILTER
+        from applications.zhihu_story.config import (
+            ENABLE_STORY_FILTER, STORY_INCLUDE_KEYWORDS)
         if not ENABLE_STORY_FILTER:
-            return questions
-
-        try:
-            from applications.zhihu_story.config import STORY_INCLUDE_KEYWORDS
-        except ImportError:
             return questions
 
         filtered = []
         for q in questions:
-            title = q.get('title', '')
+            title = q.get("title", "")
             if any(kw in title for kw in STORY_INCLUDE_KEYWORDS):
-                q['is_story'] = True
+                q["is_story"] = True
                 filtered.append(q)
 
         if filtered:
@@ -214,82 +234,51 @@ class ZhihuWorkflow(WorkflowBase):
         return filtered
 
     def _pick_best(self, all_questions, hot_questions, normal_questions):
-        """从候选中选出最优问题"""
-        from config import ENABLE_STORY_FILTER
+        """从候选中选出最优问题；无合格候选返回 None（绝不回退）。
+
+        ★ 规则筛选强制生效：筛选为空时不能回退到未筛选列表——否则
+        会选到「美伊战争」这类与故事写作无关的热门话题（线上翻车
+        正是这个回退：日志「规则筛选后无可用问题」后按分数选了
+        美伊战争）。返回 None 由调用方滚动扩池或明确报错。
+        """
+        from applications.zhihu_story.config import ENABLE_STORY_FILTER
+
+        def keep(qs):
+            return self._apply_story_filter(qs) if ENABLE_STORY_FILTER else qs
 
         if hot_questions:
             log.info("走飙升优先分支")
-
             if len(hot_questions) == 1:
-                best = hot_questions[0]
-                log.info(f"  唯一飙升问题：{best['title'][:40]}...")
+                log.info(f"  唯一飙升问题：{hot_questions[0]['title'][:40]}...")
+            kept = keep(hot_questions)
+            if kept:
+                kept.sort(key=lambda q: q["score"], reverse=True)
+                return kept[0]
+            log.warning("  飙升问题均被规则排除，回退到普通问题")
+            kept_normal = keep(normal_questions) if normal_questions else []
+            if kept_normal:
+                kept_normal.sort(key=lambda q: q["score"], reverse=True)
+                return kept_normal[0]
+            return None
 
-                if ENABLE_STORY_FILTER:
-                    filtered_hot = self._apply_story_filter(hot_questions)
-                    if filtered_hot:
-                        log.info("  ✓ 规则确认可写故事")
-                        best = filtered_hot[0]
-                    else:
-                        log.warning("  飙升问题被规则排除，回退到普通问题")
-                        if normal_questions:
-                            filtered_normal = self._apply_story_filter(normal_questions)
-                            if filtered_normal:
-                                filtered_normal.sort(
-                                    key=lambda q: q['score'], reverse=True
-                                )
-                                best = filtered_normal[0]
-                            else:
-                                best = all_questions[0]
-                        else:
-                            best = hot_questions[0]
-            else:
-                log.info(f"  {len(hot_questions)} 个飙升问题，评分选最优")
-                filtered = self._apply_story_filter(hot_questions)
-                if filtered:
-                    hot_questions = filtered
-                hot_questions.sort(
-                    key=lambda q: q['score'], reverse=True
-                )
-                best = hot_questions[0]
-        else:
-            log.info("无飙升，走综合评分分支")
-            candidates = self._apply_story_filter(all_questions)
-            if not candidates:
-                candidates = all_questions
-            candidates.sort(key=lambda q: q['score'], reverse=True)
-            best = candidates[0]
-
-        return best
+        log.info("无飙升，走综合评分分支")
+        kept = keep(all_questions)
+        if not kept:
+            log.info("  规则筛选后无可用问题")
+            return None
+        kept.sort(key=lambda q: q["score"], reverse=True)
+        return kept[0]
 
     # ============================================================
-    # 步骤2：提取回答
+    # 步骤2：提取回答（DOM 主通道 + UIA/OCR 降级）
     # ============================================================
 
-    def _check_question_answerable(self):
+    def _extract_answer_with_fallback(self):
+        """降级通道：UIA 首答 → OCR 滚屏（DOM 主通道失败时启用）。
+
+        注意：此通道读取屏幕，需要 playwright Edge 窗口可见。
         """
-        快速 OCR 检测当前问题页面是否可回答。
-
-        在耗时较长的 extract_zhihu_question_and_answer 之前调用，
-        避免在不可回答的问题上浪费采集时间。
-
-        检测逻辑：
-        - 全屏检测「撤销删除」→ 曾删过回答，绝对不能回答 → 返回 False
-        - 否则默认可回答 → 返回 True（「写回答」可能因字体/颜色/遮挡被 OCR 漏检）
-
-        返回: (can_answer: bool, reason: str)
-        """
-        from ocr_utils import find_text_on_screen
-
-        # 全屏检测「撤销删除」——唯一硬信号，一旦出现绝对不能回答
-        pos = find_text_on_screen("撤销删除")
-        if pos:
-            return False, "检测到「撤销删除」——此问题下曾删除过回答，跳过"
-
-        return True, "未检测到「撤销删除」，默认可回答"
-
-    def _extract_answer_with_fallback(self, left_x, right_x, top_y, bottom_y):
-        """优先读取已渲染的 UIA 首答；不完整时回退到旧 OCR 滚屏。"""
-        from config import (
+        from applications.zhihu_story.config import (
             ENABLE_UIA_ANSWER_EXTRACTION,
             UIA_ANSWER_WAIT_TIMEOUT,
             UIA_ANSWER_POLL_INTERVAL,
@@ -297,117 +286,135 @@ class ZhihuWorkflow(WorkflowBase):
             MAX_ANSWER_RETRIES,
             ENABLE_MATERIAL_LIKES_GATE,
         )
+        from applications.zhihu_story.extractors import (
+            UiaAnswerExtractor,
+            OcrAnswerExtractor,
+            FallbackAnswerExtractor,
+        )
+        from desktop_utils import get_bounds
 
+        primary = None
         if ENABLE_UIA_ANSWER_EXTRACTION:
-            try:
-                from applications.zhihu_story.a11y_probe import (
-                    extract_live_primary_answer,
-                )
-                title, answer, footer, reason = extract_live_primary_answer(
-                    min_length=MIN_ANSWER_LENGTH,
-                    wait_timeout=UIA_ANSWER_WAIT_TIMEOUT,
-                    poll_interval=UIA_ANSWER_POLL_INTERVAL,
-                )
-                likes_missing = (
-                    ENABLE_MATERIAL_LIKES_GATE
-                    and (not footer or footer.get("likes") is None)
-                )
-                if title and answer and not likes_missing:
-                    log.info(
-                        "  UIA 首答采集成功：%s 字符，赞同=%s",
-                        len(answer), footer.get("likes") if footer else None,
-                    )
-                    return title, answer, footer
-                if likes_missing:
-                    reason = "UIA 未读取到赞同数，转 OCR 保底"
-                log.info("  UIA 首答未采用：%s，回退 OCR 滚屏", reason)
-            except Exception as exc:
-                log.warning("  UIA 首答采集异常，回退 OCR：%s", exc)
-
-        from ocr_utils import extract_zhihu_question_and_answer
-        return extract_zhihu_question_and_answer(
-            left_x, right_x, top_y, bottom_y,
+            primary = UiaAnswerExtractor(
+                min_length=MIN_ANSWER_LENGTH,
+                wait_timeout=UIA_ANSWER_WAIT_TIMEOUT,
+                poll_interval=UIA_ANSWER_POLL_INTERVAL,
+            )
+        lx, rx, ty, by = get_bounds()
+        fallback = OcrAnswerExtractor(
+            lx, rx, ty, by,
             min_length=MIN_ANSWER_LENGTH,
             max_retries=MAX_ANSWER_RETRIES,
         )
+        extractor = FallbackAnswerExtractor(
+            primary, fallback, require_likes=ENABLE_MATERIAL_LIKES_GATE
+        )
+        return extractor.extract()
 
     def extract_content(self, fast_mode=False):
-        """OCR 提取知乎问题标题和最佳回答"""
-        from config import MIN_ANSWER_LENGTH, WAIT_BEFORE_OCR
-        from desktop_utils import focus_edge, get_bounds
-        from config import WAIT_FOCUS_SETTLE
+        """DOM 提取知乎问题标题和首答。
 
-        log.info("=" * 50)
-        log.info("步骤 2：自动提取标题和回答")
-        log.info("=" * 50)
+        主通道：check_answerable（DOM 检测「撤销删除」）+
+        get_primary_answer（DOM 提取正文与互动数据）。
 
-        lx, rx, ty, by = get_bounds()
-
-        focus_edge()
-        pyautogui.hotkey('ctrl', 'Home')
-        time.sleep(WAIT_BEFORE_OCR)
-
-        # ★ 先快速检测本问题是否可回答，避免在不可回答的问题上浪费采集时间
-        can_answer, reason = self._check_question_answerable()
-        if not can_answer:
-            raise RuntimeError(f"问题不可回答：{reason}")
-
-        title, answer, footer = self._extract_answer_with_fallback(
-            lx, rx, ty, by
+        首答过短或问题不可回答时重新选题再试（MAX_TOPIC_RETRY 次），
+        而不是直接降级 OCR——本机 OCR 未校准，降级只在 DOM 多次尝试
+        全部失败后作为最后手段。
+        """
+        from applications.zhihu_story.config import (
+            MIN_ANSWER_LENGTH,
+            ENABLE_DOM_ANSWER_EXTRACTION,
         )
+        from applications.zhihu_story.browser_adapter import (
+            normalize_question_url)
+
+        log.info("=" * 50)
+        log.info("步骤 2：自动提取标题和回答（DOM 通道）")
+        log.info("=" * 50)
+
+        browser = self._browser()
+        MAX_TOPIC_RETRY = 3
+
+        for attempt in range(MAX_TOPIC_RETRY + 1):
+            if attempt > 0:
+                log.warning(f"  首答过短或不可回答，重新选题"
+                            f"（第 {attempt}/{MAX_TOPIC_RETRY} 次）")
+                self.select_topic()
+            # 确保当前停在问题页（幂等重进，防止页面被外部跳转）
+            url = normalize_question_url(browser.page.url)
+            if url:
+                browser.open_question(url)
+
+            # ★ 先快速检测本问题是否可回答（DOM 替代 OCR「撤销删除」）
+            try:
+                can_answer, reason = browser.check_answerable()
+            except Exception as exc:
+                # 页面异常（风控/空壳/超时）视为不可判定，重新选题
+                log.warning(f"  可回答性检测异常：{exc}")
+                continue
+            if not can_answer:
+                log.warning(f"  问题不可回答：{reason}")
+                continue
+
+            if ENABLE_DOM_ANSWER_EXTRACTION:
+                try:
+                    data = browser.get_primary_answer(min_length=1)
+                except Exception as exc:
+                    log.warning(f"  DOM 提取异常：{exc}，重新选题")
+                    continue
+                answer = (data or {}).get("answer") or ""
+                if len(answer) >= MIN_ANSWER_LENGTH:
+                    title = (data or {}).get("title") or ""
+                    footer = (data or {}).get("footer") or {}
+                    # ★ 返回最终实际提取的问题 URL：不可回答重选题后
+                    # 不能沿用首次选题的 URL（否则发布导航到被跳过的题）
+                    final_url = normalize_question_url(browser.page.url) or url
+                    log.info(f"提取成功！标题：{title[:50]}... | "
+                             f"回答：{len(answer)}字符")
+                    if footer:
+                        log.info(f"  footer: 赞={footer.get('likes')} "
+                                 f"评={footer.get('comments')} "
+                                 f"藏={footer.get('collects')} "
+                                 f"喜={footer.get('hearts')} "
+                                 f"发表={footer.get('publish_time')}")
+                    else:
+                        log.info("  footer 未采集（不影响单条流程）")
+                    return title, answer, footer, final_url
+                log.warning(f"  首答过短（{len(answer)} 字 < "
+                            f"{MIN_ANSWER_LENGTH}），尝试下一题")
+            else:
+                break  # DOM 提取被显式关闭，走 OCR 降级
+
+        # DOM 多次尝试全部失败，最后才降级 UIA/OCR 屏幕通道
+        log.warning("  DOM 通道多次尝试未获合格首答，降级 UIA/OCR 屏幕通道")
+        title, answer, footer = self._extract_answer_with_fallback()
 
         if not title or not answer or len(answer) < MIN_ANSWER_LENGTH:
             raise RuntimeError(
                 f"提取失败：标题={len(title or '')}字 "
-                f"回答={len(answer or '')}字"
-            )
+                f"回答={len(answer or '')}字")
 
         log.info(f"提取成功！标题：{title[:50]}... | "
                  f"回答：{len(answer)}字符")
-        if footer:
-            log.info(f"  footer: 赞={footer.get('likes')} "
-                     f"评={footer.get('comments')} "
-                     f"藏={footer.get('collects')} "
-                     f"喜={footer.get('hearts')} "
-                     f"发表={footer.get('publish_time')}")
-        else:
-            log.info("  footer 未采集（不影响单条流程）")
-        focus_edge()
-        pyautogui.hotkey('ctrl', 'Home')
-        time.sleep(WAIT_FOCUS_SETTLE)
-        return title, answer, footer
+        final_url = normalize_question_url(browser.page.url) or url
+        return title, answer, footer, final_url
 
     # ============================================================
-    # 步骤4：发布到知乎
+    # 步骤4：发布到知乎（DOM）
     # ============================================================
 
     def publish(self, story, title, url, md_path=None):
-        """导入故事到知乎编辑器"""
-        from config import (
-            WAIT_ZHIHU_PAGE_LOAD, WAIT_WRITE_ANSWER_CLICK,
-            WAIT_DRAFT_SAVE, WAIT_FOCUS_SETTLE, WAIT_AFTER_HOME,
-            WAIT_IMPORT_MENU_SETTLE, WAIT_IMPORT_DOC_PANEL,
-            WAIT_UPLOAD_DIALOG_OPEN, WAIT_FILE_PATH_PASTE,
-            WAIT_FILE_CONFIRM, WAIT_DOC_IMPORT_DONE,
-            WAIT_FALLBACK_CLOSE_DIALOG,
-            OCR_CLICK_WRITE_ANSWER_RETRIES, OCR_CLICK_WRITE_ANSWER_WAIT,
-            WAIT_WRITE_ANSWER_RETRY_HOME,
-            OCR_CLICK_IMPORT_RETRIES, OCR_CLICK_IMPORT_WAIT,
-            OCR_CLICK_MORE_RETRIES, OCR_CLICK_MORE_WAIT,
-            OCR_CLICK_IMPORT_DOC_RETRIES, OCR_CLICK_IMPORT_DOC_WAIT,
-            OCR_CLICK_UPLOAD_RETRIES, OCR_CLICK_UPLOAD_WAIT
-        )
-        from desktop_utils import (
-            focus_edge, navigate_to_url, paste_text,
-            ocr_click_text, get_bounds
-        )
-        from config import random_mouse_duration
+        """DOM 发布：写回答 → 编辑器直接写入故事全文。
 
+        ★ 不采用导入文档上传：上传 API 全 200 但服务端草稿不更新
+        （知乎程序化导入落盘不可靠，仅空草稿时偶发成功）。编辑器
+        直接写入会触发自动保存，成功判定轮询服务端草稿 API（可验证）。
+        """
         log.info("=" * 50)
-        log.info("步骤 4：导入故事到知乎")
+        log.info("步骤 4：发布故事到知乎（DOM 通道）")
         log.info("=" * 50)
 
-        # 准备 .md 文件
+        # 保存 .md 留档（供人工核对/重发）
         if md_path and os.path.exists(md_path):
             md_abs_path = os.path.abspath(md_path)
             log.info(f"使用已有文件：{md_abs_path}")
@@ -415,180 +422,52 @@ class ZhihuWorkflow(WorkflowBase):
             md_abs_path = self.save_story_file(story)
             log.info(f"故事已保存：{md_abs_path}")
 
-        focus_edge()
-        time.sleep(WAIT_FOCUS_SETTLE)
-        navigate_to_url(url)
-        time.sleep(WAIT_ZHIHU_PAGE_LOAD)
-        pyautogui.hotkey('ctrl', 'home')
-        time.sleep(WAIT_AFTER_HOME)
+        browser = self._browser()
+        self._require_login(browser)
+        # 发布前强制导航一次：生成耗时数分钟，页面可能已滞留/漂移；
+        # 一次性定位到目标 URL（幂等跳过只用于提取环节的重进）
+        browser.open_question(url, force=True)
 
-        # 定位「写回答」
-        log.info("定位「写回答」...")
-        write_found = ocr_click_text(
-            "写回答",
-            retries=OCR_CLICK_WRITE_ANSWER_RETRIES,
-            wait=OCR_CLICK_WRITE_ANSWER_WAIT
-        )
-        if not write_found:
-            log.warning('未定位"写回答"，回到顶部快速重试一次')
-            pyautogui.hotkey('ctrl', 'home')
-            time.sleep(WAIT_WRITE_ANSWER_RETRY_HOME)
-            write_found = ocr_click_text(
-                "写回答",
-                retries=OCR_CLICK_WRITE_ANSWER_RETRIES,
-                wait=OCR_CLICK_WRITE_ANSWER_WAIT
-            )
-        if not write_found:
-            raise RuntimeError('无法定位"写回答"按钮')
-        time.sleep(WAIT_WRITE_ANSWER_CLICK)
+        saved = browser.publish_story(story, question_url=url)
+        if not saved:
+            raise RuntimeError(
+                "编辑器写入后服务端草稿未在等待窗口内确认"
+                "（请打开浏览器人工确认草稿后手动发布）")
+        log.info("  服务端草稿已确认（编辑器写入通道）")
 
-        # 定位「导入」
-        log.info("定位工具栏「导入」...")
-        import_found = ocr_click_text(
-            "导入",
-            retries=OCR_CLICK_IMPORT_RETRIES,
-            wait=OCR_CLICK_IMPORT_WAIT
-        )
-        if not import_found:
-            log.warning('未找到"导入"，尝试寻找"更多"')
-            ocr_click_text(
-                "更多",
-                retries=OCR_CLICK_MORE_RETRIES,
-                wait=OCR_CLICK_MORE_WAIT
-            )
-            time.sleep(WAIT_IMPORT_MENU_SETTLE)
-            import_found = ocr_click_text(
-                "导入",
-                retries=OCR_CLICK_IMPORT_RETRIES,
-                wait=OCR_CLICK_IMPORT_WAIT
-            )
-
-        if not import_found:
-            log.warning("导入按钮未找到，降级为直接粘贴方式")
-            self._fallback_paste(story)
-            time.sleep(WAIT_DRAFT_SAVE)
-            log.info(f"草稿已保存，完成（粘贴模式）："
-                     f"「{title[:30]}...」")
-            return
-
-        time.sleep(WAIT_IMPORT_MENU_SETTLE)
-
-        # 定位「导入文档」
-        log.info("定位「导入文档」...")
-        ocr_click_text(
-            "导入文档",
-            retries=OCR_CLICK_IMPORT_DOC_RETRIES,
-            wait=OCR_CLICK_IMPORT_DOC_WAIT
-        )
-        time.sleep(WAIT_IMPORT_DOC_PANEL)
-
-        # 定位上传区域
-        log.info("定位上传区域...")
-        upload_found = False
-        for t in ["点击选择本地文档", "选择本地文档", "本地文档", "拖动文件"]:
-            if ocr_click_text(t, retries=OCR_CLICK_UPLOAD_RETRIES,
-                              wait=OCR_CLICK_UPLOAD_WAIT,
-                              log_name=f"上传区域:{t}"):
-                upload_found = True
-                break
-
-        if not upload_found:
-            log.warning("未找到上传区域，降级为直接粘贴")
-            pyautogui.press('escape')
-            time.sleep(WAIT_FALLBACK_CLOSE_DIALOG)
-            self._fallback_paste(story)
-            time.sleep(WAIT_DRAFT_SAVE)
-            log.info(f"草稿已保存，完成（粘贴模式）："
-                     f"「{title[:30]}...」")
-            return
-
-        # 文件选择对话框
-        log.info("等待文件选择对话框...")
-        time.sleep(WAIT_UPLOAD_DIALOG_OPEN)
-        log.info(f"输入文件路径：{md_abs_path}")
-        import pyperclip
-        pyautogui.hotkey('ctrl', 'a')
-        time.sleep(WAIT_FILE_CONFIRM)
-        pyperclip.copy(md_abs_path)
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(WAIT_FILE_PATH_PASTE)
-        pyautogui.press('enter')
-        time.sleep(WAIT_FILE_CONFIRM)
-        pyautogui.press('enter')
-
-        log.info(f"等待文件导入完成...（{WAIT_DOC_IMPORT_DONE}s）")
-        time.sleep(WAIT_DOC_IMPORT_DONE)
-
-        log.info(f"等待草稿保存...（{WAIT_DRAFT_SAVE}s）")
-        time.sleep(WAIT_DRAFT_SAVE)
-        log.info(f"草稿已保存，完成（导入模式）："
-                 f"「{title[:30]}...」")
-
-    def _fallback_paste(self, story):
-        """降级：直接粘贴内容到编辑器"""
-        from config import WAIT_EDITOR_CLICK, WAIT_AFTER_PASTE
-        from desktop_utils import paste_text, get_bounds
-        from config import random_mouse_duration
-
-        log.info("降级：直接粘贴到编辑器...")
-        lx, rx, ty, by = get_bounds()
-        pyautogui.click((lx + rx) // 2, (ty + by) // 2,
-                        duration=random_mouse_duration())
-        time.sleep(WAIT_EDITOR_CLICK)
-        paste_text(story)
-        time.sleep(WAIT_AFTER_PASTE)
+        # 不再收尾 reload：草稿已落盘，刷新只会制造一次多余的页面
+        # 加载（对用户观感就是「又跳了一下」），且破坏验收时的编辑器态
+        log.info(f"草稿已保存，完成：「{title[:30]}...」")
 
     # ============================================================
-    # 批量素材收集
+    # 批量素材收集（DOM 通道）
     # ============================================================
 
     def collect_materials_batch(self, target):
         """
-        批量素材收集：逐屏下翻 + 推荐页刷新循环。
+        批量素材收集：滚动推荐页 + 新开 tab 提取（DOM 通道）。
 
-        流程：
+        流程（与原 OCR 版结构一致，仅替换操作方式）：
         1. 打开推荐页
-        2. OCR → 规则筛选 → 取前 N 个进入提取
-        3. PageDown 翻下一屏，重复步骤 2
-        4. 翻满 SCROLLS_PER_REFRESH 轮后重新打开推荐页刷新内容
+        2. DOM 解析 → 规则筛选 → 取前 N 个新开 tab 提取
+        3. 滚动下一屏，重复步骤 2
+        4. 滚满 SCROLLS_PER_REFRESH 轮后重新打开推荐页刷新内容
         5. 循环直到采够 target 篇
         """
-        from ocr_utils import parse_recommend_questions
-        from config import (
-            ZHIHU_RECOMMEND_URL,
-            MIN_ANSWER_LENGTH, MAX_ANSWER_RETRIES,
-            WAIT_RECOMMEND_PAGE, WAIT_QUESTION_ENTER,
-            WAIT_ZHIHU_PAGE_LOAD, BATCH_QUESTIONS_PER_PAGE,
-            WAIT_FOCUS_SETTLE, WAIT_NEXT_SCREEN, WAIT_CLOSE_TAB,
-            WAIT_ANSWER_LOAD_TRIGGER, WAIT_AFTER_HOME,
-            ENABLE_MATERIAL_LIKES_GATE, MATERIAL_MIN_LIKES,
-            MATERIAL_UNKNOWN_LIKES_POLICY, MAX_TOTAL_ATTEMPTS
-        )
-        try:
-            from applications.zhihu_story.config import SCROLLS_PER_REFRESH
-        except ImportError:
-            SCROLLS_PER_REFRESH = 5
-        from config import random_mouse_duration
-        from desktop_utils import (
-            focus_edge, navigate_to_url, close_current_tab,
-            grab_current_url, get_bounds
+        from applications.zhihu_story.config import (
+            MIN_ANSWER_LENGTH,
+            BATCH_QUESTIONS_PER_PAGE,
+            SCROLLS_PER_REFRESH,
+            ENABLE_MATERIAL_LIKES_GATE,
+            MATERIAL_MIN_LIKES,
+            MATERIAL_UNKNOWN_LIKES_POLICY,
+            MAX_TOTAL_ATTEMPTS,
+            ENABLE_DOM_ANSWER_EXTRACTION,
         )
 
-        lx, rx, ty, by = get_bounds()
-
-        # ★ 初始化异步配方提炼（采集过程中边采边炼）
-        try:
-            from config import KB_ENABLE
-        except ImportError:
-            KB_ENABLE = False
-        if KB_ENABLE:
-            try:
-                from config import LLM_API_KEY as _api_key_cfg
-                if _api_key_cfg and _api_key_cfg != "密":
-                    self._init_async_recipe_extraction()
-                    log.info("  ♻ 异步配方提炼已就绪（边采边炼）")
-            except Exception:
-                pass
+        browser = self._browser()
+        self._require_login(browser)
+        main_page = browser.page
 
         materials = []
         visited_titles = set()
@@ -596,6 +475,16 @@ class ZhihuWorkflow(WorkflowBase):
         total_scrolls = 0
         total_attempts = 0
         unknown_likes_policy = str(MATERIAL_UNKNOWN_LIKES_POLICY).lower()
+
+        def _advance_to_next_screen(page_idx, reason):
+            """当前屏无可采内容时滚动下翻，避免重复解析同一屏。"""
+            if len(materials) >= target:
+                return
+            if page_idx < SCROLLS_PER_REFRESH - 1:
+                log.info(f"  {reason}，翻到下一屏")
+                browser.scroll_feed()
+            else:
+                log.info(f"  {reason}，本轮推荐页扫描结束")
 
         # ── 外层：刷新循环 ──
         while len(materials) < target and total_attempts < MAX_TOTAL_ATTEMPTS:
@@ -605,13 +494,10 @@ class ZhihuWorkflow(WorkflowBase):
                      f"（已采集 {len(materials)}/{target}）")
             log.info(f"{'='*40}")
 
-            focus_edge()
-            time.sleep(WAIT_FOCUS_SETTLE)
-            navigate_to_url(ZHIHU_RECOMMEND_URL)
-            time.sleep(WAIT_RECOMMEND_PAGE)
+            browser.open_recommend_page()
 
-            # ── 内层：逐屏下翻 ──
-            for page in range(SCROLLS_PER_REFRESH):
+            # ── 内层：逐屏滚动 ──
+            for page_idx in range(SCROLLS_PER_REFRESH):
                 if len(materials) >= target:
                     break
                 if total_attempts >= MAX_TOTAL_ATTEMPTS:
@@ -621,63 +507,45 @@ class ZhihuWorkflow(WorkflowBase):
                 log.info(f"\n  ── 第 {total_scrolls} 屏"
                          f"（已采集 {len(materials)}/{target}）──")
 
-                def _advance_to_next_screen(reason):
-                    """当前屏无可采内容时下翻，避免重复 OCR 同一屏。"""
-                    if len(materials) >= target:
-                        return
-                    if page < SCROLLS_PER_REFRESH - 1:
-                        log.info(f"  {reason}，翻到下一屏")
-                        pyautogui.press('pagedown')
-                        time.sleep(WAIT_NEXT_SCREEN)
-                    else:
-                        log.info(f"  {reason}，本轮推荐页扫描结束")
-
-                # OCR 解析当前屏
-                all_questions = parse_recommend_questions(lx, ty, rx, by)
+                # DOM 解析当前屏
+                all_questions = browser.get_recommend_questions(max_cards=60)
                 if not all_questions:
                     log.warning("  未识别到问题")
-                    _advance_to_next_screen("未识别到问题")
+                    _advance_to_next_screen(page_idx, "未识别到问题")
                     continue
-
-                # 飙升补标
-                self._scan_hot_labels(all_questions, lx, rx, ty, by)
 
                 # 去重
                 new_qs = [q for q in all_questions
-                          if q['title'] not in visited_titles]
+                          if q["title"] not in visited_titles]
                 if not new_qs:
                     msg = f"当前屏 {len(all_questions)} 个问题全部已访问"
                     log.info(f"  {msg}")
-                    _advance_to_next_screen(msg)
+                    _advance_to_next_screen(page_idx, msg)
                     continue
 
                 log.info(f"  可见 {len(all_questions)} 个，"
                          f"新问题 {len(new_qs)} 个")
 
-                # 规则筛选
+                # 规则筛选 + 评分排序
                 candidates = self._apply_story_filter(new_qs)
-                candidates.sort(
-                    key=lambda q: (q.get('is_hot', False),
-                                   q.get('score', 0)),
-                    reverse=True
-                )
                 if not candidates:
                     log.info("  筛选后无可用问题")
-                    _advance_to_next_screen("筛选后无可用问题")
+                    _advance_to_next_screen(page_idx, "筛选后无可用问题")
                     continue
+                for q in candidates:
+                    q["score"] = self._dom_score(q)
+                candidates.sort(
+                    key=lambda q: (q.get("is_hot", False), q["score"]),
+                    reverse=True,
+                )
 
                 # 取前 N 个进入提取
-                remaining = target - len(materials)
-                if ENABLE_MATERIAL_LIKES_GATE:
-                    pick = min(BATCH_QUESTIONS_PER_PAGE, len(candidates))
-                else:
-                    pick = min(BATCH_QUESTIONS_PER_PAGE,
-                               len(candidates), remaining)
+                pick = min(BATCH_QUESTIONS_PER_PAGE, len(candidates))
                 to_enter = candidates[:pick]
 
                 log.info(f"  本轮进入 {pick} 个问题：")
                 for i, q in enumerate(to_enter):
-                    hot = " [飙升]" if q.get('is_hot') else ""
+                    hot = " [飙升]" if q.get("is_hot") else ""
                     log.info(f"    {i+1}. {q['title'][:40]}...{hot}")
 
                 for i, q in enumerate(to_enter):
@@ -688,92 +556,80 @@ class ZhihuWorkflow(WorkflowBase):
                                     f"{MAX_TOTAL_ATTEMPTS}，停止采集")
                         break
 
-                    visited_titles.add(q['title'])
+                    visited_titles.add(q["title"])
                     total_attempts += 1
                     log.info(f"\n  进入 {i+1}/{pick}："
                              f"{q['title'][:40]}...")
 
+                    page_tab = None
                     try:
-                        pyautogui.moveTo(
-                            q['click_x'], q['click_y'],
-                            duration=random_mouse_duration()
-                        )
-                        time.sleep(WAIT_FOCUS_SETTLE / 2)
-                        pyautogui.click(button='middle')
-                        time.sleep(WAIT_QUESTION_ENTER)
+                        # 新开 tab 提取（替代 中键+ctrl+Tab）
+                        page_tab = browser.open_new_page(q["href"])
+                        browser.switch_page(page_tab)
+                        page_tab.wait_for_timeout(2500)
 
-                        pyautogui.hotkey('ctrl', 'Tab')
-                        time.sleep(WAIT_ZHIHU_PAGE_LOAD)
-
-                        pyautogui.press('pagedown')
-                        time.sleep(WAIT_ANSWER_LOAD_TRIGGER)
-                        pyautogui.hotkey('ctrl', 'Home')
-                        time.sleep(WAIT_AFTER_HOME)
-
-                        can_answer, reason = self._check_question_answerable()
+                        can_answer, reason = browser.check_answerable()
                         if not can_answer:
                             log.info(f"  ⏭ {reason}")
                             continue
 
-                        url = grab_current_url()
-                        title, answer, footer = self._extract_answer_with_fallback(
-                            lx, rx, ty, by
-                        )
+                        title, answer, footer = None, None, None
+                        if ENABLE_DOM_ANSWER_EXTRACTION:
+                            data = browser.get_primary_answer(min_length=1)
+                            if data and data.get("answer"):
+                                title = data.get("title")
+                                answer = data.get("answer")
+                                footer = data.get("footer") or {}
 
-                        if (title and answer
+                        if not (title and answer
                                 and len(answer) >= MIN_ANSWER_LENGTH):
-                            likes = None
-                            if footer:
-                                likes = footer.get('likes')
-
-                            if ENABLE_MATERIAL_LIKES_GATE:
-                                if likes is None:
-                                    if unknown_likes_policy == "drop":
-                                        log.info("    ✗ 赞同数未识别，"
-                                                 "按配置跳过素材")
-                                        continue
-                                    log.info("    · 赞同数未识别，按配置保留")
-                                elif likes < MATERIAL_MIN_LIKES:
-                                    log.info("    ✗ 赞同数不足："
-                                             f"{likes} < {MATERIAL_MIN_LIKES}，"
-                                             "跳过素材")
-                                    continue
-
-                            materials.append({
-                                'title': title,
-                                'answer': answer,
-                                'url': url,
-                                'index': len(materials) + 1,
-                                'footer': footer,
-                            })
-                            footer_tag = ""
-                            if footer:
-                                footer_tag = (
-                                    f"｜赞{footer.get('likes', 0)} "
-                                    f"评{footer.get('comments', 0)} "
-                                    f"藏{footer.get('collects', 0)} "
-                                    f"喜{footer.get('hearts', 0)}"
-                                )
-                            log.info(f"    ✓ 素材 {len(materials)}/{target}"
-                                     f"（{len(answer)}字{footer_tag}）")
-                            self._fire_recipe_extraction(
-                                title, answer, len(materials) - 1
-                            )
-                        else:
-                            log.warning(f"    ✗ 提取失败或过短"
+                            log.warning(f"    ✗ DOM 提取失败或过短"
                                         f"（{len(answer or '')}字）")
+                            continue
+
+                        likes = (footer or {}).get("likes")
+                        if ENABLE_MATERIAL_LIKES_GATE:
+                            if likes is None:
+                                if unknown_likes_policy == "drop":
+                                    log.info("    ✗ 赞同数未识别，"
+                                             "按配置跳过素材")
+                                    continue
+                                log.info("    · 赞同数未识别，按配置保留")
+                            elif likes < MATERIAL_MIN_LIKES:
+                                log.info("    ✗ 赞同数不足："
+                                         f"{likes} < {MATERIAL_MIN_LIKES}，"
+                                         "跳过素材")
+                                continue
+
+                        materials.append({
+                            "title": title,
+                            "answer": answer,
+                            "url": q["href"],
+                            "index": len(materials) + 1,
+                            "footer": footer or {},
+                        })
+                        footer_tag = ""
+                        if footer:
+                            footer_tag = (
+                                f"｜赞{footer.get('likes', 0)} "
+                                f"评{footer.get('comments', 0)} "
+                                f"藏{footer.get('collects', 0)} "
+                                f"喜{footer.get('hearts', 0)}"
+                            )
+                        log.info(f"    ✓ 素材 {len(materials)}/{target}"
+                                 f"（{len(answer)}字{footer_tag}）")
 
                     except Exception as e:
                         log.error(f"    ✗ 出错：{e}")
 
                     finally:
-                        close_current_tab()
-                        time.sleep(WAIT_CLOSE_TAB)
+                        if page_tab is not None:
+                            browser.close_page(page_tab)
+                            browser.switch_page(main_page)
 
                 # 本屏提取完毕，翻到下一屏
                 if len(materials) < target and total_attempts < MAX_TOTAL_ATTEMPTS:
-                    pyautogui.press('pagedown')
-                    time.sleep(WAIT_NEXT_SCREEN)
+                    browser.scroll_feed()
 
         log.info(f"\n  素材收集完成：{len(materials)}/{target}"
                  f"（共 {total_scrolls} 屏，"

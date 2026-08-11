@@ -1,10 +1,11 @@
 # ============================================================
-# llm_api.py v2.1 - LLM API 调用模块
+# llm_api.py - LLM API 调用模块
 #
-# 更新：
-# - 支持流式输出（stream=True），生成内容实时打印到终端
-# - clean_story_output() 清洗 LLM 废话前缀/后缀
-# - filter_story_questions() 用 LLM 筛选故事领域问题
+# 职责：LLM 请求/响应（SSE 流式、评分、筛选）、prompt 构建、
+#       长文流水线编排。
+#
+# 纯文本处理（清洗、断句、格式修复、校验、章节拆分）已迁移至
+# core/story_text.py，本模块不再包含文本管线实现。
 #
 # 依赖：pip install requests
 # ============================================================
@@ -17,558 +18,22 @@ import math
 import sys
 import logging
 
+from core.story_text import (
+    clean_story_output,
+    enforce_short_sentences,
+    replace_em_dashes,
+    fix_story_format,
+    validate_story_format,
+    plot_paragraph_distribution,
+    ensure_chapter_complete,
+    normalize_chapter_headers,
+    split_batch_chapters,
+    parse_score_json,
+)
+
 log = logging.getLogger(__name__)
 
-# ============================================================
-# ★ 段落长度阈值（手动调节此值）
-# ============================================================
-# 超过此字数的段落被视为"长段落"
-# 建议根据 plot_paragraph_distribution() 生成的分布图来调整
-# 知乎故事风格参考：短句成段通常 15-40 字，对话+描写约 40-70 字
-# 阈值设为 80 给对话+描写留足余量，避免正常叙事被误判为"文字墙"
-PARA_LENGTH_THRESHOLD = 80
 
-
-# ============================================================
-# 段落长度分布分析 + 绘图
-# ============================================================
-
-def plot_paragraph_distribution(generated_materials, output_dir=None):
-    """
-    对所有已生成的故事做段落长度统计，绘制 KDE 分布图 + 输出统计信息到日志。
-
-    参数：
-        generated_materials: list of dict，每个 dict 包含 'story', 'title', 'index'
-        output_dir: 图片保存目录，默认为脚本同级 output/
-
-    返回：
-        图片保存路径
-    """
-    import os
-    import numpy as np
-
-    if not generated_materials:
-        log.warning("  没有可分析的故事")
-        return None
-
-    # --- 收集数据 ---
-    all_stats = []
-    for m in generated_materials:
-        story = m.get('story', '')
-        if not story:
-            continue
-        paras = [l for l in story.split('\n') if l.strip() and not l.strip().startswith('#')]
-        lengths = [len(p.strip()) for p in paras]
-        if not lengths:
-            continue
-        arr = np.array(lengths)
-        stats = {
-            'index': m.get('index', '?'),
-            'title': m.get('title', '')[:15],
-            'lengths': arr,
-            'median': float(np.median(arr)),
-            'mean': float(np.mean(arr)),
-            'p90': float(np.percentile(arr, 90)),
-            'max': float(np.max(arr)),
-            'total_paras': len(arr),
-            'over_threshold': int(np.sum(arr > PARA_LENGTH_THRESHOLD)),
-            'over_ratio': float(np.mean(arr > PARA_LENGTH_THRESHOLD)),
-        }
-        all_stats.append(stats)
-
-    if not all_stats:
-        return None
-
-    # --- 输出统计到日志 ---
-    log.info(f"\n{'─'*50}")
-    log.info(f"段落长度分析（阈值 {PARA_LENGTH_THRESHOLD} 字）")
-    log.info(f"{'─'*50}")
-    log.info(f"  {'#':>3s}  {'中位':>5s}  {'P90':>5s}  {'最长':>5s}  {'段落数':>5s}  {'超标':>4s}  {'占比':>5s}  标题")
-    log.info(f"  {'---':>3s}  {'---':>5s}  {'---':>5s}  {'---':>5s}  {'---':>5s}  {'---':>4s}  {'---':>5s}  ---")
-
-    for s in sorted(all_stats, key=lambda x: x['index']):
-        flag = '✗' if s['over_ratio'] > 0.10 else ('△' if s['over_ratio'] > 0.05 else '✓')
-        log.info(f"  {s['index']:>3d}  {s['median']:>5.0f}  {s['p90']:>5.0f}  {s['max']:>5.0f}  "
-                 f"{s['total_paras']:>5d}  {s['over_threshold']:>4d}  {s['over_ratio']:>5.0%}  "
-                 f"{flag} {s['title']}")
-
-    # 汇总
-    all_lengths = np.concatenate([s['lengths'] for s in all_stats])
-    log.info(f"\n  全局统计（{len(all_stats)} 篇，共 {len(all_lengths)} 段）：")
-    log.info(f"    中位数={np.median(all_lengths):.0f}  均值={np.mean(all_lengths):.0f}  "
-             f"P75={np.percentile(all_lengths, 75):.0f}  P90={np.percentile(all_lengths, 90):.0f}  "
-             f"P95={np.percentile(all_lengths, 95):.0f}  最大={np.max(all_lengths):.0f}")
-    log.info(f"    超 {PARA_LENGTH_THRESHOLD} 字段落：{np.sum(all_lengths > PARA_LENGTH_THRESHOLD)}/{len(all_lengths)} "
-             f"（{np.mean(all_lengths > PARA_LENGTH_THRESHOLD):.1%}）")
-
-    # --- 绘图 ---
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        from matplotlib.ticker import MaxNLocator
-    except ImportError:
-        log.warning("  matplotlib 未安装，跳过绘图（pip install matplotlib）")
-        return None
-
-    plt.rcParams.update({
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['Microsoft YaHei', 'SimHei', 'Arial', 'Helvetica'],
-        'font.size': 9,
-        'axes.linewidth': 0.8,
-        'axes.edgecolor': '#333333',
-        'axes.labelcolor': '#333333',
-        'xtick.color': '#333333',
-        'ytick.color': '#333333',
-        'figure.dpi': 150,
-    })
-
-    fig, (ax_main, ax_box) = plt.subplots(
-        2, 1, figsize=(10, 7), height_ratios=[3, 1],
-        gridspec_kw={'hspace': 0.25}
-    )
-
-    # -- 上图：KDE 分布 --
-    colors = plt.cm.tab20(np.linspace(0, 1, len(all_stats)))
-
-    for i, s in enumerate(sorted(all_stats, key=lambda x: x['index'])):
-        lengths = s['lengths']
-        # 手动 KDE（高斯核）
-        x_grid = np.linspace(0, min(300, np.max(lengths) + 20), 200)
-        bw = max(np.std(lengths) * 0.4, 3)  # 带宽
-        kde = np.zeros_like(x_grid)
-        for val in lengths:
-            kde += np.exp(-0.5 * ((x_grid - val) / bw) ** 2)
-        kde /= (len(lengths) * bw * np.sqrt(2 * np.pi))
-
-        label = f"#{s['index']} (med={s['median']:.0f})"
-        ax_main.plot(x_grid, kde, color=colors[i], alpha=0.7, linewidth=1.2, label=label)
-
-    # 阈值线
-    ax_main.axvline(x=PARA_LENGTH_THRESHOLD, color='#e74c3c', linestyle='--',
-                     linewidth=1.5, alpha=0.8, label=f'阈值 {PARA_LENGTH_THRESHOLD} 字')
-
-    ax_main.set_xlabel('段落长度（字符数）')
-    ax_main.set_ylabel('密度')
-    ax_main.set_title('各篇故事段落长度分布', fontsize=12, fontweight='bold', pad=10)
-    ax_main.set_xlim(0, min(300, np.percentile(all_lengths, 99) + 20))
-    ax_main.grid(True, alpha=0.3, linewidth=0.5)
-    ax_main.legend(fontsize=7, loc='upper right', ncol=2,
-                    framealpha=0.9, edgecolor='#cccccc')
-
-    # -- 下图：箱线图 --
-    box_data = [s['lengths'] for s in sorted(all_stats, key=lambda x: x['index'])]
-    box_labels = [f"#{s['index']}" for s in sorted(all_stats, key=lambda x: x['index'])]
-
-    try:
-        bp = ax_box.boxplot(box_data, tick_labels=box_labels, vert=False, patch_artist=True,
-                             showfliers=False, widths=0.6,
-                             medianprops=dict(color='#e74c3c', linewidth=1.5),
-                             boxprops=dict(linewidth=0.8))
-    except TypeError:
-        # matplotlib < 3.9 兼容
-        bp = ax_box.boxplot(box_data, labels=box_labels, vert=False, patch_artist=True,
-                             showfliers=False, widths=0.6,
-                             medianprops=dict(color='#e74c3c', linewidth=1.5),
-                             boxprops=dict(linewidth=0.8))
-
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.5)
-
-    ax_box.axvline(x=PARA_LENGTH_THRESHOLD, color='#e74c3c', linestyle='--',
-                    linewidth=1.5, alpha=0.8)
-    ax_box.set_xlabel('段落长度（字符数）')
-    ax_box.set_xlim(ax_main.get_xlim())
-    ax_box.grid(True, axis='x', alpha=0.3, linewidth=0.5)
-    ax_box.set_title('各篇段落长度箱线图', fontsize=10, pad=5)
-
-    plt.tight_layout()
-
-    # 保存
-    if output_dir is None:
-        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
-    os.makedirs(output_dir, exist_ok=True)
-
-    from datetime import datetime
-    filename = f"para_dist_{datetime.now():%Y%m%d_%H%M%S}.png"
-    filepath = os.path.join(output_dir, filename)
-    fig.savefig(filepath, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-
-    log.info(f"\n  分布图已保存：{filepath}")
-    return filepath
-
-
-# ============================================================
-# LLM 输出清洗
-# ============================================================
-
-def clean_story_output(text):
-    """
-    清洗 LLM 生成的故事文本：
-    1. 去除开头的废话（"收到""好的""以下是为您创作的故事"等）
-    2. 去除结尾的废话（"希望您喜欢""如有修改需求"等）
-    3. 去除 DeepSeek R1 的 <think> 标签
-    """
-    if not text:
-        return text
-
-    # 去除 <think>...</think> 标签
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-
-    lines = text.split('\n')
-
-    # --- 去除开头废话 ---
-    start_noise = [
-        re.compile(r'^(收到|好的|明白|了解|没问题|OK|ok)[\s！!。.，,]*$', re.IGNORECASE),
-        re.compile(r'^(以下是|下面是|接下来|我来|让我|现在开始|那么)'),
-        re.compile(r'(为您|给您|为你|给你)(创作|撰写|编写|写作)'),
-        re.compile(r'^(根据您|根据你|按照您|按照你)'),
-        re.compile(r'^[-=*]{3,}$'),  # 分隔线
-    ]
-
-    start_idx = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        is_noise = any(p.search(stripped) for p in start_noise)
-        if is_noise:
-            start_idx = i + 1
-        else:
-            break
-
-    # --- 去除结尾废话 ---
-    end_noise = [
-        re.compile(r'(希望您|希望你|如果您|如果你).*(喜欢|满意|需要|修改)'),
-        re.compile(r'(如有|如需|需要).*(修改|调整|意见|建议)'),
-        re.compile(r'^[-=*]{3,}$'),
-        re.compile(r'(以上就是|以上是|故事到此)'),
-        re.compile(r'(期待您|欢迎).*(反馈|评论|点赞)'),
-    ]
-
-    end_idx = len(lines)
-    for i in range(len(lines) - 1, start_idx - 1, -1):
-        stripped = lines[i].strip()
-        if not stripped:
-            continue
-        is_noise = any(p.search(stripped) for p in end_noise)
-        if is_noise:
-            end_idx = i
-        else:
-            break
-
-    cleaned = '\n'.join(lines[start_idx:end_idx]).strip()
-    if len(cleaned) < len(text) * 0.5 and len(text) > 200:
-        log.warning("清洗后内容大幅缩短，使用原文")
-        return text.strip()
-
-    return cleaned
-
-
-# ============================================================
-# 格式后处理（生成后、检测前自动修复）
-# ============================================================
-
-def enforce_short_sentences(text):
-    """
-    状态机驱动的智能断句：仅在非嵌套区域内对句末标点插入换行。
-
-    避免朴素正则"见到。！？就切"的问题——引号「」、括号（）、
-    方括号【】、书名号《》『』内的标点不会被误切。
-
-    算法：用一个栈追踪嵌套的成对标点。
-    遇到开符号 → 压入对应的闭符号。
-    遇到闭符号 → 若匹配栈顶则弹出。
-    遇到句末标点（。！？）且栈为空 → 在此断句（插入 \\n\\n）。
-    """
-    if not text:
-        return text
-
-    PAIRS = {
-        '「': '」',   # 「 → 」
-        '（': '）',   # （ → ）
-        '【': '】',   # 【 → 】
-        '《': '》',   # 《 → 》
-        '『': '』',   # 『 → 』
-    }
-    SENTENCE_ENDS = {'。', '！', '？'}  # 。！？
-
-    result = []
-    stack = []       # 期望的闭合符号栈
-    i = 0
-    n = len(text)
-
-    while i < n:
-        ch = text[i]
-
-        # 开符号 → 进入嵌套
-        if ch in PAIRS:
-            stack.append(PAIRS[ch])
-            result.append(ch)
-            i += 1
-            continue
-
-        # 闭符号 → 若匹配栈顶则退出嵌套
-        if stack and ch == stack[-1]:
-            stack.pop()
-            result.append(ch)
-            i += 1
-            continue
-
-        # 句末标点且不在嵌套内 → 断句
-        if ch in SENTENCE_ENDS and not stack:
-            result.append(ch)
-            # 检查后续是否已有换行
-            j = i + 1
-            if j < n:
-                if text[j] == '\n':
-                    # 已有换行，确保至少两个
-                    newline_count = 0
-                    while j < n and text[j] == '\n':
-                        newline_count += 1
-                        j += 1
-                    if newline_count == 1:
-                        result.append('\n')  # 补一个 → 双换行
-                    # >=2 个换行时不追加
-                else:
-                    # 没有换行 → 插入双换行
-                    result.append('\n\n')
-            # 文本末尾的标点不需要追加任何东西
-            i += 1
-            continue
-
-        result.append(ch)
-        i += 1
-
-    return ''.join(result)
-
-
-def replace_em_dashes(text):
-    """
-    将非对话区域内的破折号 —— 替换为逗号。
-
-    AI 生成的中文故事常常过度使用 —— 作为插入语连接符，
-    这是最容易被识别的 AI 写作痕迹。对话「」内的 ——
-    （如「等等——」表示打断）予以保留，其余全部替换为 ，。
-    """
-    if not text or '——' not in text:
-        return text
-
-    PAIRS = {
-        '「': '」',
-        '（': '）',
-        '【': '】',
-        '《': '》',
-        '『': '』',
-    }
-
-    result = []
-    stack = []
-    i = 0
-    n = len(text)
-
-    while i < n:
-        ch = text[i]
-
-        if ch in PAIRS:
-            stack.append(PAIRS[ch])
-            result.append(ch)
-            i += 1
-            continue
-
-        if stack and ch == stack[-1]:
-            stack.pop()
-            result.append(ch)
-            i += 1
-            continue
-
-        # 破折号 ——（U+2014 U+2014，两个连续的 em dash）
-        if ch == '—' and i + 1 < n and text[i + 1] == '—' and not stack:
-            result.append('，')
-            i += 2  # 跳过两个字符
-            continue
-
-        # 单个 —— 也处理（有些 AI 输出只用一个）
-        if ch == '—' and i + 1 < n and text[i + 1] == '—' and stack:
-            # 在对话内，保留
-            result.append('——')
-            i += 2
-            continue
-
-        result.append(ch)
-        i += 1
-
-    return ''.join(result)
-
-
-def fix_story_format(text):
-    """
-    对 LLM 生成的故事做格式后处理，自动修复常见格式问题。
-
-    修复项：
-    1. 中文引号 "" "" → 「」
-    2. 标题行检测与删除（第一行是 # 标题 或 **标题** → 移除）
-    3. AI 废话前缀删除
-    3.5 状态机智能断句：句末标点后插入换行（引号/括号内不受影响）
-    3.6 破折号替换：非对话区域 —— → ，（去 AI 化）
-    3.7 分割线清除：删除章节内的 --- / *** / ~~~ 等装饰性分隔线
-    4. 孤立单换行 → 双换行
-    5. 压缩多余空行
-
-    返回修复后的文本。
-    """
-    if not text or not text.strip():
-        return text
-
-    # --- 1. 中文引号替换 ---
-    # 成对替换：左引号→「，右引号→」
-    text = text.replace('\u201c', '「').replace('\u201d', '」')
-    text = text.replace('\u201e', '「').replace('\u201f', '」')
-    # 半角双引号也替换（常出现在 AI 输出中）
-    # 用状态机配对：奇数次出现的 " → 「，偶数次 → 」
-    result_chars = []
-    dq_count = 0
-    for ch in text:
-        if ch == '"':
-            dq_count += 1
-            result_chars.append('「' if dq_count % 2 == 1 else '」')
-        else:
-            result_chars.append(ch)
-    text = ''.join(result_chars)
-
-    # --- 2. 标题行检测与删除 ---
-    # 检测第一非空行是否为标题（# 标题 / **标题**），是则删除整行
-    lines = text.split('\n')
-    first_non_empty_idx = None
-    for i, line in enumerate(lines):
-        if line.strip():
-            first_non_empty_idx = i
-            break
-    if first_non_empty_idx is not None:
-        first_line = lines[first_non_empty_idx].strip()
-        # H1 标题：# 某某某（但排除空 # 和 ## **N** 章节标题）
-        is_h1 = bool(re.match(r'^#\s+(?!\*\*\d+\*\*).+', first_line))
-        # 纯加粗标题行：**某某某**（整行只有一组加粗）
-        is_bold_title = bool(re.match(r'^\*\*[^*]+\*\*$', first_line))
-        if is_h1 or is_bold_title:
-            lines.pop(first_non_empty_idx)
-            text = '\n'.join(lines).lstrip()
-
-    # --- 3. AI 废话前缀删除 ---
-    ai_prefixes = ['好的，', '好的!', '好的！', '收到，', '收到！', '明白，', '明白！',
-                   '以下是', '根据您', '当然可以', '没问题',
-                   '好的\n', '收到\n', '明白\n']
-    stripped = text.lstrip()
-    for prefix in ai_prefixes:
-        if stripped.startswith(prefix):
-            stripped = stripped[len(prefix):].lstrip()
-            break
-    text = stripped
-
-    # --- 3.5 状态机智能断句 ---
-    # 在引号/括号/书名号外的句号、问号、感叹号后强制插入双换行
-    text = enforce_short_sentences(text)
-
-    # --- 3.6 破折号替换 ---
-    # AI 生成的故事经常过度使用 ——，这是最明显的 AI 写作痕迹之一。
-    # 对话「」内的 ——（如「等等——」）保留，其余替换为逗号。
-    text = replace_em_dashes(text)
-
-    # --- 3.7 分割线清除 ---
-    # 模型在章节内常插入装饰性分隔线，章节是连续叙事，不应有分割线
-    # 匹配独立成行的：---  ***  ___  ~~~  ───  ……
-    text = re.sub(r'^\s*[-*=_~─]{3,}\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*[.。…]{4,}\s*$', '', text, flags=re.MULTILINE)
-    # 清除因此产生的连续空行（后面 step 5 会统一压缩）
-
-    # --- 4. 孤立单\n → \n\n（知乎需要空行才能正确分段）---
-    # (?<!\n)\n(?!\n) 匹配前后都不是\n的孤立换行符
-    text = re.sub(r'(?<!\n)\n(?!\n)', '\n\n', text)
-
-    # --- 5. 压缩3个以上连续换行为2个（清理多余空行）---
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    return text.strip()
-
-
-# ============================================================
-# 格式合规检测
-# ============================================================
-
-def validate_story_format(text):
-    """
-    对故事文本做格式合规检测，返回 (score, is_valid, details)。
-
-    评分规则（基础分 10，及格线 >= 6）：
-    1. 章节标题 ## **N** 至少 6 个，少 1 个减 1 分，封顶减 4 分
-    2. 长段落检测（阈值=PARA_LENGTH_THRESHOLD 字）：
-       >5% 减 2 分，>10% 减 3 分，>20% 减 5 分
-    3. 对话引号：中文引号 "" "" 出现 >= 5 次减 5 分
-    4. 字数：<4000 减 2 分；<2000 额外减 3 分
-    5. AI 废话前缀：出现减 2 分
-    """
-    if not text or not text.strip():
-        return 0, False, {"章节": -10, "字数": 0, "原因": "空文本"}
-
-    score = 10
-    details = {}
-
-    # --- 1. 章节标题检测 ---
-    chapter_count = len(re.findall(r'##\s*\*\*\d+\*\*', text))
-    if chapter_count < 6:
-        penalty = min(6 - chapter_count, 4)  # 封顶减 4 分
-        score -= penalty
-        details["章节"] = f"{chapter_count}个(-{penalty})"
-
-    # --- 2. 长段落检测（三级分档，避免正常叙事被误杀）---
-    paras = [l for l in text.split('\n') if l.strip() and not l.strip().startswith('#')]
-    if paras:
-        long_paras = sum(1 for p in paras if len(p.strip()) > PARA_LENGTH_THRESHOLD)
-        ratio = long_paras / len(paras)
-        if ratio > 0.20:
-            score -= 5
-            details["长段"] = f"{ratio:.0%}({long_paras}段>{PARA_LENGTH_THRESHOLD}字)(-5)"
-        elif ratio > 0.10:
-            score -= 3
-            details["长段"] = f"{ratio:.0%}({long_paras}段>{PARA_LENGTH_THRESHOLD}字)(-3)"
-        elif ratio > 0.05:
-            score -= 2
-            details["长段"] = f"{ratio:.0%}({long_paras}段>{PARA_LENGTH_THRESHOLD}字)(-2)"
-
-    # --- 3. 对话引号检测 ---
-    cn_quotes = len(re.findall(r'["\u201c\u201d\u201e\u201f]', text))
-    if cn_quotes >= 5:
-        score -= 5
-        details["引号"] = f"{cn_quotes}次(-5)"
-
-    # --- 4. 字数检测（门槛对齐 8节×500字=4000字）---
-    char_count = len(text)
-    if char_count < 4000:
-        score -= 2
-        details["字数"] = f"{char_count}字(-2)"
-    if char_count < 2000:
-        score -= 3
-        details["字数"] = f"{char_count}字(-2-3)"
-
-    # --- 5. AI 废话前缀 ---
-    first_100 = text[:100]
-    ai_prefixes = ['好的', '收到', '明白', '以下是', '根据您', '当然可以', '没问题']
-    if any(p in first_100 for p in ai_prefixes):
-        score -= 2
-        details["废话"] = "-2"
-
-    score = max(score, 0)
-    is_valid = score >= 6
-
-    log.info(f"  格式检测：{score}/10 {'✓合规' if is_valid else '✗不合规'}"
-             f"{' (' + ', '.join(f'{k}:{v}' for k, v in details.items()) + ')' if details else ''}")
-
-    return score, is_valid, details
-
-
-# ============================================================
 # Prompt 构建（三种素材模式统一入口）
 # ============================================================
 
@@ -588,7 +53,7 @@ def _resolve_meta_content(meta_knowledge, recipe):
         return str(meta_knowledge).strip(), False
 
     try:
-        from config import META_RETRIEVAL_ENABLE, META_RETRIEVAL_TOP_K
+        from applications.zhihu_story.config import META_RETRIEVAL_ENABLE, META_RETRIEVAL_TOP_K
     except ImportError:
         return str(meta_knowledge).strip(), False
 
@@ -614,13 +79,14 @@ def _resolve_meta_content(meta_knowledge, recipe):
 
 
 def build_story_prompt(question_title, reference_answer=None, recipe=None,
-                       meta_knowledge=None):
+                       meta_knowledge=None, author_profile=None):
     """
     根据 STORY_MATERIAL_MODE 构建故事生成 prompt。
 
-    三种模式：
+    四种模式：
+      - "sample"               参考文章开头截取（默认）：前 3000 字直接注入，零 LLM 提炼
       - "recipe"               配方驱动（从当前文章提炼配方，不附参考原文）
-      - "reference"            参考文章模式（旧逻辑）
+      - "reference"            参考文章模式（整篇注入，旧逻辑）
       - "recipe_and_reference" 配方 + 参考文章结合
 
     参数：
@@ -632,13 +98,16 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
                           会直接填入；否则作为一个独立的"心法节"追加到 prompt 末尾。
                           建议只传经过 meta_learner.load_meta_knowledge()
                           处理后的正文（已剥除元数据块）。
+        author_profile:    作者技能签名 dict（author_profiler.load_author_profile
+                          的返回）。非 None 时把风格签名渲染为独立节追加到 prompt
+                          末尾（generate_story 的 author= 参数会自动加载）。
 
     返回：(user_message, mode_str)
     """
-    from config import STORY_SYSTEM_PROMPT
+    from applications.zhihu_story.prompts import STORY_SYSTEM_PROMPT
 
     try:
-        from config import STORY_MATERIAL_MODE
+        from applications.zhihu_story.config import STORY_MATERIAL_MODE
     except ImportError:
         STORY_MATERIAL_MODE = "reference"
 
@@ -654,7 +123,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     if _has_meta:
         try:
-            from config import META_STORY_INJECT_SECTION
+            from applications.zhihu_story.prompts import META_STORY_INJECT_SECTION
             # 渲染好的完整心法节，含前导标题
             rendered_section = META_STORY_INJECT_SECTION.format(
                 meta_knowledge=_meta_content
@@ -707,7 +176,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     # === 模式1：纯配方 ===
     if STORY_MATERIAL_MODE == "recipe" and recipe:
-        from config import STORY_RECIPE_PROMPT
+        from applications.zhihu_story.prompts import STORY_RECIPE_PROMPT
         recipe_prompt = _format_recipe(STORY_RECIPE_PROMPT, recipe,
                                        reference_section="")
         recipe_prompt, injected = _maybe_append_meta(
@@ -719,7 +188,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     # === 模式2：配方 + 参考文章 ===
     elif STORY_MATERIAL_MODE == "recipe_and_reference" and recipe:
-        from config import STORY_RECIPE_PROMPT
+        from applications.zhihu_story.prompts import STORY_RECIPE_PROMPT
         ref_section = (
             "\n## 参考文章\n\n"
             "以下\"高赞文章\"仅供风格借鉴，感受其语感、节奏和氛围即可。\n"
@@ -744,7 +213,42 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         mode_str = (f"配方+参考{meta_tag} [{recipe.get('genre', '?')}] {recipe.get('perspective', '?')} "
                     f"hook={recipe.get('hook', '?')[:15]}（参考{len(reference_answer or '')}字）")
 
-    # === 模式3：纯参考文章（旧逻辑 / 兜底） ===
+    # === 模式3：参考文章采样（默认：开头 3000 字截取注入，零 LLM 提炼） ===
+    elif STORY_MATERIAL_MODE == "sample":
+        from core.story_text import sample_reference_sections
+        sample = sample_reference_sections(reference_answer) \
+            if reference_answer else ""
+        system_body = STORY_SYSTEM_PROMPT
+        injected = False
+        if _has_meta:
+            system_body = system_body + _meta_section_for_append
+            injected = True
+        meta_tag = " +心法" if injected else ""
+        if sample:
+            user_message = f"""{system_body}
+
+## 全新文章主题（知乎问题）
+
+{question_title}
+
+## 参考文章（高赞回答开头——仅供感受语感与节奏，严禁借鉴情节）
+
+{sample}
+
+请根据以上要求，创作一个全新的故事。"""
+            mode_str = f"采样模式{meta_tag}（参考{len(sample)}字）"
+        else:
+            # 无参考文章：仅基础要求 + 主题
+            user_message = f"""{system_body}
+
+## 全新文章主题（知乎问题）
+
+{question_title}
+
+请根据以上要求，创作一个全新的故事。"""
+            mode_str = f"采样模式{meta_tag}（无参考文章）"
+
+    # === 模式4：纯参考文章（旧逻辑 / 兜底） ===
     else:
         # 参考文章模式：STORY_SYSTEM_PROMPT 里没有 recipe 占位符，
         # 直接追加心法节即可
@@ -765,502 +269,26 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         meta_tag = " +心法" if injected else ""
         mode_str = f"参考文章模式{meta_tag}（{len(reference_answer or '')} 字符）"
 
+    # === 风格签名注入（通用在前，作者专用在后） ===
+    author_tag = ""
+    if author_profile:
+        try:
+            from applications.zhihu_story.author_profiler import (
+                render_style_section, render_general_section,
+                load_general_profile)
+            general = load_general_profile()
+            general_section = render_general_section(general)
+            if general_section:
+                user_message += general_section
+                author_tag = " +通用风格"
+            user_message += render_style_section(author_profile)
+            author_tag += f" +作者:{author_profile.get('author', '?')}"
+        except Exception as e:
+            log.warning(f"  [作者风格注入] 渲染失败，跳过：{e}")
+    mode_str = mode_str + author_tag
+
     return user_message, mode_str
 
-
-# ============================================================
-# 长文模式 — Prompt 构建（盐选投稿专用）
-# ============================================================
-
-
-
-# ============================================================
-# 通用流式 LLM 调用（长文模式 + 短文模式共用）
-# ============================================================
-
-def _call_llm_streaming(user_message, max_tokens, temperature=None,
-                         on_chunk=None, label="LLM"):
-    """
-    通用的流式 chat.completions 调用。
-
-    参数：
-        user_message: 完整的用户消息文本
-        max_tokens:   max_tokens 参数
-        temperature:  温度（None 则用 config.LLM_API_TEMPERATURE）
-        on_chunk:     可选回调 fn(content_chunk: str)。
-                      若为 None：不打印不回调（静默累积）；
-                      若为 sys.stdout.write：实时打印到终端。
-        label:        日志标签
-
-    返回：(full_content: str, elapsed: float, error: str or None)
-    """
-    from config import (
-        LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL,
-        LLM_API_TEMPERATURE, LLM_API_TIMEOUT,
-        LLM_API_FREQUENCY_PENALTY, LLM_API_PRESENCE_PENALTY,
-        LLM_API_EXTRA_BODY,
-    )
-    try:
-        from config import (
-            LLM_API_CONNECT_TIMEOUT, LLM_API_STREAM_READ_TIMEOUT,
-            LLM_API_STREAM_FIRST_TOKEN_TIMEOUT,
-            LLM_API_STREAM_IDLE_TIMEOUT,
-        )
-    except ImportError:
-        LLM_API_CONNECT_TIMEOUT = 20
-        LLM_API_STREAM_READ_TIMEOUT = LLM_API_TIMEOUT
-        LLM_API_STREAM_FIRST_TOKEN_TIMEOUT = 45
-        LLM_API_STREAM_IDLE_TIMEOUT = 60
-
-    if not LLM_API_KEY:
-        return "", 0.0, "API Key 未配置"
-
-    url = f"{LLM_API_BASE_URL}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LLM_API_KEY}"
-    }
-    payload = {
-        "model": LLM_API_MODEL,
-        "messages": [{"role": "user", "content": user_message}],
-        "max_tokens": max_tokens,
-        "temperature": temperature if temperature is not None else LLM_API_TEMPERATURE,
-        "frequency_penalty": LLM_API_FREQUENCY_PENALTY,
-        "presence_penalty": LLM_API_PRESENCE_PENALTY,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
-    if isinstance(LLM_API_EXTRA_BODY, dict):
-        payload.update(LLM_API_EXTRA_BODY)
-
-    start = time.time()
-    full_content = ""
-    last_usage = None
-    response = None
-    stream_stop = None
-    stream_watchdog = None
-    stream_state = {
-        'first_content_at': None,
-        'last_content_at': None,
-        'timeout_reason': None,
-    }
-
-    try:
-        response = requests.post(
-            url, headers=headers, json=payload,
-            timeout=(LLM_API_CONNECT_TIMEOUT, LLM_API_STREAM_READ_TIMEOUT),
-            stream=True,
-        )
-        response.encoding = "utf-8"
-
-        if response.status_code != 200:
-            return full_content, time.time() - start, \
-                f"HTTP {response.status_code}: {response.text[:300]}"
-
-        # Socket read timeout cannot distinguish SSE heartbeats from real text.
-        # Watch the arrival of actual content tokens in a separate timer.
-        import threading
-        stream_started = time.time()
-        stream_stop = threading.Event()
-
-        def _watch_stream_content():
-            while not stream_stop.wait(0.5):
-                now = time.time()
-                first_content_at = stream_state['first_content_at']
-                if first_content_at is None:
-                    if now - stream_started < LLM_API_STREAM_FIRST_TOKEN_TIMEOUT:
-                        continue
-                    stream_state['timeout_reason'] = (
-                        f"?????{LLM_API_STREAM_FIRST_TOKEN_TIMEOUT}s "
-                        "????? token?"
-                    )
-                elif now - stream_state['last_content_at'] >= LLM_API_STREAM_IDLE_TIMEOUT:
-                    stream_state['timeout_reason'] = (
-                        f"???????{LLM_API_STREAM_IDLE_TIMEOUT}s "
-                        "???? token?"
-                    )
-                else:
-                    continue
-
-                try:
-                    response.close()
-                except Exception:
-                    pass
-                return
-
-        stream_watchdog = threading.Thread(
-            target=_watch_stream_content,
-            name=f"llm-stream-watchdog-{label}",
-            daemon=True,
-        )
-        stream_watchdog.start()
-
-        for line in response.iter_lines(decode_unicode=True):
-            if stream_state['timeout_reason']:
-                break
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if data_str.strip() == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_str)
-                if "usage" in chunk and chunk.get("usage"):
-                    last_usage = chunk["usage"]
-                    continue
-                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                if content:
-                    now = time.time()
-                    if stream_state['first_content_at'] is None:
-                        stream_state['first_content_at'] = now
-                    stream_state['last_content_at'] = now
-                    full_content += content
-                    if on_chunk:
-                        try:
-                            on_chunk(content)
-                        except Exception:
-                            pass
-            except json.JSONDecodeError:
-                continue
-
-        if stream_state['timeout_reason']:
-            return (
-                full_content,
-                time.time() - start,
-                stream_state['timeout_reason'],
-            )
-
-        if last_usage:
-            try:
-                from llm_token_tracker import tracker
-                tracker.report(LLM_API_MODEL, last_usage)
-            except Exception:
-                pass
-
-        return full_content, time.time() - start, None
-
-    except requests.exceptions.Timeout:
-        if stream_state['timeout_reason']:
-            return full_content, time.time() - start, stream_state['timeout_reason']
-        return (
-            full_content,
-            time.time() - start,
-            f"Timeout?{LLM_API_STREAM_READ_TIMEOUT}s ?????"
-        )
-    except requests.exceptions.ConnectionError as e:
-        if stream_state['timeout_reason']:
-            return full_content, time.time() - start, stream_state['timeout_reason']
-        return full_content, time.time() - start, f"ConnectionError: {e}"
-    except Exception as e:
-        if stream_state['timeout_reason']:
-            return full_content, time.time() - start, stream_state['timeout_reason']
-        return full_content, time.time() - start, f"Exception: {e}"
-    finally:
-        if stream_stop is not None:
-            stream_stop.set()
-        if stream_watchdog is not None:
-            stream_watchdog.join(timeout=1)
-        if response is not None:
-            try:
-                response.close()
-            except Exception:
-                pass
-
-
-# ============================================================
-# 长文模式 — 章节完整性检测
-# ============================================================
-
-def _ensure_chapter_complete(text):
-    """
-    检测章节文本是否在完整句子处结束。
-
-    如果末尾在句末标点（。！？……」》】）处结束 → 视为完整。
-    如果末尾被截断（不在句末标点处）→ 回退到最后一个句末标点截断。
-
-    返回：(text, is_complete)
-      - is_complete=True:  文本末尾完整，无需处理
-      - is_complete=False: 文本被截断，已回截到最后一个完整句
-    """
-    if not text or len(text) < 50:
-        return text, len(text) >= 10
-
-    last_50 = text[-50:]
-    if re.search(r'[。！？……」》】]', last_50):
-        return text, True
-
-    # 被截断：回退到最后一个句末标点
-    match = re.search(r'^(.*[。！？……」》】])[^。！？……」》】]*$', text, re.DOTALL)
-    if match:
-        truncated = match.group(1)
-        return truncated, False
-
-    # 全文找不到句末标点（极端情况），返回原文
-    return text, False
-
-
-def _normalize_chapter_headers(text, chapter_num):
-    """
-    归一化章节标题：清除模型自行生成的所有 ## **N** 变体，
-    然后统一在章首补入 ## **{chapter_num}**。
-
-    模型输出的标题格式极不稳定，常见变体：
-      - ## **1**（标准）
-      - ## **1** 标题文字
-      - ## ** 1 **
-      - **1**（缺 #）
-      - 干脆不写
-
-    本函数暴力清除后统一补入，确保每章标题格式一致。
-    """
-    # 清除所有 ## **N** 及其变体（含后面的标题文字）
-    text = re.sub(r'#*\s*\*{1,2}\s*\d+\s*\*{1,2}[^\n]*\n?', '', text)
-    # 清除单独的 **N** 行（无 # 前缀）
-    text = re.sub(r'^\*{1,2}\s*\d+\s*\*{1,2}\s*\n', '', text, flags=re.MULTILINE)
-    # 清除行首孤立的数字标题如 "1." "1、" "1）"（但排除正文中的数字列举）
-    text = re.sub(r'^\s*\d+[\.、）\)]\s*\n', '', text, flags=re.MULTILINE)
-
-    # 统一补入章节标题
-    header = f"## **{chapter_num}**\n\n"
-    text = header + text.strip()
-    return text
-
-
-# ============================================================
-# 滚动大纲 — 新增函数（Foundation + Macro Beats + Arc 管理）
-# ============================================================
-
-def _build_recipe_context(recipe):
-    """从 recipe dict 提取创作技法引用的格式化字符串。"""
-    recipe = recipe or {}
-    return {
-        "hook": recipe.get("hook", "自由发挥"),
-        "conflict": recipe.get("conflict", "自由发挥"),
-        "pacing": recipe.get("pacing", "自由发挥"),
-        "style": recipe.get("style", "自由发挥"),
-        "character": recipe.get("character", "自由发挥"),
-        "tone": recipe.get("tone", "自由发挥"),
-        "perspective": recipe.get("perspective", "第一人称"),
-    }
-
-
-def _generate_foundation(question_title, recipe=None, stream_to_terminal=True):
-    """
-    阶段 -1：生成故事基石（人物、背景、风格、核心冲突）。
-
-    只接收 question_title + recipe，不接收 reference_answer。
-    """
-    from config import FOUNDATION_PROMPT
-
-    ctx = _build_recipe_context(recipe)
-    prompt = FOUNDATION_PROMPT.format(
-        question_title=question_title,
-        hook=ctx["hook"],
-        conflict=ctx["conflict"],
-        pacing=ctx["pacing"],
-        style=ctx["style"],
-        character=ctx["character"],
-        tone=ctx["tone"],
-    )
-
-    log.info("[Foundation] 开始生成故事基石...")
-    on_chunk = None
-    if stream_to_terminal:
-        def on_chunk(c):
-            sys.stdout.write(c)
-            sys.stdout.flush()
-
-    text, elapsed, error = _call_llm_streaming(
-        prompt, max_tokens=2048, temperature=0.8,
-        on_chunk=on_chunk, label="Foundation",
-    )
-
-    if stream_to_terminal and text:
-        print()  # 流式输出后换行
-
-    if error:
-        log.error(f"[Foundation] 失败：{error}")
-        if not text:
-            return None
-    log.info(f"[Foundation] 完成（{elapsed:.1f}s, {len(text) if text else 0} 字符）")
-    return text
-
-
-# ============================================================
-# 长文模式 — 批量大纲生成
-# ============================================================
-
-def _generate_batch_outline(ws, recipe=None, stream_to_terminal=True):
-    """
-    基于 foundation + 上一批全文，生成下一批 N 章大纲。
-
-    ws: StoryWorkspace 实例
-    返回：大纲文本，失败返回 None
-    """
-    from config import BATCH_OUTLINE_PROMPT, LONG_FORM_OUTLINE_MAX_TOKENS, BATCH_CHAPTER_COUNT
-
-    foundation = ws.foundation
-    progress = ws.progress or {}
-    last_written = progress.get("last_chapter_written", 0)
-    total_chapters = progress.get("total_chapters", 20)
-
-    start_chapter = last_written + 1
-    remaining = total_chapters - last_written
-    batch_chapter_count = min(BATCH_CHAPTER_COUNT, remaining)
-
-    previous_text = ws.previous_batch_text(last_written)
-
-    ctx = _build_recipe_context(recipe)
-    prompt = BATCH_OUTLINE_PROMPT.format(
-        foundation=foundation,
-        previous_batch_text=previous_text,
-        batch_chapter_count=batch_chapter_count,
-        start_chapter=start_chapter,
-        hook=ctx["hook"],
-        conflict=ctx["conflict"],
-        pacing=ctx["pacing"],
-        style=ctx["style"],
-        character=ctx["character"],
-        tone=ctx["tone"],
-    )
-
-    end_chapter = start_chapter + batch_chapter_count - 1
-    label = f"大纲({start_chapter}-{end_chapter})"
-    log.info(f"[BatchOutline] 生成第{start_chapter}-{end_chapter}章大纲...")
-
-    on_chunk = None
-    if stream_to_terminal:
-        def on_chunk(c):
-            sys.stdout.write(c)
-            sys.stdout.flush()
-
-    text, elapsed, error = _call_llm_streaming(
-        prompt, max_tokens=LONG_FORM_OUTLINE_MAX_TOKENS, temperature=0.7,
-        on_chunk=on_chunk, label=label,
-    )
-
-    if stream_to_terminal and text:
-        print()  # 流式输出后换行
-
-    if error:
-        log.error(f"[BatchOutline] 失败：{error}")
-        if not text:
-            return None
-
-    ws.batch_outline = text
-    log.info(f"[BatchOutline] 完成（{elapsed:.1f}s, {len(text)} 字符）")
-    return text
-
-
-# ============================================================
-# 长文模式 — 批量章节生成
-# ============================================================
-
-def _generate_batch_chapters(ws, recipe=None, meta_knowledge=None,
-                              stream_to_terminal=True):
-    """
-    一次性生成一批章节（N 章），返回合并文本。
-
-    ws: StoryWorkspace 实例
-    返回：合并的 N 章文本，失败返回 None
-    """
-    from config import BATCH_CHAPTERS_PROMPT, LONG_FORM_CHAPTER_MAX_TOKENS, BATCH_CHAPTER_COUNT
-
-    foundation = ws.foundation
-    if not foundation:
-        log.error("[BatchChapters] foundation 不存在，无法生成章节")
-        return None
-
-    batch_outline = ws.batch_outline
-    if not batch_outline:
-        log.error("[BatchChapters] batch_outline 不存在，请先生成大纲")
-        return None
-
-    progress = ws.progress or {}
-    last_written = progress.get("last_chapter_written", 0)
-    total_chapters = progress.get("total_chapters", 20)
-
-    start_chapter = last_written + 1
-    remaining = total_chapters - last_written
-    batch_count = min(BATCH_CHAPTER_COUNT, remaining)
-    end_chapter = start_chapter + batch_count - 1
-
-    previous_text = ws.previous_batch_text(last_written)
-
-    ctx = _build_recipe_context(recipe)
-    prompt = BATCH_CHAPTERS_PROMPT.format(
-        foundation=foundation,
-        batch_outline=batch_outline,
-        previous_batch_text=previous_text,
-        start_chapter=start_chapter,
-        end_chapter=end_chapter,
-        hook=ctx["hook"],
-        conflict=ctx["conflict"],
-        pacing=ctx["pacing"],
-        style=ctx["style"],
-        character=ctx["character"],
-        tone=ctx["tone"],
-        perspective=ctx["perspective"],
-    )
-
-    # 注入元知识
-    if meta_knowledge:
-        meta_content, _ = _resolve_meta_content(meta_knowledge, recipe)
-        if meta_content:
-            try:
-                from config import META_STORY_INJECT_SECTION
-                meta_section = META_STORY_INJECT_SECTION.format(
-                    meta_knowledge=meta_content
-                )
-            except (ImportError, KeyError):
-                meta_section = (
-                    "\n\n## 创作心法（来自跨篇作品的积累）\n\n"
-                    + str(meta_content).strip() + "\n"
-                )
-            prompt += meta_section
-
-    label = f"第{start_chapter}-{end_chapter}章"
-    log.info(f"[BatchChapters] 开始生成{label}...")
-
-    on_chunk = None
-    if stream_to_terminal:
-        def on_chunk(c):
-            sys.stdout.write(c)
-            sys.stdout.flush()
-
-    text, elapsed, error = _call_llm_streaming(
-        prompt, max_tokens=LONG_FORM_CHAPTER_MAX_TOKENS,
-        on_chunk=on_chunk, label=label,
-    )
-
-    if stream_to_terminal and text:
-        print()  # 流式输出后换行
-
-    if error:
-        if not text:
-            log.error(f"[BatchChapters] 失败：{error}")
-            return None
-        log.warning(f"[BatchChapters] 部分失败：{error}")
-
-    log.info(f"[BatchChapters] 完成（{elapsed:.1f}s, {len(text)} 字符）")
-    return text
-
-
-# ============================================================
-# 批量章节拆分
-# ============================================================
-
-def _split_batch_chapters(text):
-    """
-    按 ## **N** 分隔批量输出为 [(chapter_num: int, text: str), ...]。
-    同时也支持 ## N. 和 ## 第N章 格式。
-    """
-    # 先按 ## **N** 拆分
-    pattern = re.compile(
-        r'(?:^|\n)(##\s*\*{1,2}\s*(\d+)\s*\*{1,2}[^\n]*)',
-        re.MULTILINE
-    )
-    splits = list(pattern.finditer(text))
 
     if not splits:
         # 尝试 ## N. 格式
@@ -1327,7 +355,7 @@ def generate_long_form_story(question_title, recipe=None,
 
     返回：完整故事文本，失败返回 None
     """
-    from config import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
+    from applications.zhihu_story.config import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
     from core.story_workspace import StoryWorkspace
 
     # --resume: 使用已有 workspace 恢复
@@ -1427,7 +455,7 @@ def generate_long_form_story(question_title, recipe=None,
         step += 1
 
         # 拆分章节
-        chapters = _split_batch_chapters(batch_text)
+        chapters = split_batch_chapters(batch_text)
         if not chapters:
             log.error(f"[长文模式] 无法从第{batch_num}批输出中拆分章节")
             return None
@@ -1437,10 +465,10 @@ def generate_long_form_story(question_title, recipe=None,
         for ch_num, ch_text in chapters:
             ch_text = clean_story_output(ch_text)
             ch_text = fix_story_format(ch_text)
-            ch_text, is_complete = _ensure_chapter_complete(ch_text)
+            ch_text, is_complete = ensure_chapter_complete(ch_text)
             if not is_complete:
                 log.warning(f"[长文-第{ch_num}章] 末尾不完整，已回截")
-            ch_text = _normalize_chapter_headers(ch_text, ch_num)
+            ch_text = normalize_chapter_headers(ch_text, ch_num)
             if len(ch_text) < 80:
                 log.warning(f"[长文-第{ch_num}章] 内容过短（{len(ch_text)} 字）")
             elif not re.search(r'[。！？」』]', ch_text):
@@ -1491,7 +519,7 @@ def generate_long_form_story_parallel(question_title, task_id,
     长文模式并行版本：用于批量并行生成场景。
     与 generate_long_form_story 的区别：不流式打印，通过 progress dict 报告状态。
     """
-    from config import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
+    from applications.zhihu_story.config import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
     from core.story_workspace import StoryWorkspace
 
     short_title = question_title[:20] + "..." if len(question_title) > 20 else question_title
@@ -1549,7 +577,7 @@ def generate_long_form_story_parallel(question_title, task_id,
             return None
 
         # 拆分 + 清洗 + 保存
-        chapters = _split_batch_chapters(batch_text)
+        chapters = split_batch_chapters(batch_text)
         if not chapters:
             progress[task_id]['status'] = f'❌ 拆分失败'
             return None
@@ -1557,10 +585,10 @@ def generate_long_form_story_parallel(question_title, task_id,
         for ch_num, ch_text in chapters:
             ch_text = clean_story_output(ch_text)
             ch_text = fix_story_format(ch_text)
-            ch_text, is_complete = _ensure_chapter_complete(ch_text)
+            ch_text, is_complete = ensure_chapter_complete(ch_text)
             if not is_complete:
                 log.warning(f"[长文-并行-第{ch_num}章] 末尾不完整，已回截")
-            ch_text = _normalize_chapter_headers(ch_text, ch_num)
+            ch_text = normalize_chapter_headers(ch_text, ch_num)
             if len(ch_text) < 80:
                 log.warning(f"[长文-并行-第{ch_num}章] 内容过短（{len(ch_text)} 字）")
             ws.save_chapter(ch_num, ch_text)
@@ -1597,8 +625,209 @@ def generate_long_form_story_parallel(question_title, task_id,
     return full_story
 
 
+# ============================================================
+# 通用流式 LLM 调用（长文模式 + 短文模式共用）
+# ============================================================
+
+def _call_llm_streaming(user_message, max_tokens, temperature=None,
+                         on_chunk=None, label="LLM"):
+    """
+    通用的流式 chat.completions 调用。
+
+    参数：
+        user_message: 完整的用户消息文本
+        max_tokens:   max_tokens 参数
+        temperature:  温度（None 则用 config.LLM_API_TEMPERATURE）
+        on_chunk:     可选回调 fn(content_chunk: str)。
+                      若为 None：不打印不回调（静默累积）；
+                      若为 sys.stdout.write：实时打印到终端。
+        label:        日志标签
+
+    返回：(full_content: str, elapsed: float, error: str or None)
+    """
+    from config import (
+        LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL,
+        LLM_API_TEMPERATURE, LLM_API_TIMEOUT,
+        LLM_API_FREQUENCY_PENALTY, LLM_API_PRESENCE_PENALTY,
+        LLM_API_EXTRA_BODY,
+    )
+    try:
+        from config import (
+            LLM_API_CONNECT_TIMEOUT, LLM_API_STREAM_READ_TIMEOUT,
+            LLM_API_STREAM_FIRST_TOKEN_TIMEOUT,
+            LLM_API_STREAM_IDLE_TIMEOUT,
+        )
+    except ImportError:
+        LLM_API_CONNECT_TIMEOUT = 20
+        LLM_API_STREAM_READ_TIMEOUT = LLM_API_TIMEOUT
+        LLM_API_STREAM_FIRST_TOKEN_TIMEOUT = 45
+        LLM_API_STREAM_IDLE_TIMEOUT = 60
+
+    if not LLM_API_KEY:
+        return "", 0.0, "API Key 未配置"
+
+    url = f"{LLM_API_BASE_URL}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LLM_API_KEY}"
+    }
+    payload = {
+        "model": LLM_API_MODEL,
+        "messages": [{"role": "user", "content": user_message}],
+        "max_tokens": max_tokens,
+        "temperature": temperature if temperature is not None else LLM_API_TEMPERATURE,
+        "frequency_penalty": LLM_API_FREQUENCY_PENALTY,
+        "presence_penalty": LLM_API_PRESENCE_PENALTY,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if isinstance(LLM_API_EXTRA_BODY, dict):
+        payload.update(LLM_API_EXTRA_BODY)
+
+    start = time.time()
+    full_content = ""
+    last_usage = None
+    response = None
+    stream_stop = None
+    stream_watchdog = None
+    stream_state = {
+        'first_content_at': None,
+        'last_content_at': None,
+        'timeout_reason': None,
+    }
+
+    try:
+        response = requests.post(
+            url, headers=headers, json=payload,
+            timeout=(LLM_API_CONNECT_TIMEOUT, LLM_API_STREAM_READ_TIMEOUT),
+            stream=True,
+        )
+        response.encoding = "utf-8"
+
+        if response.status_code != 200:
+            return full_content, time.time() - start, \
+                f"HTTP {response.status_code}: {response.text[:300]}"
+
+        # Socket read timeout 无法区分 SSE 心跳与真实文本，
+        # 用独立计时器观察实际内容 token 的到达。
+        import threading
+        stream_started = time.time()
+        stream_stop = threading.Event()
+
+        def _watch_stream_content():
+            while not stream_stop.wait(0.5):
+                now = time.time()
+                first_content_at = stream_state['first_content_at']
+                if first_content_at is None:
+                    if now - stream_started < LLM_API_STREAM_FIRST_TOKEN_TIMEOUT:
+                        continue
+                    stream_state['timeout_reason'] = (
+                        f"等待首个内容 token 超过 {LLM_API_STREAM_FIRST_TOKEN_TIMEOUT}s "
+                        "（连接后无内容）"
+                    )
+                elif now - stream_state['last_content_at'] >= LLM_API_STREAM_IDLE_TIMEOUT:
+                    stream_state['timeout_reason'] = (
+                        f"内容停滞超过 {LLM_API_STREAM_IDLE_TIMEOUT}s（无新 token）"
+                    )
+                else:
+                    continue
+
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                return
+
+        stream_watchdog = threading.Thread(
+            target=_watch_stream_content,
+            name=f"llm-stream-watchdog-{label}",
+            daemon=True,
+        )
+        stream_watchdog.start()
+
+        for line in response.iter_lines(decode_unicode=True):
+            if stream_state['timeout_reason']:
+                break
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+                if "usage" in chunk and chunk.get("usage"):
+                    last_usage = chunk["usage"]
+                    continue
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                # 推理模型（deepseek-v4 等）先流 reasoning_content 再流 content：
+                # 思维链期间的增量同样视为"流有活动"，避免看门狗误杀
+                if delta.get("reasoning_content"):
+                    now = time.time()
+                    if stream_state['first_content_at'] is None:
+                        stream_state['first_content_at'] = now
+                    stream_state['last_content_at'] = now
+                    continue
+                content = delta.get("content", "")
+                if content:
+                    now = time.time()
+                    if stream_state['first_content_at'] is None:
+                        stream_state['first_content_at'] = now
+                    stream_state['last_content_at'] = now
+                    full_content += content
+                    if on_chunk:
+                        try:
+                            on_chunk(content)
+                        except Exception:
+                            pass
+            except json.JSONDecodeError:
+                continue
+
+        if stream_state['timeout_reason']:
+            return (
+                full_content,
+                time.time() - start,
+                stream_state['timeout_reason'],
+            )
+
+        if last_usage:
+            try:
+                from llm_token_tracker import tracker
+                tracker.report(LLM_API_MODEL, last_usage)
+            except Exception:
+                pass
+
+        return full_content, time.time() - start, None
+
+    except requests.exceptions.Timeout:
+        if stream_state['timeout_reason']:
+            return full_content, time.time() - start, stream_state['timeout_reason']
+        return (
+            full_content,
+            time.time() - start,
+            f"超时：连接/读取超过 {LLM_API_STREAM_READ_TIMEOUT}s",
+        )
+    except requests.exceptions.ConnectionError as e:
+        if stream_state['timeout_reason']:
+            return full_content, time.time() - start, stream_state['timeout_reason']
+        return full_content, time.time() - start, f"ConnectionError: {e}"
+    except Exception as e:
+        if stream_state['timeout_reason']:
+            return full_content, time.time() - start, stream_state['timeout_reason']
+        return full_content, time.time() - start, f"Exception: {e}"
+    finally:
+        if stream_stop is not None:
+            stream_stop.set()
+        if stream_watchdog is not None:
+            stream_watchdog.join(timeout=1)
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+
 def generate_story(question_title, reference_answer=None, recipe=None,
-                   meta_knowledge=None):
+                   meta_knowledge=None, author=None):
     """
     通过 API 生成故事，支持流式输出到终端。
 
@@ -1616,6 +845,8 @@ def generate_story(question_title, reference_answer=None, recipe=None,
         reference_answer:  高赞回答文本
         recipe:            知识库配方 dict
         meta_knowledge:    跨任务积累的元知识文本（可选，用于 --use-meta 模式）
+        author:            作者名（可选）。从 data/authors/{name}.json 加载
+                           技能签名并注入 prompt（仅短文模式）
 
     返回：
         生成的故事文本（已清洗），失败返回 None
@@ -1628,18 +859,22 @@ def generate_story(question_title, reference_answer=None, recipe=None,
 
     # ===== 长文模式分发（盐选投稿） =====
     try:
-        from config import LONG_FORM_MODE
+        from applications.zhihu_story.config import LONG_FORM_MODE
     except ImportError:
         LONG_FORM_MODE = False
     if LONG_FORM_MODE:
+        if author:
+            log.warning("  [作者风格] 长文模式暂不支持作者注入，跳过")
         return generate_long_form_story(
             question_title, recipe=recipe, meta_knowledge=meta_knowledge,
         )
 
+    author_profile = _load_author_profile_or_none(author)
+
     # ===== 统一 prompt 构建 =====
     user_message, mode_str = build_story_prompt(
         question_title, reference_answer, recipe,
-        meta_knowledge=meta_knowledge,
+        meta_knowledge=meta_knowledge, author_profile=author_profile,
     )
 
     log.info(f"API 流式调用开始")
@@ -1648,9 +883,17 @@ def generate_story(question_title, reference_answer=None, recipe=None,
     print()
     print("  ── 生成内容开始 ──")
 
+    # 心跳：长生成可能持续数分钟，期间无日志会让外层看门狗
+    # （日志 mtime 静默超时）误判卡死杀进程——定期写进度
+    _heartbeat = {"n": 0}
+
     def _on_chunk(c):
         sys.stdout.write(c)
         sys.stdout.flush()
+        _heartbeat["n"] += len(c)
+        if _heartbeat["n"] >= 400:
+            log.info(f"    生成中… 累计输出 {_heartbeat['n']} 字符")
+            _heartbeat["n"] = 0
 
     full_content, elapsed, error = _call_llm_streaming(
         user_message,
@@ -1685,8 +928,26 @@ def generate_story(question_title, reference_answer=None, recipe=None,
 # 并行生成（批量模式用）
 # ============================================================
 
+def _load_author_profile_or_none(author):
+    """按作者名加载技能签名；无签名文件或失败时返回 None。"""
+    if not author:
+        return None
+    try:
+        from applications.zhihu_story.author_profiler import load_author_profile
+        profile = load_author_profile(author)
+        if profile:
+            log.info(f"  [作者风格] 已加载「{author}」技能签名")
+        else:
+            log.warning(f"  [作者风格] 未找到「{author}」技能签名"
+                        f"（先运行 author_profiler）")
+        return profile
+    except Exception as e:
+        log.warning(f"  [作者风格] 加载失败：{e}")
+        return None
+
+
 def generate_story_parallel(question_title, reference_answer, task_id, progress,
-                            recipe=None, meta_knowledge=None):
+                            recipe=None, meta_knowledge=None, author=None):
     """
     非流式生成故事，用于多线程并行调用。
 
@@ -1702,6 +963,7 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
         progress:          共享进度字典
         recipe:            知识库配方（可选，提供则使用配方模式）
         meta_knowledge:    跨任务积累的元知识文本（可选）
+        author:            作者名（可选），注入其技能签名
 
     返回：
         生成的故事文本（已清洗），失败返回 None
@@ -1725,19 +987,23 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
 
     # ===== 长文模式分发（盐选投稿） =====
     try:
-        from config import LONG_FORM_MODE
+        from applications.zhihu_story.config import LONG_FORM_MODE
     except ImportError:
         LONG_FORM_MODE = False
     if LONG_FORM_MODE:
+        if author:
+            log.warning("  [作者风格] 长文模式暂不支持作者注入，跳过")
         return generate_long_form_story_parallel(
             question_title, task_id, progress,
             recipe=recipe, meta_knowledge=meta_knowledge,
         )
 
+    author_profile = _load_author_profile_or_none(author)
+
     # ===== 统一 prompt 构建 =====
     user_message, _ = build_story_prompt(
         question_title, reference_answer, recipe,
-        meta_knowledge=meta_knowledge,
+        meta_knowledge=meta_knowledge, author_profile=author_profile,
     )
 
     local_start = time.time()
@@ -1843,7 +1109,7 @@ def filter_story_questions(questions):
 
     titles = [q['title'] for q in questions]
 
-    from config import FILTER_PROMPT
+    from applications.zhihu_story.prompts import FILTER_PROMPT
     prompt = FILTER_PROMPT
     for i, t in enumerate(titles):
         prompt += f"{i+1}. {t}\n"
@@ -1938,7 +1204,9 @@ def filter_story_questions(questions):
 def test_api_connection():
     """测试 API 连接"""
     from config import (
-        LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL,
+        LLM_API_KEY,
+        LLM_API_BASE_URL,
+        LLM_API_MODEL,
         LLM_API_EXTRA_BODY,
     )
 
@@ -1959,7 +1227,7 @@ def test_api_connection():
     payload = {
         "model": LLM_API_MODEL,
         "messages": [{"role": "user", "content": "请回复：连接成功"}],
-        "max_tokens": 20,
+        "max_tokens": 1000,
         "stream": False
     }
     if isinstance(LLM_API_EXTRA_BODY, dict):
@@ -1982,50 +1250,6 @@ def test_api_connection():
         print(f"  ❌ {e}")
         return False
 
-
-# ============================================================
-# 评分 JSON 容错解析
-# ============================================================
-
-_SCORE_OBJ_RE = re.compile(
-    r'\{\s*"index"\s*:\s*(\d+)\s*,\s*"hook"\s*:\s*(\d+)\s*,\s*"plot"\s*:\s*(\d+)\s*,'
-    r'\s*"emotion"\s*:\s*(\d+)\s*,\s*"authenticity"\s*:\s*(\d+)\s*,\s*"ending"\s*:\s*(\d+)\s*,'
-    r'\s*"format"\s*:\s*(\d+)\s*,\s*"total"\s*:\s*(\d+)\s*,\s*"comment"\s*:\s*"([^"]*)'
-)
-
-def _parse_score_json(reply_text, expected_count):
-    """
-    解析评分 JSON，优先 stright parse，失败后用正则逐个提取对象。
-    返回解析出的评分列表 [{index, hook, plot, ...}, ...]
-    """
-    try:
-        scores = json.loads(reply_text)
-        if isinstance(scores, list) and len(scores) > 0:
-            return scores
-    except json.JSONDecodeError:
-        pass
-
-    # 正则回退：逐个提取 {"index": N, ...} 对象
-    scores = []
-    for m in _SCORE_OBJ_RE.finditer(reply_text):
-        scores.append({
-            'index': int(m.group(1)),
-            'hook': int(m.group(2)),
-            'plot': int(m.group(3)),
-            'emotion': int(m.group(4)),
-            'authenticity': int(m.group(5)),
-            'ending': int(m.group(6)),
-            'format': int(m.group(7)),
-            'total': int(m.group(8)),
-            'comment': m.group(9),
-        })
-
-    if scores:
-        log.info(f"  正则回退解析成功：{len(scores)}/{expected_count} 篇")
-        return scores
-
-    # 都失败，抛异常让外层兜底
-    raise json.JSONDecodeError("无法解析评分 JSON", reply_text, 0)
 
 
 # ============================================================
@@ -2067,10 +1291,10 @@ def score_stories(stories_data):
     log.info(f"=" * 50)
 
     # 构建评分 prompt
-    from config import SCORE_PROMPT
+    from applications.zhihu_story.prompts import SCORE_PROMPT
     prompt = SCORE_PROMPT
     try:
-        from config import SCORE_STORY_HEAD_CHARS, SCORE_STORY_TAIL_CHARS
+        from applications.zhihu_story.config import SCORE_STORY_HEAD_CHARS, SCORE_STORY_TAIL_CHARS
     except ImportError:
         SCORE_STORY_HEAD_CHARS = 1000
         SCORE_STORY_TAIL_CHARS = 500
@@ -2145,7 +1369,7 @@ def score_stories(stories_data):
             clean_reply = clean_reply[:-3]
         clean_reply = clean_reply.strip()
 
-        scores = _parse_score_json(clean_reply, len(stories_data))
+        scores = parse_score_json(clean_reply, len(stories_data))
 
         # 将评分合并到 stories_data
         score_map = {s['index']: s for s in scores}

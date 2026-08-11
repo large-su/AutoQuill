@@ -2,21 +2,21 @@
 	{
 		"name": "DeepSeek",
 		"vendor": "deepseek",
-		"apiKey": "sk-995eb97437314dbe850ab52f437e67e1",
+		"apiKey": "sk-your-deepseek-key-here",
 		"models": [
 			{
-				"id": "deepseek-chat",
-				"name": "DeepSeek-V3",
+				"id": "deepseek-v4-flash",
+				"name": "DeepSeek-V4-Flash",
 				"baseUrl": "https://api.deepseek.com",
-				"maxInputTokens": 65536,
-				"maxOutputTokens": 8192
+				"maxInputTokens": 1000000,
+				"maxOutputTokens": 65536
 			},
 			{
-				"id": "deepseek-reasoner",
-				"name": "DeepSeek-R1",
+				"id": "deepseek-v4-pro",
+				"name": "DeepSeek-V4-Pro",
 				"baseUrl": "https://api.deepseek.com",
-				"maxInputTokens": 65536,
-				"maxOutputTokens": 8192
+				"maxInputTokens": 1000000,
+				"maxOutputTokens": 65536
 			}
 		]
 	},

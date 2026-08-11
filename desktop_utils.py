@@ -696,4 +696,4 @@ def reset_progress():
 # ============================================================
 # 向后兼容：重导出知乎专用操作函数
 # ============================================================
-from applications.zhihu_story.action import wait_editor_ready, get_bounds
+from applications.zhihu_story.action import get_bounds

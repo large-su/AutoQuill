@@ -125,10 +125,13 @@ def compute_reader_score(footer, now=None):
         return None
 
     try:
-        from config import (
-            READER_SCORE_W_LIKES, READER_SCORE_W_COMMENTS,
-            READER_SCORE_W_COLLECTS, READER_SCORE_W_HEARTS,
-            READER_SCORE_REF_AGE_DAYS, READER_SCORE_DECAY_EXPONENT,
+        from applications.zhihu_story.config import (
+            READER_SCORE_W_LIKES,
+            READER_SCORE_W_COMMENTS,
+            READER_SCORE_W_COLLECTS,
+            READER_SCORE_W_HEARTS,
+            READER_SCORE_REF_AGE_DAYS,
+            READER_SCORE_DECAY_EXPONENT,
         )
     except ImportError as e:
         log.warning(f"meta_learner: reader_score 参数缺失（{e}），无法计算")
@@ -289,8 +292,9 @@ def check_and_distill():
         False 未达阈值 或 未启用 或 蒸馏失败
     """
     try:
-        from config import (
-            META_LEARN_ENABLE, META_DISTILL_THRESHOLD
+        from applications.zhihu_story.config import (
+            META_LEARN_ENABLE,
+            META_DISTILL_THRESHOLD,
         )
     except ImportError:
         log.warning("meta_learner: config 中缺少元学习参数，跳过")
@@ -323,9 +327,12 @@ def _do_distill(pending):
       6. 把整个 pending 池追加到 consumed 并清空 pending
     """
     try:
-        from config import (
-            META_DISTILL_PROMPT, META_DISTILL_TOP_RATIO,
-            META_HIGH_SCORE_THRESHOLD
+        from applications.zhihu_story.prompts import (
+            META_DISTILL_PROMPT,
+        )
+        from applications.zhihu_story.config import (
+            META_DISTILL_TOP_RATIO,
+            META_HIGH_SCORE_THRESHOLD,
         )
     except ImportError as e:
         log.error(f"meta_learner: 缺少 prompt/参数配置：{e}")
@@ -828,7 +835,7 @@ def get_pool_stats():
     """返回池子和元知识的当前状态（用于日志展示和调试）"""
     pending_count = _count_pool_pending()
     try:
-        from config import META_DISTILL_THRESHOLD
+        from applications.zhihu_story.config import META_DISTILL_THRESHOLD
     except ImportError:
         META_DISTILL_THRESHOLD = "?"
 

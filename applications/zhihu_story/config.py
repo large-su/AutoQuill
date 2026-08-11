@@ -42,14 +42,20 @@ STORY_INCLUDE_KEYWORDS = [
     "女主", "男主", "女主角", "男主角",
 ]
 
+# 自动选题时首屏无故事类问题的滚动扩池上限（屏数）。
+# 推荐页首屏常只有 5-10 张卡片且多数是非故事话题，滚动可加载更多；
+# 仍无命中则选题报错（不静默选非故事话题）。
+MAX_SELECT_SCREENS = 3
+
 # 格式不合规时是否自动重试（False = 直接跳过，不浪费 token）
 ENABLE_FORMAT_RETRY = False
 
 # 故事创作素材模式：
+#   "sample"               参考文章采样（默认）：本地片段采样注入，零 LLM 提炼
 #   "recipe"               纯配方驱动（从当前文章提炼配方后生成，不附参考原文）
 #   "reference"            纯参考文章（旧模式，用 STORY_SYSTEM_PROMPT + 参考文章）
-#   "recipe_and_reference" 配方 + 参考文章结合（推荐，配方指引 + 参考文章风格借鉴）
-STORY_MATERIAL_MODE = "recipe"
+#   "recipe_and_reference" 配方 + 参考文章结合（配方指引 + 参考文章风格借鉴）
+STORY_MATERIAL_MODE = "sample"
 
 # ============================================================
 # 长文模式（大纲→批量写作交替流水线）
@@ -78,8 +84,12 @@ KB_ENABLE = True
 RECIPE_VERBOSE_MODE = True
 
 # ============================================================
-# 元知识自学习
+# 元知识自学习（★ 已停用）
 # ============================================================
+# 泛泛的元知识蒸馏效果有限，已被「作者风格蒸馏」取代
+# （author_profiler：提炼具体作者的写作风格并注入生成，见
+# AUTHOR_PROFILE）。模块代码保留，默认不执行；确需启用时
+# 显式设为 True 或加 --use-meta。
 
 META_LEARN_ENABLE = False
 META_DISTILL_THRESHOLD = 20
@@ -154,10 +164,17 @@ ENABLE_UIA_ANSWER_EXTRACTION = True
 UIA_ANSWER_WAIT_TIMEOUT = 4.0       # 等待首答 UIA 正文完整出现的最长时间
 UIA_ANSWER_POLL_INTERVAL = 0.25     # UIA 首答未就绪时的轮询间隔
 
+# DOM 通道（browser_adapter）：首选；关闭后走 UIA/OCR 旧通道
+ENABLE_DOM_ANSWER_EXTRACTION = True
+
 # 素材赞同数门槛：通过门槛的回答才进入生成池，并触发配方提炼
 ENABLE_MATERIAL_LIKES_GATE = True       # True=启用赞同数过滤；False=所有合格回答都进入生成池
 MATERIAL_MIN_LIKES = 200                 # 最低赞同数；已识别赞同数低于此值时跳过该素材
 MATERIAL_UNKNOWN_LIKES_POLICY = "drop"  # 未识别到赞同数时：keep=保留，drop=跳过
+
+# 作者技能注入：生成故事时把该作者的蒸馏技能 profile 注入 prompt。
+# 置空字符串关闭注入；profile 文件位于 data/authors/{name}.json
+AUTHOR_PROFILE = "镜中花"
 
 # ============================================================
 # 批量模式默认值

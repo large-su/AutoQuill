@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "autoquill-web",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py", "--web"],
+      "port": 8787
+    }
+  ]
+}

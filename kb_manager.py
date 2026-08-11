@@ -408,13 +408,13 @@ def extract_single_recipe(title, answer, timeout=90):
     """
     import sys
     try:
-        from config import RECIPE_EXTRACT_PROMPT
+        from applications.zhihu_story.prompts import RECIPE_EXTRACT_PROMPT
     except Exception as e:
         log.error(f"[async] RECIPE_EXTRACT_PROMPT 导入失败：{e}")
         return None
 
     try:
-        from config import RECIPE_VERBOSE_MODE
+        from applications.zhihu_story.config import RECIPE_VERBOSE_MODE
     except ImportError:
         RECIPE_VERBOSE_MODE = False
 
@@ -475,7 +475,7 @@ def extract_recipes(articles, batch_size=5):
     返回：
         [{"genre": "...", "hook": "...", ..., "perspective": "...", "tone": "..."}, ...]
     """
-    from config import RECIPE_EXTRACT_PROMPT
+    from applications.zhihu_story.prompts import RECIPE_EXTRACT_PROMPT
 
     all_recipes = []
 
@@ -492,10 +492,12 @@ def extract_recipes(articles, batch_size=5):
 
         # verbose 模式下配方字段长 3 倍左右，需要更大的 max_tokens
         try:
-            from config import RECIPE_VERBOSE_MODE
+            from applications.zhihu_story.config import RECIPE_VERBOSE_MODE
         except ImportError:
             RECIPE_VERBOSE_MODE = False
-        per_recipe_tokens = 900 if RECIPE_VERBOSE_MODE else 250
+        # 与 extract_single_recipe 对齐：非 verbose 1000 / verbose 2400。
+        # 曾用 250/900，8 字段 JSON 被截断导致解析全部失败
+        per_recipe_tokens = 2400 if RECIPE_VERBOSE_MODE else 1000
         tokens_needed = len(batch) * per_recipe_tokens + 300
 
         # === 首次尝试（temperature=0.3）===
@@ -603,7 +605,7 @@ def extract_and_store(articles):
 
     log.info(f"  ✓ 新增 {len(new_recipes)} 个配方（总计 {len(kb['recipes'])} 个）")
 
-    from config import KB_MERGE_TRIGGER
+    from applications.zhihu_story.config import KB_MERGE_TRIGGER
     if len(kb["recipes"]) >= KB_MERGE_TRIGGER:
         log.info(f"  知识库条目（{len(kb['recipes'])}）已达压缩阈值（{KB_MERGE_TRIGGER}），建议运行：")
         log.info(f"    python kb_manager.py --compress")
@@ -616,7 +618,7 @@ def extract_and_store(articles):
 
 def classify_genre(question_title):
     """用 LLM 判断问题所属的故事题材。"""
-    from config import GENRE_CLASSIFY_PROMPT
+    from applications.zhihu_story.prompts import GENRE_CLASSIFY_PROMPT
 
     prompt = GENRE_CLASSIFY_PROMPT + f"\n\n问题标题：{question_title}\n\n请直接返回题材名称（2-6个字），不要其他文字。"
 
@@ -633,7 +635,7 @@ def classify_genre(question_title):
 
 def classify_genres_batch(titles):
     """批量题材判断。"""
-    from config import GENRE_CLASSIFY_PROMPT
+    from applications.zhihu_story.prompts import GENRE_CLASSIFY_PROMPT
 
     if not titles:
         return []
@@ -685,7 +687,7 @@ def compress_kb():
         genre = r.get("genre", "未分类")
         genre_groups.setdefault(genre, []).append(r)
 
-    from config import KB_MAX_PER_GENRE
+    from applications.zhihu_story.config import KB_MAX_PER_GENRE
 
     merged_recipes = []
 
@@ -744,81 +746,6 @@ def compress_kb():
     after_count = len(merged_recipes)
     print(f"\n  压缩完成：{before_count} → {after_count} 条（减少 {before_count - after_count} 条）")
 
-# ============================================================
-# 冷启动 / 补充知识（复用批量采集流程）
-# ============================================================
-
-def cold_start():
-    """
-    冷启动 / 补充知识：自动采集知乎文章并提炼配方。
-
-    采用和 zhihu_auto.py 批量模式完全一致的采集流程：
-    打开推荐页 → OCR 识别多个问题 → 逐个进入采集回答 → 滚动刷新 → 继续采集
-    """
-
-    print(f"""
-    ╔══════════════════════════════════════════╗
-    ║   📚 知识库采集 + 提炼                    ║
-    ╚══════════════════════════════════════════╝
-    """)
-
-    kb = load_kb()
-    current = len(kb.get("recipes", []))
-    print(f"  当前知识库：{current} 条配方")
-
-    try:
-        count_input = input("\n  请输入要采集的故事数量（推荐 10-20）：").strip()
-        target_count = int(count_input)
-    except (ValueError, EOFError):
-        print("  输入无效，默认采集 10 篇")
-        target_count = 10
-
-    if target_count <= 0:
-        print("  数量必须大于 0")
-        return
-
-    # ===== 初始化环境 =====
-    try:
-        from zhihu_auto import (collect_materials_batch, load_coords,
-                                focus_edge, get_bounds)
-    except ImportError as e:
-        print(f"  导入失败：{e}")
-        print("  请确保 zhihu_auto.py 在同一目录下")
-        return
-
-    if not load_coords():
-        print("  ❌ 坐标未校准！请先运行：python zhihu_auto.py --calibrate")
-        return
-
-    print("  加载 OCR...")
-    from ocr_utils import _get_engine
-    _get_engine()
-    print("  ✓ 就绪")
-
-    input(f"\n  将采集 {target_count} 篇故事，按 Enter 开始...")
-
-    focus_edge()
-    time.sleep(0.5)
-
-    # ===== 批量采集（复用 zhihu_auto 的成熟流程） =====
-    lx, rx, ty, by = get_bounds()
-    materials = collect_materials_batch(target_count, lx, rx, ty, by)
-
-    if not materials:
-        print("\n  未采集到任何素材")
-        return
-
-    print(f"\n  采集完成：共 {len(materials)} 篇")
-    for m in materials:
-        print(f"    {m['index']}. 「{m['title'][:40]}...」（{len(m['answer'])} 字）")
-
-    # ===== 提炼配方并存入知识库 =====
-    print(f"\n  开始提炼配方...")
-    articles = [{"title": m["title"], "answer": m["answer"]} for m in materials]
-    count = extract_and_store(articles)
-
-    print(f"\n  ✓ 完成！新增 {count} 个配方")
-    show_stats()
 
 
 # ============================================================
@@ -1059,8 +986,7 @@ def main():
         print("""
     用法：
       python kb_manager.py --stats           查看知识库统计
-      python kb_manager.py --cold-start      自动采集文章并提炼配方
-    python kb_manager.py --rebuild         从 data/raw_materials.jsonl 重建知识库
+      python kb_manager.py --rebuild         从 data/raw_materials.jsonl 重建知识库
       python kb_manager.py --compress        压缩合并知识库
       python kb_manager.py --show <题材>     查看指定题材的配方
       python kb_manager.py --show-all        查看所有配方
@@ -1078,8 +1004,6 @@ def main():
 
     if cmd == "--stats":
         show_stats()
-    elif cmd == "--cold-start":
-        cold_start()
     elif cmd == "--rebuild":
         rebuild_from_raw()
     elif cmd == "--compress":

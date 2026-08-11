@@ -1,35 +1,38 @@
 # ============================================================
-# AutoQuill v2.3 — 统一入口
+# AutoQuill v3.0 — 统一入口
 #
 # 用法：
-#   python main.py                 批量模式（默认）：收集素材 → 生成 → 发布 → 元学习
+#   python main.py                 批量模式（默认）：收集素材 → 生成 → 发布
 #   python main.py --single        传统模式：逐轮生成即发布
 #   python main.py --calibrate     校准坐标
-#   python main.py --test-ocr      测试 OCR
-#   python main.py --debug-ocr-region  进入回答页并保存 OCR 区域标注图
-#   python main.py --probe-a11y [--url URL]  只读导出当前 Edge 的无障碍树
+#   python main.py --test-ocr      测试 OCR（旧坐标时代调试，见 tools/debug_legacy.py）
+#   python main.py --debug-ocr-region  进入回答页并保存 OCR 区域标注图（同上）
+#   python main.py --probe-a11y [--url URL]  只读导出当前 Edge 的无障碍树（同上）
 #   python main.py --test-api      测试 API 连接
 #   python main.py --image-gen     图像生成模式（Aizex 绘图）
-#   python main.py --use-meta      批量/传统模式中注入元知识到生成 prompt
+#   python main.py --use-meta      批量/传统模式中注入元知识到生成 prompt（默认停用）
 #   python main.py --no-meta       强制不注入元知识（覆盖 config 默认值）
 #
 # 架构分层：
-#   applications/    → 应用层（知乎故事 zhihu_story、图像生成 image_gen）
-#   core/            → 结构化重构核心（perception 感知 / action 动作 / mind 决策）
-#   workflows/       → 工作流编排（知乎批量、图像生成）
-#   web_drivers/     → LLM 网站驱动（DeepSeek、Aizex 等）
+#   applications/zhihu_story/ → 应用层（采集 browser_adapter/extractors、
+#                               文风蒸馏 author_profiler、感知 perception）
+#   workflows/                → 工作流编排（知乎批量）
+#   core/                     → 核心领域（story_workspace 素材暂存、
+#                               story_text 正文渲染）
+#   tools/                    → 开发期工具（debug_legacy 等，不在运行时路径上）
+#   web_drivers/              → LLM 网站驱动（DeepSeek、Aizex 等）
 #
 # 基础模块：
 #   main.py              → 入口（DPI、日志、CLI 分发）
 #   desktop_utils.py     → 桌面操作（浏览器、窗口、坐标、进度面板）
 #   ocr_utils.py         → 视觉感知（OCR 识别、文字定位、图标匹配）
-#   llm_api.py           → LLM API 调用（流式/非流式）
+#   llm_api.py           → LLM API 调用（流式/非流式 + 作者风格双层注入）
 #   llm_token_tracker.py → API 模式 Token 用量追踪
 #   config.py / config/  → 全局配置（主配置 + 分层配置目录）
 #
-# 进化系统：
+# 知识系统：
 #   kb_manager.py    → 知识库管理（配方积累、参考文章）
-#   meta_learner.py  → 元学习（评分回写、入池、检测蒸馏、story_postmortem）
+#   meta_learner.py  → 元学习（已停用：评分回写、入池、检测蒸馏、story_postmortem）
 #   rich_progress.py  → Rich 终端进度面板
 # ============================================================
 
@@ -52,12 +55,20 @@ import logging
 from datetime import datetime
 
 from config import (
-    PYAUTOGUI_PAUSE, QUESTION_SELECT_MODE, LLM_MODE,
-    ENABLE_STORY_FILTER, STORY_MATERIAL_MODE,
-    DEFAULT_BATCH_GENERATE_COUNT, DEFAULT_BATCH_PUBLISH_COUNT,
-    MAX_TOTAL_ATTEMPTS, LLM_API_KEY, WEB_DRIVER_NAME,
+    PYAUTOGUI_PAUSE,
+    LLM_MODE,
+    LLM_API_KEY,
+    WEB_DRIVER_NAME,
     WAIT_BETWEEN_CYCLES,
-    random_delay
+    random_delay,
+)
+from applications.zhihu_story.config import (
+    QUESTION_SELECT_MODE,
+    ENABLE_STORY_FILTER,
+    STORY_MATERIAL_MODE,
+    DEFAULT_BATCH_GENERATE_COUNT,
+    DEFAULT_BATCH_PUBLISH_COUNT,
+    MAX_TOTAL_ATTEMPTS,
 )
 
 # ============================================================
@@ -119,7 +130,7 @@ def ask_batch_params():
     """
     print("\n  ── 本次批量任务参数 ──")
     try:
-        from config import (
+        from applications.zhihu_story.config import (
             BATCH_AUTO_GENERATE_COUNT,
             BATCH_GENERATE_REDUNDANCY_RATIO,
             BATCH_GENERATE_MIN_EXTRA,
@@ -207,217 +218,6 @@ def ask_batch_params():
 # 测试 OCR
 # ============================================================
 
-def _draw_region(draw, box, color, label):
-    """在调试截图上画区域框。"""
-    x1, y1, x2, y2 = [int(v) for v in box]
-    draw.rectangle((x1, y1, x2, y2), outline=color, width=5)
-    draw.rectangle((x1, max(0, y1 - 22), x1 + 260, y1), fill=color)
-    draw.text((x1 + 6, max(0, y1 - 20)), label, fill="white")
-
-
-def _ocr_image_lines(image):
-    """对已截取的同一帧图像 OCR，供区域调试比较。"""
-    import numpy as np
-    from ocr_utils import _get_engine, _merge_to_lines
-
-    result, _ = _get_engine()(np.array(image))
-    if not result:
-        return []
-    result.sort(key=lambda item: (
-        sum(p[1] for p in item[0]) / 4,
-        sum(p[0] for p in item[0]) / 4
-    ))
-    return _merge_to_lines(result)
-
-
-def debug_ocr_region_mode():
-    """
-    按真实采集流程进入一个知乎回答页，然后保存 OCR 区域可视化截图。
-
-    红框：正文 OCR 区域
-    绿框：正文区域下方的候选赞同栏
-
-    同时对绿框原图、2 倍放大图、左侧赞同按钮图 OCR，并输出严格的赞同数解析结果。
-    """
-    from desktop_utils import load_coords, get_bounds, ensure_edge, focus_edge
-
-    if not load_coords():
-        print("  ❌ 请先 --calibrate")
-        return
-
-    from ocr_utils import _get_engine
-    _get_engine()
-
-    if not ensure_edge():
-        print("  ❌ 无法启动 Edge 浏览器，请手动打开后重试。")
-        return
-
-    from workflows.zhihu import ZhihuWorkflow
-
-    workflow = ZhihuWorkflow()
-    print("  将按当前选题模式进入一个知乎问题页...")
-    url = workflow.select_topic()
-    print(f"  当前问题页：{url}")
-
-    focus_edge()
-    time.sleep(0.5)
-
-    lx, rx, ty, by = get_bounds()
-    sw, sh = pyautogui.size()
-    from applications.zhihu_story.perception import (
-        get_likes_action_bounds, get_upvote_button_bounds
-    )
-
-    content_box = (lx, ty, rx, by)
-    likes_screen_bottom_box = get_likes_action_bounds(lx, rx, by)
-
-    raw_img = pyautogui.screenshot()
-    img = raw_img.copy()
-    from PIL import ImageDraw
-    draw = ImageDraw.Draw(img)
-    _draw_region(draw, content_box, "red", "CONTENT OCR")
-    _draw_region(draw, likes_screen_bottom_box, "green", "SCREEN BOTTOM LIKES")
-
-    os.makedirs("screenshots", exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    img_path = os.path.join("screenshots", f"ocr_regions_{stamp}.png")
-    txt_path = os.path.join("screenshots", f"ocr_regions_{stamp}.txt")
-    likes_raw_path = os.path.join("screenshots", f"ocr_likes_raw_{stamp}.png")
-    upvote_raw_path = os.path.join("screenshots", f"ocr_upvote_raw_{stamp}.png")
-    img.save(img_path)
-
-    content_lines = _ocr_image_lines(raw_img.crop(content_box))
-    likes_raw_img = raw_img.crop(likes_screen_bottom_box)
-    likes_raw_img.save(likes_raw_path)
-    likes_native_lines = _ocr_image_lines(likes_raw_img)
-    likes_2x_img = likes_raw_img.resize(
-        (likes_raw_img.width * 2, likes_raw_img.height * 2)
-    )
-    likes_2x_lines = _ocr_image_lines(likes_2x_img)
-    upvote_button_box = get_upvote_button_bounds(lx, rx, by)
-    upvote_raw_img = raw_img.crop(upvote_button_box)
-    upvote_raw_img.save(upvote_raw_path)
-    upvote_lines = _ocr_image_lines(upvote_raw_img)
-
-    from applications.zhihu_story.perception import parse_likes_only
-    likes_variants = [
-        ("native", likes_native_lines),
-        ("2x", likes_2x_lines),
-        ("upvote_button", upvote_lines),
-    ]
-
-    sections = [
-        ("CONTENT OCR", content_box, content_lines),
-        ("SCREEN BOTTOM LIKES (native)", likes_screen_bottom_box,
-         likes_native_lines),
-        ("SCREEN BOTTOM LIKES (2x)", likes_screen_bottom_box,
-         likes_2x_lines),
-        ("UPVOTE BUTTON (native)", upvote_button_box, upvote_lines),
-    ]
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(f"url: {url}\n")
-        f.write(f"screen: {sw}x{sh}\n\n")
-        for name, box, lines in sections:
-            f.write(f"[{name}] {tuple(int(v) for v in box)}\n")
-            for i, line in enumerate(lines, 1):
-                f.write(f"{i:02d}. {line}\n")
-            f.write("\n")
-
-        f.write("[LIKES PARSE]\n")
-        for variant, lines in likes_variants:
-            raw_text = " ".join(lines)
-            likes = parse_likes_only(raw_text)
-            f.write(f"{variant}: {likes if likes is not None else 'NOT_FOUND'}\n")
-            f.write(f"  raw: {raw_text}\n")
-
-    print(f"  ✓ 区域截图已保存：{img_path}")
-    print(f"  ✓ OCR 文本已保存：{txt_path}")
-    print(f"  ✓ 绿框原图已保存：{likes_raw_path}")
-    print(f"  ✓ 赞同按钮原图已保存：{upvote_raw_path}")
-    for variant, lines in likes_variants:
-        likes = parse_likes_only(" ".join(lines))
-        label = likes if likes is not None else "未识别"
-        print(f"  · 绿框 {variant} OCR 赞同数：{label}")
-
-
-def test_ocr_mode():
-    from desktop_utils import load_coords, get_bounds, focus_edge
-
-    if not load_coords():
-        print("  ❌ 请先 --calibrate")
-        return
-
-    lx, rx, ty, by = get_bounds()
-    print(f"\n  OCR 区域：({lx},{ty})~({rx},{by})")
-    print("  请在 Edge 打开知乎问题页。")
-    input("  按 Enter 测试...")
-    focus_edge()
-    time.sleep(0.5)
-
-    from ocr_utils import ocr_region, _is_answer_end_marker
-    lines, _ = ocr_region(lx, ty, rx, by)
-    for i, l in enumerate(lines):
-        marks = []
-        if "关注问题" in l:
-            marks.append("◀问题结束")
-        if "人赞同" in l:
-            marks.append("◀回答开始")
-        if _is_answer_end_marker(l):
-            marks.append("◀回答结束")
-        m = f"  {'  '.join(marks)}" if marks else ""
-        print(f"  {i+1:2d}. {l}{m}")
-    print(f"\n  共 {len(lines)} 行")
-
-
-def _get_cli_option(argv, option):
-    """Return an optional CLI value without introducing a parser dependency."""
-    try:
-        index = argv.index(option)
-    except ValueError:
-        return None
-    if index + 1 >= len(argv) or argv[index + 1].startswith("--"):
-        raise ValueError(f"{option} 需要提供 URL")
-    return argv[index + 1]
-
-
-def probe_a11y_mode(argv):
-    """Run the read-only UI Automation probe against the active Edge window."""
-    try:
-        target_url = _get_cli_option(argv, "--url")
-    except ValueError as exc:
-        print(f"  ✗ {exc}")
-        print("  用法：python main.py --probe-a11y [--url https://www.zhihu.com/...] ")
-        return
-
-    from desktop_utils import focus_edge, navigate_to_url
-
-    if not focus_edge():
-        print("  ✗ 未找到可聚焦的 Edge 窗口，请先打开 Edge 后重试。")
-        return
-
-    if target_url:
-        print(f"  通过浏览器常规导航打开：{target_url}")
-        navigate_to_url(target_url)
-
-    print("  正在只读枚举当前 Edge 的 Windows 无障碍树，不会点击或写入页面...")
-    try:
-        from applications.zhihu_story.a11y_probe import probe_foreground_edge
-        result = probe_foreground_edge(source_url=target_url)
-    except Exception as exc:
-        log.error(f"UIA 探针失败：{exc}")
-        print(f"  ✗ UIA 探针失败：{exc}")
-        return
-
-    print(f"  ✓ UIA 树已导出：{result['path']}")
-    print(f"    共读取 {result['node_count']} 个元素"
-          f"{'（达到安全上限，结果已截断）' if result['truncated'] else ''}")
-    print("    回答状态：" + " | ".join(
-        f"{name}={count}" for name, count in result['actions'].items()
-    ))
-    print(f"    标题候选={result['question_titles']}，"
-          f"互动文本/值={result['interactions']}")
-
-
 # ============================================================
 # 图像生成模式
 # ============================================================
@@ -476,7 +276,7 @@ def _run_resume(argv):
     if not sid:
         print("  用法：python main.py --resume <story_id>")
         print("  可用的 story_id：")
-        from config import STORY_OUTPUT_DIR
+        from applications.zhihu_story.config import STORY_OUTPUT_DIR
         import os as _os
         root = _os.path.join(
             _os.path.dirname(_os.path.abspath(__file__)), STORY_OUTPUT_DIR
@@ -517,7 +317,8 @@ def _run_resume(argv):
     title = p.get('title', '')
     recipe = None
     try:
-        from config import KB_ENABLE, LLM_API_KEY
+        from applications.zhihu_story.config import KB_ENABLE
+        from config import LLM_API_KEY
         if KB_ENABLE and LLM_API_KEY:
             from kb_manager import load_kb
             kb = load_kb()
@@ -528,7 +329,7 @@ def _run_resume(argv):
     except Exception:
         pass
 
-    from config import LONG_FORM_MODE
+    from applications.zhihu_story.config import LONG_FORM_MODE
     if not LONG_FORM_MODE:
         print("  ❌ 长文模式未启用（LONG_FORM_MODE=False）")
         return
@@ -536,7 +337,7 @@ def _run_resume(argv):
     # 尝试加载元知识
     meta_knowledge = None
     try:
-        from config import META_LEARN_ENABLE
+        from applications.zhihu_story.config import META_LEARN_ENABLE
         if META_LEARN_ENABLE:
             from meta_learner import load_meta_knowledge
             meta_knowledge = load_meta_knowledge()
@@ -567,9 +368,15 @@ def _run_resume(argv):
 # ============================================================
 
 def main():
+    # --web 必须先于 banner 处理：banner 含 emoji，GBK 控制台打印即崩；
+    # 且 Web 控制台不需要 OCR/API 检查
+    if '--web' in sys.argv:
+        from webui.server import run as run_web
+        run_web()
+        return
+
     from desktop_utils import (
-        load_coords, get_bounds, focus_edge, take_screenshot,
-        calibrate_mode, COORDS
+        focus_edge, take_screenshot, calibrate_mode,
     )
 
     select_str = "手动" if QUESTION_SELECT_MODE == "manual" else "自动"
@@ -578,7 +385,7 @@ def main():
 
     print(f"""
     ╔══════════════════════════════════════════════╗
-    ║       ✒️ AutoQuill v2.3                      ║
+    ║       ✒️ AutoQuill v3.0                      ║
     ║                                              ║
     ║  选题：{select_str}  生成：{llm_str}  故事筛选：{filter_str}  ║
     ║                                              ║
@@ -591,8 +398,9 @@ def main():
     ║  --debug-ocr-region  进入回答页并标注 OCR 区域║
     ║  --test-api  测试 API 连接                   ║
     ║  --image-gen 图像生成模式                    ║
+    ║  --web       本地 Web 控制台（127.0.0.1）    ║
     ║                                              ║
-    ║  v2.3：结构化重构 + 自进化系统                ║
+    ║  v3.0：DOM 直连 + Web 控制台                 ║
     ║  安全：鼠标左上角 或 Ctrl+C 终止             ║
     ╚══════════════════════════════════════════════╝
     """)
@@ -604,7 +412,7 @@ def main():
 
     # 知识库状态
     try:
-        from config import KB_ENABLE
+        from applications.zhihu_story.config import KB_ENABLE
         if KB_ENABLE:
             from kb_manager import load_kb
             kb = load_kb()
@@ -623,15 +431,20 @@ def main():
     if '--calibrate' in sys.argv:
         calibrate_mode()
         return
-    if '--test-ocr' in sys.argv:
-        test_ocr_mode()
-        return
-    if '--debug-ocr-region' in sys.argv:
-        debug_ocr_region_mode()
-        return
-    if '--probe-a11y' in sys.argv:
-        probe_a11y_mode(sys.argv)
-        return
+    if any(flag in sys.argv for flag in
+           ('--test-ocr', '--debug-ocr-region', '--probe-a11y')):
+        # OCR/UIA 时代调试命令已移入 tools/debug_legacy.py
+        from tools.debug_legacy import (
+            debug_ocr_region_mode, probe_a11y_mode, test_ocr_mode)
+        if '--test-ocr' in sys.argv:
+            test_ocr_mode()
+            return
+        if '--debug-ocr-region' in sys.argv:
+            debug_ocr_region_mode()
+            return
+        if '--probe-a11y' in sys.argv:
+            probe_a11y_mode(sys.argv)
+            return
     if '--test-api' in sys.argv:
         from llm_api import test_api_connection
         test_api_connection()
@@ -642,18 +455,6 @@ def main():
     if '--resume' in sys.argv:
         _run_resume(sys.argv)
         return
-
-    # 坐标检查
-    if not load_coords():
-        from desktop_utils import _get_required_keys
-        required = _get_required_keys()
-        missing = [k for k in required if k not in COORDS]
-        print(f"  ❌ 缺少坐标：{[required[k] for k in missing]}")
-        print("  请运行：python main.py --calibrate\n")
-        return
-
-    lx, rx, ty, by = get_bounds()
-    print(f"  OCR 区域：({lx},{ty})~({rx},{by})")
 
     # API/Web 模式检查
     if LLM_MODE == "api":
@@ -723,12 +524,6 @@ def main():
         print(f"  目标：成功 {target} 轮"
               f"（最多尝试 {MAX_TOTAL_ATTEMPTS} 轮）\n")
         input("按 Enter 开始 >> ")
-
-        # ★ 参数确认完毕，启动/聚焦浏览器
-        from desktop_utils import ensure_edge
-        if not ensure_edge():
-            print("  ❌ 无法启动 Edge 浏览器，请手动打开后重试。")
-            return
 
         done = 0
         attempts = 0
@@ -805,7 +600,7 @@ def main():
     # --- 元知识注入开关 ---
     # 优先级：--no-meta > --use-meta > config 默认值
     try:
-        from config import META_INJECT_DEFAULT
+        from applications.zhihu_story.config import META_INJECT_DEFAULT
     except ImportError:
         META_INJECT_DEFAULT = False
     if '--no-meta' in sys.argv:
@@ -835,12 +630,6 @@ def main():
     print(f"     阶段3.5：元学习（评分回写+入池+检测蒸馏，自动）")
     print()
     input("按 Enter 开始流水线 >> ")
-
-    # ★ 参数确认完毕，启动/聚焦浏览器
-    from desktop_utils import ensure_edge
-    if not ensure_edge():
-        print("  ❌ 无法启动 Edge 浏览器，请手动打开后重试。")
-        return
 
     total_published = 0
     time_batch_start = time.time()

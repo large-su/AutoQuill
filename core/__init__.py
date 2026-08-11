@@ -1,7 +1,4 @@
-# Core Capabilities Layer
+# Core — 创作核心模块
 #
-# 架构位置：Layer 2 (Core Capabilities)
-# 脑（Mind）、眼（Perception）、手（Action）的统一抽象接口
-#
-# 这里的抽象应对应于 agent_framework_architecture_manifesto.md
-# 第 5 节的"核心抽象草案"和第 6 节的"核心接口草案"。
+# story_workspace.py  长文故事工作区（文件系统持久化，crash-safe）
+# story_text.py       故事文本管线（清洗、断句、格式修复与校验）
