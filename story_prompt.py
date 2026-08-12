@@ -17,42 +17,14 @@ log = logging.getLogger(__name__)
 
 def _resolve_meta_content(meta_knowledge, recipe):
     """
-    解析要注入的元知识内容。
-
-    有 recipe 且检索开关开启时，调用分层检索取最相关小节；
-    无 recipe 或检索关闭/失败时，返回全量 meta。
+    解析要注入的元知识内容（全量注入；分层检索随 meta_learner
+    P5 归档移除）。
 
     返回：
         (meta_text, was_retrieved): 元知识文本 和 是否实际做了检索
     """
     if not meta_knowledge or not str(meta_knowledge).strip():
         return "", False
-    if not recipe:
-        return str(meta_knowledge).strip(), False
-
-    try:
-        from config.story import META_RETRIEVAL_ENABLE, META_RETRIEVAL_TOP_K
-    except ImportError:
-        return str(meta_knowledge).strip(), False
-
-    if not META_RETRIEVAL_ENABLE:
-        return str(meta_knowledge).strip(), False
-
-    try:
-        from meta_learner import retrieve_meta_sections
-        retrieved = retrieve_meta_sections(
-            meta_knowledge, recipe, top_k=META_RETRIEVAL_TOP_K
-        )
-        if retrieved and len(retrieved.strip()) > 50:
-            log.info(
-                f"  [元知识检索] 从 {len(str(meta_knowledge))} 字符中"
-                f" 检索出 top-{META_RETRIEVAL_TOP_K} 相关小节"
-                f"（{len(retrieved)} 字符）"
-            )
-            return retrieved, True
-    except Exception as e:
-        log.warning(f"  [元知识检索] 检索失败，回退全量注入：{e}")
-
     return str(meta_knowledge).strip(), False
 
 
@@ -74,8 +46,6 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         meta_knowledge:    跨任务积累的元知识文本（可选）。
                           若 STORY_RECIPE_PROMPT 内含 {meta_knowledge} 占位符，
                           会直接填入；否则作为一个独立的"心法节"追加到 prompt 末尾。
-                          建议只传经过 meta_learner.load_meta_knowledge()
-                          处理后的正文（已剥除元数据块）。
         author_profile:    作者技能签名 dict（author_profiler.load_author_profile
                           的返回）。非 None 时把风格签名渲染为独立节追加到 prompt
                           末尾（generate_story 的 author= 参数会自动加载）。

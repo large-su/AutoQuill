@@ -22,10 +22,6 @@ __all__ = [
     "LONG_FORM_CHAPTER_MAX_TOKENS", "BATCH_CHAPTER_COUNT", "STORY_OUTPUT_DIR",
     # 知识库
     "KB_MAX_PER_GENRE", "KB_MERGE_TRIGGER", "KB_ENABLE", "RECIPE_VERBOSE_MODE",
-    # 元知识（已停用，P5 归档时删除）
-    "META_LEARN_ENABLE", "META_DISTILL_THRESHOLD", "META_DISTILL_TOP_RATIO",
-    "META_INJECT_DEFAULT", "META_HIGH_SCORE_THRESHOLD",
-    "META_RETRIEVAL_ENABLE", "META_RETRIEVAL_TOP_K",
     # reader_score
     "READER_SCORE_W_LIKES", "READER_SCORE_W_COMMENTS", "READER_SCORE_W_COLLECTS",
     "READER_SCORE_W_HEARTS", "READER_SCORE_REF_AGE_DAYS", "READER_SCORE_DECAY_EXPONENT",
@@ -135,27 +131,6 @@ KB_ENABLE = True
 
 # 配方提炼详细模式开关（影响 RECIPE_EXTRACT_PROMPT 组装）
 RECIPE_VERBOSE_MODE = True
-
-# ============================================================
-# 元知识自学习（★ 已停用）
-# ============================================================
-# 泛泛的元知识蒸馏效果有限，已被「作者风格蒸馏」取代
-# （author_profiler：提炼具体作者的写作风格并注入生成，见
-# AUTHOR_PROFILE）。模块代码保留，默认不执行；确需启用时
-# 显式设为 True 或加 --use-meta。
-
-META_LEARN_ENABLE = False
-META_DISTILL_THRESHOLD = 20
-META_DISTILL_TOP_RATIO = 0.6
-META_INJECT_DEFAULT = False
-META_HIGH_SCORE_THRESHOLD = 50
-
-# ============================================================
-# 元知识分层检索
-# ============================================================
-
-META_RETRIEVAL_ENABLE = True     # True=按 recipe 检索相关小节, False=注入全文
-META_RETRIEVAL_TOP_K = 3         # 每次检索返回的小节数量
 
 # ============================================================
 # reader_score：基于真实读者互动的评分

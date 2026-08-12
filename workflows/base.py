@@ -75,8 +75,6 @@ class WorkflowBase:
             log.info(f"  配方模式：[{recipe.get('genre', '?')}] "
                      f"{recipe.get('hook', '?')[:25]}")
         # 如果已加载了元知识，提示一下
-        if getattr(self, "_meta_knowledge", None):
-            log.info(f"  已注入元知识（心法手册，{len(self._meta_knowledge)} 字符）")
         log.info("=" * 50)
 
         if LLM_MODE == "api":
@@ -88,10 +86,9 @@ class WorkflowBase:
         """API 模式：流式 HTTP 请求"""
         from llm_api import generate_story
 
-        meta = getattr(self, "_meta_knowledge", None)
         author = getattr(self, "author", None)
         story = generate_story(question_title, top_answer, recipe=recipe,
-                               meta_knowledge=meta, author=author)
+                               author=author)
         if not story:
             log.error("API 生成失败")
             from desktop_utils import focus_edge
@@ -128,11 +125,9 @@ class WorkflowBase:
         from web_drivers import get_driver
         from llm_api import build_story_prompt, _load_author_profile_or_none
 
-        meta = getattr(self, "_meta_knowledge", None)
         author = getattr(self, "author", None)
         full_prompt, mode_str = build_story_prompt(
             question_title, top_answer, recipe,
-            meta_knowledge=meta,
             author_profile=_load_author_profile_or_none(author),
         )
         log.info(f"  Prompt 模式：{mode_str}")
@@ -260,7 +255,7 @@ class WorkflowBase:
     # 批量运行（流水线模式）
     # ============================================================
 
-    def run_batch(self, target, publish_count=None, use_meta=None):
+    def run_batch(self, target, publish_count=None):
         """
         流水线批量模式：
 
@@ -268,16 +263,12 @@ class WorkflowBase:
         阶段2：生成故事（API并行 / Web串行或并行）
         阶段2.5：格式检测 + 重试
         阶段3：评分 → 择优发布
-        阶段3.5：元学习（评分回写 + 入池 + 检测蒸馏，自动）
 
         参数：
             target:        生成故事数量
             publish_count: 发布数量，None 则使用 config 默认值
                 - publish_count < target  → 评分择优发布前 N 篇
                 - publish_count >= target → 全部发布，跳过评分
-            use_meta:      是否在阶段2注入元知识到生成 prompt。
-                           None → 使用 config.META_INJECT_DEFAULT
-                           True/False → 显式覆盖
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from config import (
@@ -301,32 +292,6 @@ class WorkflowBase:
 
         need_scoring = publish_count < target
 
-        # ===== 解析 use_meta + 加载元知识 =====
-        try:
-            from config.story import META_INJECT_DEFAULT, META_LEARN_ENABLE
-        except ImportError:
-            META_INJECT_DEFAULT = False
-            META_LEARN_ENABLE = False
-
-        if use_meta is None:
-            use_meta = META_INJECT_DEFAULT
-
-        self._meta_knowledge = None  # 每次 run_batch 重置
-        if use_meta:
-            try:
-                from meta_learner import load_meta_knowledge, log_pool_stats
-                meta_body = load_meta_knowledge()
-                if meta_body:
-                    self._meta_knowledge = meta_body
-                    log.info(f"✓ 已加载元知识（心法手册，{len(meta_body)} 字符），"
-                             f"将注入到本批次所有生成 prompt")
-                else:
-                    log.info("⚠ 开启了 --use-meta，但 meta_knowledge.md 尚不存在"
-                             "或为空。本批次正常生成（等达到阈值后自动建立初稿）")
-                log_pool_stats()
-            except Exception as e:
-                log.warning(f"加载元知识异常（忽略，按无元知识运行）：{e}")
-
         log.info(f"\n{'='*60}")
         log.info("流水线批量模式")
         if need_scoring:
@@ -337,8 +302,6 @@ class WorkflowBase:
             log.info(f"  目标：收集 {target} 份素材 → "
                      f"{'并行' if LLM_MODE == 'api' else '串行'}生成 → "
                      f"全部发布（{target} 篇，不评分）")
-        if self._meta_knowledge:
-            log.info(f"  ✨ 元知识已注入（use_meta=True）")
         log.info(f"{'='*60}")
 
         time_total_start = time.time()
@@ -480,7 +443,6 @@ class WorkflowBase:
 
         # 判断是否需要评分：publish_count < 合规故事数 才需要择优
         actual_publish = min(publish_count, len(generated))
-        _did_score = False  # ★ 追踪本轮是否实际执行了评分
         if actual_publish >= len(generated):
             # 全部发布，跳过评分
             log.info(f"阶段3：全部发布（{len(generated)} 篇 ≤ "
@@ -490,7 +452,6 @@ class WorkflowBase:
             to_skip = []
         else:
             # 评分择优
-            _did_score = True
             log.info(f"阶段3：质量评分 + 择优发布前 {actual_publish} 篇")
             log.info(f"{'─'*50}\n")
             scored = score_stories(generated)
@@ -553,28 +514,6 @@ class WorkflowBase:
                         "候补文章已用尽或连续失败")
 
         time_phase3 = time.time() - time_phase3_start
-
-        # ===== 阶段 3.5：元学习（评分回写 + 入池 + 检测蒸馏）=====
-        # 仅当本轮实际执行了评分时才能学习（_did_score 标志位）
-        if META_LEARN_ENABLE and _did_score:
-            time_meta_start = time.time()
-            log.info(f"\n{'─'*50}")
-            log.info("阶段 3.5：元学习（评分回写 + 入池 + 检测蒸馏）")
-            log.info(f"{'─'*50}")
-            try:
-                from meta_learner import (
-                    enqueue_full_batch, check_and_distill, log_pool_stats
-                )
-                added = enqueue_full_batch(scored)
-                log.info(f"  本轮入池 {added} 条配方")
-                log_pool_stats()
-                distilled = check_and_distill()
-                if distilled:
-                    log.info("  ✓ 本轮已完成心法蒸馏，新版元知识已就绪")
-            except Exception as e:
-                log.warning(f"  元学习过程出错（忽略，不影响主流程）：{e}")
-            time_meta = time.time() - time_meta_start
-            log.info(f"  阶段 3.5 耗时 {time_meta:.1f}s")
 
         time_total = time.time() - time_total_start
 
@@ -670,7 +609,6 @@ class WorkflowBase:
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             future_to_mat = {}
-            meta = getattr(self, "_meta_knowledge", None)
 
             next_index = 0
             success_streak = 0
@@ -686,7 +624,6 @@ class WorkflowBase:
                         generate_story_parallel,
                         mat['title'], mat['answer'], mat['index'],
                         progress, recipe=mat.get('recipe'),
-                        meta_knowledge=meta,
                         author=getattr(self, "author", None),
                     )
                     future_to_mat[future] = mat
@@ -773,15 +710,13 @@ class WorkflowBase:
         log.info(f"  启用并行模式：{num_slots} 个页面 "
                  f"（总任务 {len(materials)} 个）")
 
-        # 构造 (prompt, meta) 任务列表（与串行 _generate_web_short_form
+        # 构造 prompt 任务列表（与串行 _generate_web_short_form
         # 一致地注入作者文风——旧版并行漏传，此处对齐）
-        meta = getattr(self, "_meta_knowledge", None)
         author = getattr(self, "author", None)
         tasks = []
         for mat in materials:
             full_prompt, _mode = build_story_prompt(
                 mat['title'], mat['answer'], recipe=mat.get('recipe'),
-                meta_knowledge=meta,
                 author_profile=_load_author_profile_or_none(author),
             )
             tasks.append((full_prompt, mat))
@@ -878,13 +813,11 @@ class WorkflowBase:
             max_workers=min(len(non_compliant), 5)
         ) as pool:
             future_to_mat = {}
-            meta = getattr(self, "_meta_knowledge", None)
             for mat in non_compliant:
                 future = pool.submit(
                     generate_story_parallel,
                     mat['title'], mat['answer'], mat['index'],
                     retry_progress, recipe=mat.get('recipe'),
-                    meta_knowledge=meta,
                     author=getattr(self, "author", None),
                 )
                 future_to_mat[future] = mat
@@ -964,13 +897,11 @@ class WorkflowBase:
         log.info(f"  并行重试：{num_slots} 个页面 "
                  f"（共 {len(non_compliant)} 篇不合规）")
 
-        meta = getattr(self, "_meta_knowledge", None)
         author = getattr(self, "author", None)
         tasks = []
         for mat in non_compliant:
             full_prompt, _mode = build_story_prompt(
                 mat['title'], mat['answer'], recipe=mat.get('recipe'),
-                meta_knowledge=meta,
                 author_profile=_load_author_profile_or_none(author),
             )
             tasks.append((full_prompt, mat))

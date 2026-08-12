@@ -417,7 +417,7 @@ def api_config():
                   "STORY_MATERIAL_MODE", "AUTHOR_PROFILE",
                   "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
                   "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES",
-                  "LONG_FORM_MODE", "META_LEARN_ENABLE", "KB_ENABLE"):
+                  "LONG_FORM_MODE", "KB_ENABLE"):
             cfg[k] = getattr(sconfig, k, None)
     except Exception as exc:
         cfg["_app_error"] = str(exc)

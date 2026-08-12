@@ -83,7 +83,7 @@ def generate_story(question_title, reference_answer=None, recipe=None,
         question_title:    知乎问题标题
         reference_answer:  高赞回答文本
         recipe:            知识库配方 dict
-        meta_knowledge:    跨任务积累的元知识文本（可选，用于 --use-meta 模式）
+        meta_knowledge:    跨任务积累的元知识文本（可选，外部注入用）
         author:            作者名（可选）。从 data/authors/{name}.json 加载
                            技能签名并注入 prompt（仅短文模式）
 

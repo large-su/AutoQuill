@@ -10,8 +10,6 @@
 #   python main.py --probe-a11y [--url URL]  只读导出当前 Edge 的无障碍树（同上）
 #   python main.py --test-api      测试 API 连接
 #   python main.py --image-gen     图像生成模式（Aizex 绘图）
-#   python main.py --use-meta      批量/传统模式中注入元知识到生成 prompt（默认停用）
-#   python main.py --no-meta       强制不注入元知识（覆盖 config 默认值）
 #
 # 架构分层：
 #   applications/zhihu_story/ → 应用层（采集 browser_adapter/extractors、
@@ -32,7 +30,7 @@
 #
 # 知识系统：
 #   kb_manager.py    → 知识库管理（配方积累、参考文章）
-#   meta_learner.py  → 元学习（已停用：评分回写、入池、检测蒸馏、story_postmortem）
+#   archive/         → 归档模块（meta_learner 元学习，P5 移入）
 #   rich_progress.py  → Rich 终端进度面板
 # ============================================================
 
@@ -334,23 +332,11 @@ def _run_resume(argv):
         print("  ❌ 长文模式未启用（LONG_FORM_MODE=False）")
         return
 
-    # 尝试加载元知识
-    meta_knowledge = None
-    try:
-        from config.story import META_LEARN_ENABLE
-        if META_LEARN_ENABLE:
-            from meta_learner import load_meta_knowledge
-            meta_knowledge = load_meta_knowledge()
-            if meta_knowledge:
-                print(f"  元知识：已加载（{len(meta_knowledge)} 字符）")
-    except Exception:
-        pass
-
     print(f"\n  继续生成...\n")
     try:
         from llm_api import generate_long_form_story
         story = generate_long_form_story(
-            title, recipe=recipe, meta_knowledge=meta_knowledge, workspace=ws,
+            title, recipe=recipe, workspace=ws,
         )
         if story:
             print(f"\n  ✅ 故事恢复完成！"
@@ -394,8 +380,6 @@ def main():
     ║                                              ║
     ║  无参数      批量模式（默认）                ║
     ║  --single    传统模式（逐轮生成即发布）      ║
-    ║  --use-meta  注入元知识到生成 prompt         ║
-    ║  --no-meta   强制不注入元知识                ║
     ║  --calibrate 校准坐标                        ║
     ║  --test-ocr  测试 OCR                        ║
     ║  --debug-ocr-region  进入回答页并标注 OCR 区域║
@@ -588,19 +572,6 @@ def main():
     # --- 批量模式（默认） ---
     gen_count, pub_count, batch_rounds = ask_batch_params()
 
-    # --- 元知识注入开关 ---
-    # 优先级：--no-meta > --use-meta > config 默认值
-    try:
-        from config.story import META_INJECT_DEFAULT
-    except ImportError:
-        META_INJECT_DEFAULT = False
-    if '--no-meta' in sys.argv:
-        use_meta = False
-    elif '--use-meta' in sys.argv:
-        use_meta = True
-    else:
-        use_meta = META_INJECT_DEFAULT
-
     gen_mode = "并行" if LLM_MODE == "api" else "Web"
     print(f"\n  🚀 流水线批量模式启动")
     if len(batch_rounds) > 1:
@@ -611,14 +582,12 @@ def main():
                   f"{r['gen_count']} 篇 → 发布 {r['pub_count']} 篇")
     else:
         print(f"     阶段1：串行收集 {gen_count} 份素材（选题+OCR）")
-    print(f"     阶段2：{gen_mode} 生成 {gen_count} 篇故事"
-          f"{' ✨注入元知识' if use_meta else ''}")
+    print(f"     阶段2：{gen_mode} 生成 {gen_count} 篇故事")
     if pub_count < gen_count:
         print(f"     阶段3：评分 → 择优发布 {pub_count} 篇")
     else:
         print(f"     阶段3：全部发布（{min(gen_count, pub_count)} 篇，"
               f"不评分）")
-    print(f"     阶段3.5：元学习（评分回写+入池+检测蒸馏，自动）")
     print()
     input("按 Enter 开始流水线 >> ")
 
@@ -637,7 +606,6 @@ def main():
             published = workflow.run_batch(
                 r["gen_count"],
                 publish_count=r["pub_count"],
-                use_meta=use_meta
             )
             total_published += published or 0
         except KeyboardInterrupt:
