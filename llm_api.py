@@ -53,7 +53,7 @@ def _resolve_meta_content(meta_knowledge, recipe):
         return str(meta_knowledge).strip(), False
 
     try:
-        from applications.zhihu_story.config import META_RETRIEVAL_ENABLE, META_RETRIEVAL_TOP_K
+        from config.story import META_RETRIEVAL_ENABLE, META_RETRIEVAL_TOP_K
     except ImportError:
         return str(meta_knowledge).strip(), False
 
@@ -107,7 +107,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     from applications.zhihu_story.prompts import STORY_SYSTEM_PROMPT
 
     try:
-        from applications.zhihu_story.config import STORY_MATERIAL_MODE
+        from config.story import STORY_MATERIAL_MODE
     except ImportError:
         STORY_MATERIAL_MODE = "reference"
 
@@ -355,7 +355,7 @@ def generate_long_form_story(question_title, recipe=None,
 
     返回：完整故事文本，失败返回 None
     """
-    from applications.zhihu_story.config import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
+    from config.story import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
     from core.story_workspace import StoryWorkspace
 
     # --resume: 使用已有 workspace 恢复
@@ -519,7 +519,7 @@ def generate_long_form_story_parallel(question_title, task_id,
     长文模式并行版本：用于批量并行生成场景。
     与 generate_long_form_story 的区别：不流式打印，通过 progress dict 报告状态。
     """
-    from applications.zhihu_story.config import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
+    from config.story import LONG_FORM_CHAPTER_COUNT, BATCH_CHAPTER_COUNT
     from core.story_workspace import StoryWorkspace
 
     short_title = question_title[:20] + "..." if len(question_title) > 20 else question_title
@@ -863,7 +863,7 @@ def generate_story(question_title, reference_answer=None, recipe=None,
 
     # ===== 长文模式分发（盐选投稿） =====
     try:
-        from applications.zhihu_story.config import LONG_FORM_MODE
+        from config.story import LONG_FORM_MODE
     except ImportError:
         LONG_FORM_MODE = False
     if LONG_FORM_MODE:
@@ -994,7 +994,7 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
 
     # ===== 长文模式分发（盐选投稿） =====
     try:
-        from applications.zhihu_story.config import LONG_FORM_MODE
+        from config.story import LONG_FORM_MODE
     except ImportError:
         LONG_FORM_MODE = False
     if LONG_FORM_MODE:
@@ -1196,7 +1196,7 @@ def score_stories(stories_data):
     from applications.zhihu_story.prompts import SCORE_PROMPT
     prompt = SCORE_PROMPT
     try:
-        from applications.zhihu_story.config import SCORE_STORY_HEAD_CHARS, SCORE_STORY_TAIL_CHARS
+        from config.story import SCORE_STORY_HEAD_CHARS, SCORE_STORY_TAIL_CHARS
     except ImportError:
         SCORE_STORY_HEAD_CHARS = 1000
         SCORE_STORY_TAIL_CHARS = 500

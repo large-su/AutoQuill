@@ -1,10 +1,12 @@
 # ============================================================
-# AutoQuill 配置文件 v3.0
+# AutoQuill 配置包 v3.1（2026-08 由顶层 config.py 迁入）
 #
-# 框架级通用配置。应用专属参数请直接引用：
-#   applications/zhihu_story/config.py    知乎故事创作参数
-#   applications/zhihu_story/prompts.py   知乎故事提示词
-#   applications/image_gen/config.py      图像生成参数
+# 框架级通用配置。业务参数分层存放：
+#   config/story.py                 故事创作域共享参数（单一事实来源）
+#   config/*.json                   运行时数据（服务商注册表、模型定价等）
+#   applications/zhihu_story/config.py  知乎应用层参数（re-export 兼容层）
+#   applications/zhihu_story/prompts.py 知乎故事提示词
+#   applications/image_gen/config.py    图像生成参数
 # ============================================================
 
 import random
@@ -46,7 +48,7 @@ KB_MODEL_ID  = "deepseek-v4-pro"    # 知识库/评分模型，正文同用 pro
 # --- 以下为自动加载逻辑，一般无需修改 ---
 import json as _json, os as _os
 
-_PROVIDERS_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "config", "llm_providers.json")
+_PROVIDERS_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "llm_providers.json")
 
 def _load_provider_config(provider_name, model_id):
     """从 config/llm_providers.json 中解析指定服务商和模型的完整配置"""
@@ -237,7 +239,7 @@ def random_mouse_duration():
 # ============================================================
 
 _WEBUI_MODEL_FILE = _os.path.join(
-    _os.path.dirname(_os.path.abspath(__file__)), "config", "webui_model.json")
+    _os.path.dirname(_os.path.abspath(__file__)), "webui_model.json")
 
 
 def _save_webui_state(**extra):
@@ -333,15 +335,15 @@ def set_runtime_browser_headless(headless, persist=True):
 def set_runtime_author_profile(name, persist=True):
     """运行时切换故事生成注入的作者文风（空串/None = 不注入）。
 
-    直接重赋值 applications.zhihu_story.config.AUTHOR_PROFILE——workflow
+    直接重赋值 config.story.AUTHOR_PROFILE（单一事实来源）——workflow
     每次任务新建实例时函数内重新 import 读取，切换后下一任务立即生效；
     持久化到 webui_model.json（author_profile 字段），启动自动恢复。
     """
-    from applications.zhihu_story import config as sconfig
-    sconfig.AUTHOR_PROFILE = name or ""
+    from config import story
+    story.AUTHOR_PROFILE = name or ""
     if persist:
-        _save_webui_state(author_profile=sconfig.AUTHOR_PROFILE)
-    return {"author_profile": sconfig.AUTHOR_PROFILE}
+        _save_webui_state(author_profile=story.AUTHOR_PROFILE)
+    return {"author_profile": story.AUTHOR_PROFILE}
 
 
 def _apply_webui_model_override():

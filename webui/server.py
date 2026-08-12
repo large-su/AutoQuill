@@ -412,7 +412,7 @@ def api_config():
     """配置速览（只读）。模型字段取根 config 的实际生效值（运行时可切换）。"""
     cfg = {}
     try:
-        from applications.zhihu_story import config as sconfig
+        from config import story as sconfig
         for k in ("QUESTION_SELECT_MODE", "ENABLE_STORY_FILTER",
                   "STORY_MATERIAL_MODE", "AUTHOR_PROFILE",
                   "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
@@ -522,7 +522,7 @@ def api_authors():
     """已提炼的文风签名列表（data/authors/*.json）+ 当前注入选择。"""
     from applications.zhihu_story.author_profiler import (
         AUTHORS_DIR, GENERAL_PROFILE_FILE, load_author_profile)
-    from applications.zhihu_story.config import AUTHOR_PROFILE
+    from config.story import AUTHOR_PROFILE
     authors = []
     if os.path.isdir(AUTHORS_DIR):
         for f in sorted(os.listdir(AUTHORS_DIR)):

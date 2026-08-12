@@ -151,15 +151,15 @@ class TestRuntimeAuthorProfile(unittest.TestCase):
 
     def setUp(self):
         import config
-        from applications.zhihu_story import config as sconfig
-        self._orig = sconfig.AUTHOR_PROFILE
+        from config import story
+        self._orig = story.AUTHOR_PROFILE
         self._tmpfile = os.path.join(tempfile.mkdtemp(), "webui_model.json")
         config._WEBUI_MODEL_FILE = self._tmpfile
 
     def tearDown(self):
         import config
-        from applications.zhihu_story import config as sconfig
-        sconfig.AUTHOR_PROFILE = self._orig
+        from config import story
+        story.AUTHOR_PROFILE = self._orig
         try:
             os.remove(self._tmpfile)
         except OSError:
@@ -167,18 +167,18 @@ class TestRuntimeAuthorProfile(unittest.TestCase):
 
     def test_set_author_effective(self):
         import config
-        from applications.zhihu_story import config as sconfig
+        from config import story
         eff = config.set_runtime_author_profile("张三", persist=False)
         self.assertEqual(eff["author_profile"], "张三")
-        self.assertEqual(sconfig.AUTHOR_PROFILE, "张三")
+        self.assertEqual(story.AUTHOR_PROFILE, "张三")
 
     def test_set_empty_clears(self):
         import config
-        from applications.zhihu_story import config as sconfig
+        from config import story
         config.set_runtime_author_profile("张三", persist=False)
         eff = config.set_runtime_author_profile("", persist=False)
         self.assertEqual(eff["author_profile"], "")
-        self.assertEqual(sconfig.AUTHOR_PROFILE, "")
+        self.assertEqual(story.AUTHOR_PROFILE, "")
 
     def test_persist_roundtrip(self):
         import config
@@ -216,21 +216,21 @@ class TestRuntimeAuthorProfile(unittest.TestCase):
 
     def test_apply_override_restores_author(self):
         import config
-        from applications.zhihu_story import config as sconfig
+        from config import story
         config.set_runtime_author_profile("王五", persist=True)
-        sconfig.AUTHOR_PROFILE = ""  # 模拟重启后默认
+        story.AUTHOR_PROFILE = ""  # 模拟重启后默认
         config._apply_webui_model_override()
-        self.assertEqual(sconfig.AUTHOR_PROFILE, "王五")
+        self.assertEqual(story.AUTHOR_PROFILE, "王五")
 
     def test_apply_override_ignores_missing_field(self):
         # 旧版 webui_model.json 无 author_profile 字段 → 保持默认，不报错
         import config
-        from applications.zhihu_story import config as sconfig
+        from config import story
         with open(self._tmpfile, "w", encoding="utf-8") as f:
             json.dump({"mode": "api"}, f)
-        sconfig.AUTHOR_PROFILE = "旧值"
+        story.AUTHOR_PROFILE = "旧值"
         config._apply_webui_model_override()
-        self.assertEqual(sconfig.AUTHOR_PROFILE, "旧值")
+        self.assertEqual(story.AUTHOR_PROFILE, "旧值")
 
 
 if __name__ == "__main__":

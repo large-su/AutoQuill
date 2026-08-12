@@ -35,7 +35,7 @@ class ZhihuWorkflow(WorkflowBase):
     name = "zhihu"
 
     def __init__(self):
-        from applications.zhihu_story.config import AUTHOR_PROFILE
+        from config.story import AUTHOR_PROFILE
         # 作者技能注入：生成时把该作者的蒸馏技能 profile 注入 prompt
         self.author = AUTHOR_PROFILE or None
 
@@ -58,7 +58,7 @@ class ZhihuWorkflow(WorkflowBase):
     # ============================================================
 
     def select_topic(self):
-        from applications.zhihu_story.config import QUESTION_SELECT_MODE
+        from config.story import QUESTION_SELECT_MODE
 
         log.info("=" * 50)
         log.info(f"步骤 1：选题（{QUESTION_SELECT_MODE}，DOM 通道）")
@@ -113,7 +113,7 @@ class ZhihuWorkflow(WorkflowBase):
         MAX_SELECT_SCREENS 屏；仍无命中则明确报错——绝不静默选非
         故事热门话题（线上曾因此选到「美伊战争」）。
         """
-        from applications.zhihu_story.config import (
+        from config.story import (
             ENABLE_STORY_FILTER, MAX_SELECT_SCREENS)
 
         all_qs, hot_qs, normal_qs = self._scan_recommend(browser)
@@ -217,7 +217,7 @@ class ZhihuWorkflow(WorkflowBase):
           （keep=保留 / drop=跳过，drop 也记「未识别」原因便于排查）
         - likes < min_likes → 不通过，附数字原因
         """
-        from applications.zhihu_story.config import (
+        from config.story import (
             ENABLE_MATERIAL_LIKES_GATE,
             MATERIAL_UNKNOWN_LIKES_POLICY,
         )
@@ -235,7 +235,7 @@ class ZhihuWorkflow(WorkflowBase):
         """规则筛选：用关键词白名单过滤非故事类问题（替代 LLM 筛选）。"""
         if not questions:
             return questions
-        from applications.zhihu_story.config import (
+        from config.story import (
             ENABLE_STORY_FILTER, STORY_INCLUDE_KEYWORDS)
         if not ENABLE_STORY_FILTER:
             return questions
@@ -263,7 +263,7 @@ class ZhihuWorkflow(WorkflowBase):
         正是这个回退：日志「规则筛选后无可用问题」后按分数选了
         美伊战争）。返回 None 由调用方滚动扩池或明确报错。
         """
-        from applications.zhihu_story.config import ENABLE_STORY_FILTER
+        from config.story import ENABLE_STORY_FILTER
 
         def keep(qs):
             return self._apply_story_filter(qs) if ENABLE_STORY_FILTER else qs
@@ -300,7 +300,7 @@ class ZhihuWorkflow(WorkflowBase):
 
         注意：此通道读取屏幕，需要 playwright Edge 窗口可见。
         """
-        from applications.zhihu_story.config import (
+        from config.story import (
             ENABLE_UIA_ANSWER_EXTRACTION,
             UIA_ANSWER_WAIT_TIMEOUT,
             UIA_ANSWER_POLL_INTERVAL,
@@ -343,7 +343,7 @@ class ZhihuWorkflow(WorkflowBase):
         而不是直接降级 OCR——本机 OCR 未校准，降级只在 DOM 多次尝试
         全部失败后作为最后手段。
         """
-        from applications.zhihu_story.config import (
+        from config.story import (
             MIN_ANSWER_LENGTH,
             ENABLE_DOM_ANSWER_EXTRACTION,
         )
@@ -391,7 +391,7 @@ class ZhihuWorkflow(WorkflowBase):
                     footer = (data or {}).get("footer") or {}
                     # ★ 点赞门槛（与 batch 收集同一判定）：未达最低
                     # 赞同数的题目重新选题，避免 low-quality 素材入库
-                    from applications.zhihu_story.config import (
+                    from config.story import (
                         MATERIAL_MIN_LIKES)
                     pass_likes, like_reason = self._material_likes_pass(
                         (footer or {}).get("likes"), MATERIAL_MIN_LIKES)
@@ -433,7 +433,7 @@ class ZhihuWorkflow(WorkflowBase):
 
         log.info(f"提取成功！标题：{title[:50]}... | "
                  f"回答：{len(answer)}字符")
-        from applications.zhihu_story.config import (
+        from config.story import (
             ENABLE_MATERIAL_LIKES_GATE, MATERIAL_MIN_LIKES)
         if ENABLE_MATERIAL_LIKES_GATE:
             likes = (footer or {}).get("likes")
@@ -500,7 +500,7 @@ class ZhihuWorkflow(WorkflowBase):
         4. 滚满 SCROLLS_PER_REFRESH 轮后重新打开推荐页刷新内容
         5. 循环直到采够 target 篇
         """
-        from applications.zhihu_story.config import (
+        from config.story import (
             MIN_ANSWER_LENGTH,
             BATCH_QUESTIONS_PER_PAGE,
             SCROLLS_PER_REFRESH,

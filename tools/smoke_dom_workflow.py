@@ -57,7 +57,7 @@ def main():
         print("[4] 首答提取失败")
 
     # [5] 作者技能注入链路（不实际生成）
-    from applications.zhihu_story.config import AUTHOR_PROFILE
+    from config.story import AUTHOR_PROFILE
     from llm_api import _load_author_profile_or_none
     profile = _load_author_profile_or_none(AUTHOR_PROFILE)
     results["作者技能注入"] = bool(profile)

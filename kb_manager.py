@@ -414,7 +414,7 @@ def extract_single_recipe(title, answer, timeout=90):
         return None
 
     try:
-        from applications.zhihu_story.config import RECIPE_VERBOSE_MODE
+        from config.story import RECIPE_VERBOSE_MODE
     except ImportError:
         RECIPE_VERBOSE_MODE = False
 
@@ -492,7 +492,7 @@ def extract_recipes(articles, batch_size=5):
 
         # verbose 模式下配方字段长 3 倍左右，需要更大的 max_tokens
         try:
-            from applications.zhihu_story.config import RECIPE_VERBOSE_MODE
+            from config.story import RECIPE_VERBOSE_MODE
         except ImportError:
             RECIPE_VERBOSE_MODE = False
         # 与 extract_single_recipe 对齐：非 verbose 1000 / verbose 2400。
@@ -605,7 +605,7 @@ def extract_and_store(articles):
 
     log.info(f"  ✓ 新增 {len(new_recipes)} 个配方（总计 {len(kb['recipes'])} 个）")
 
-    from applications.zhihu_story.config import KB_MERGE_TRIGGER
+    from config.story import KB_MERGE_TRIGGER
     if len(kb["recipes"]) >= KB_MERGE_TRIGGER:
         log.info(f"  知识库条目（{len(kb['recipes'])}）已达压缩阈值（{KB_MERGE_TRIGGER}），建议运行：")
         log.info(f"    python kb_manager.py --compress")
@@ -655,7 +655,7 @@ def compress_kb():
         genre = r.get("genre", "未分类")
         genre_groups.setdefault(genre, []).append(r)
 
-    from applications.zhihu_story.config import KB_MAX_PER_GENRE
+    from config.story import KB_MAX_PER_GENRE
 
     merged_recipes = []
 

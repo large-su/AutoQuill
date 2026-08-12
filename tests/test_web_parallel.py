@@ -32,7 +32,7 @@ class TestParallelSourceOnly(unittest.TestCase):
         self.assertIn('parallel_tabs', src)   # 分发条件
 
     def test_config_parallel_params(self):
-        src = self._src("config.py")
+        src = self._src("config/__init__.py")
         for key in ("parallel_tabs", "consecutive_fail_threshold",
                     "scan_interval"):
             self.assertIn(f'"{key}"', src, key)

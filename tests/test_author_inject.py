@@ -79,7 +79,7 @@ class TestBuildStoryPromptInjection(unittest.TestCase):
     def test_reference_mode_appends_author_section(self):
         from unittest import mock
         from llm_api import build_story_prompt
-        with mock.patch("applications.zhihu_story.config.STORY_MATERIAL_MODE",
+        with mock.patch("config.story.STORY_MATERIAL_MODE",
                         "reference"):
             user_message, mode_str = build_story_prompt(
                 "测试问题标题？",

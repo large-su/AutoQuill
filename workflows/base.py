@@ -112,7 +112,7 @@ class WorkflowBase:
           - True  → 两轮生成（长文模式：大纲 → 正文）
         """
         try:
-            from applications.zhihu_story.config import LONG_FORM_MODE
+            from config.story import LONG_FORM_MODE
         except ImportError:
             LONG_FORM_MODE = False
 
@@ -175,7 +175,7 @@ class WorkflowBase:
         立即调用（Web 控制台展示生成故事卡用；不保证已发布——
         格式不合规被跳过时同样回调，供人工核对废稿）。
         """
-        from applications.zhihu_story.config import MIN_ANSWER_LENGTH
+        from config.story import MIN_ANSWER_LENGTH
         from config import LLM_MODE
         from core.story_text import (
             validate_story_format,
@@ -221,7 +221,7 @@ class WorkflowBase:
         if not is_valid:
             # ★ 检查是否启用格式重试
             try:
-                from applications.zhihu_story.config import ENABLE_FORMAT_RETRY
+                from config.story import ENABLE_FORMAT_RETRY
             except ImportError:
                 ENABLE_FORMAT_RETRY = True
 
@@ -284,7 +284,7 @@ class WorkflowBase:
             LLM_MODE,
             WAIT_BETWEEN_CYCLES,
         )
-        from applications.zhihu_story.config import (
+        from config.story import (
             DEFAULT_BATCH_PUBLISH_COUNT,
         )
         from config import random_delay
@@ -303,7 +303,7 @@ class WorkflowBase:
 
         # ===== 解析 use_meta + 加载元知识 =====
         try:
-            from applications.zhihu_story.config import META_INJECT_DEFAULT, META_LEARN_ENABLE
+            from config.story import META_INJECT_DEFAULT, META_LEARN_ENABLE
         except ImportError:
             META_INJECT_DEFAULT = False
             META_LEARN_ENABLE = False
@@ -407,7 +407,7 @@ class WorkflowBase:
 
         # 段落分布分析
         try:
-            from applications.zhihu_story.config import ENABLE_PARAGRAPH_ANALYSIS
+            from config.story import ENABLE_PARAGRAPH_ANALYSIS
         except ImportError:
             ENABLE_PARAGRAPH_ANALYSIS = False
         if ENABLE_PARAGRAPH_ANALYSIS:
@@ -442,7 +442,7 @@ class WorkflowBase:
         if non_compliant:
             # ★ 检查是否启用格式重试
             try:
-                from applications.zhihu_story.config import ENABLE_FORMAT_RETRY
+                from config.story import ENABLE_FORMAT_RETRY
             except ImportError:
                 ENABLE_FORMAT_RETRY = True
 
@@ -607,7 +607,7 @@ class WorkflowBase:
     def _get_gen_concurrency():
         """读取故事并行生成的并发数配置。"""
         try:
-            from applications.zhihu_story.config import STORY_GENERATE_CONCURRENCY
+            from config.story import STORY_GENERATE_CONCURRENCY
             return STORY_GENERATE_CONCURRENCY
         except ImportError:
             return 5
@@ -622,7 +622,7 @@ class WorkflowBase:
 
         base_workers = min(len(materials), self._get_gen_concurrency())
         try:
-            from applications.zhihu_story.config import (
+            from config.story import (
                 STORY_GENERATE_CONCURRENCY_AUTO,
                 STORY_GENERATE_CONCURRENCY_MIN,
                 STORY_GENERATE_CONCURRENCY_MAX,

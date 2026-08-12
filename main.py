@@ -28,7 +28,7 @@
 #   ocr_utils.py         → 视觉感知（OCR 识别、文字定位、图标匹配）
 #   llm_api.py           → LLM API 调用（流式/非流式 + 作者风格双层注入）
 #   llm_token_tracker.py → API 模式 Token 用量追踪
-#   config.py / config/  → 全局配置（主配置 + 分层配置目录）
+#   config/              → 配置包（__init__ 框架配置 + story 业务参数 + JSON 运行时数据）
 #
 # 知识系统：
 #   kb_manager.py    → 知识库管理（配方积累、参考文章）
@@ -62,7 +62,7 @@ from config import (
     WAIT_BETWEEN_CYCLES,
     random_delay,
 )
-from applications.zhihu_story.config import (
+from config.story import (
     QUESTION_SELECT_MODE,
     ENABLE_STORY_FILTER,
     STORY_MATERIAL_MODE,
@@ -130,7 +130,7 @@ def ask_batch_params():
     """
     print("\n  ── 本次批量任务参数 ──")
     try:
-        from applications.zhihu_story.config import (
+        from config.story import (
             BATCH_AUTO_GENERATE_COUNT,
             BATCH_GENERATE_REDUNDANCY_RATIO,
             BATCH_GENERATE_MIN_EXTRA,
@@ -276,7 +276,7 @@ def _run_resume(argv):
     if not sid:
         print("  用法：python main.py --resume <story_id>")
         print("  可用的 story_id：")
-        from applications.zhihu_story.config import STORY_OUTPUT_DIR
+        from config.story import STORY_OUTPUT_DIR
         import os as _os
         root = _os.path.join(
             _os.path.dirname(_os.path.abspath(__file__)), STORY_OUTPUT_DIR
@@ -317,7 +317,7 @@ def _run_resume(argv):
     title = p.get('title', '')
     recipe = None
     try:
-        from applications.zhihu_story.config import KB_ENABLE
+        from config.story import KB_ENABLE
         from config import LLM_API_KEY
         if KB_ENABLE and LLM_API_KEY:
             from kb_manager import load_kb
@@ -329,7 +329,7 @@ def _run_resume(argv):
     except Exception:
         pass
 
-    from applications.zhihu_story.config import LONG_FORM_MODE
+    from config.story import LONG_FORM_MODE
     if not LONG_FORM_MODE:
         print("  ❌ 长文模式未启用（LONG_FORM_MODE=False）")
         return
@@ -337,7 +337,7 @@ def _run_resume(argv):
     # 尝试加载元知识
     meta_knowledge = None
     try:
-        from applications.zhihu_story.config import META_LEARN_ENABLE
+        from config.story import META_LEARN_ENABLE
         if META_LEARN_ENABLE:
             from meta_learner import load_meta_knowledge
             meta_knowledge = load_meta_knowledge()
@@ -416,7 +416,7 @@ def main():
 
     # 知识库状态
     try:
-        from applications.zhihu_story.config import KB_ENABLE
+        from config.story import KB_ENABLE
         if KB_ENABLE:
             from kb_manager import load_kb
             kb = load_kb()
@@ -591,7 +591,7 @@ def main():
     # --- 元知识注入开关 ---
     # 优先级：--no-meta > --use-meta > config 默认值
     try:
-        from applications.zhihu_story.config import META_INJECT_DEFAULT
+        from config.story import META_INJECT_DEFAULT
     except ImportError:
         META_INJECT_DEFAULT = False
     if '--no-meta' in sys.argv:

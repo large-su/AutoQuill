@@ -24,7 +24,7 @@ SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _get_story_root():
-    from applications.zhihu_story.config import STORY_OUTPUT_DIR
+    from config.story import STORY_OUTPUT_DIR
     return os.path.join(SCRIPT_DIR, STORY_OUTPUT_DIR)
 
 
@@ -171,7 +171,7 @@ class StoryWorkspace:
 
         # 返回本批全部章节全文（最多 BATCH_CHAPTER_COUNT 章）
         try:
-            from applications.zhihu_story.config import BATCH_CHAPTER_COUNT
+            from config.story import BATCH_CHAPTER_COUNT
         except ImportError:
             BATCH_CHAPTER_COUNT = 5
 

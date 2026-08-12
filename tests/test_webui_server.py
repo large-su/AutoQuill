@@ -100,18 +100,18 @@ class TestAuthorEndpoints(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import applications.zhihu_story.author_profiler as ap
-        from applications.zhihu_story import config as sconfig
+        from config import story
         cls._orig_dir = ap.AUTHORS_DIR
         ap.AUTHORS_DIR = tempfile.mkdtemp(prefix="authors_")
-        cls._orig_current = sconfig.AUTHOR_PROFILE
+        cls._orig_current = story.AUTHOR_PROFILE
         cls.client = TestClient(server.app)
 
     @classmethod
     def tearDownClass(cls):
         import applications.zhihu_story.author_profiler as ap
         ap.AUTHORS_DIR = cls._orig_dir
-        from applications.zhihu_story import config as sconfig
-        sconfig.AUTHOR_PROFILE = cls._orig_current
+        from config import story
+        story.AUTHOR_PROFILE = cls._orig_current
 
     def _make_profile(self, name):
         import json
@@ -139,25 +139,25 @@ class TestAuthorEndpoints(unittest.TestCase):
         self.assertIn("stories_count", data["authors"][0])
 
     def test_author_post_switch(self):
-        from applications.zhihu_story import config as sconfig
-        orig = sconfig.AUTHOR_PROFILE
+        from config import story
+        orig = story.AUTHOR_PROFILE
         try:
             r = self.client.post("/api/author", json={"name": "测试作者"})
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.json()["effective"]["author_profile"], "测试作者")
-            self.assertEqual(sconfig.AUTHOR_PROFILE, "测试作者")
+            self.assertEqual(story.AUTHOR_PROFILE, "测试作者")
         finally:
-            sconfig.AUTHOR_PROFILE = orig
+            story.AUTHOR_PROFILE = orig
 
     def test_author_post_clear(self):
-        from applications.zhihu_story import config as sconfig
-        orig = sconfig.AUTHOR_PROFILE
+        from config import story
+        orig = story.AUTHOR_PROFILE
         try:
             r = self.client.post("/api/author", json={"name": ""})
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.json()["effective"]["author_profile"], "")
         finally:
-            sconfig.AUTHOR_PROFILE = orig
+            story.AUTHOR_PROFILE = orig
 
     def test_profile_sources_empty_ok(self):
         r = self.client.get("/api/profile-sources")
@@ -172,8 +172,8 @@ class TestAuthorEndpoints(unittest.TestCase):
         # mock LLM 剖析，验证提炼 → 落盘 → 自动切换文风 全链路
         import applications.zhihu_story.author_profiler as ap
         from pathlib import Path
-        from applications.zhihu_story import config as sconfig
-        orig = sconfig.AUTHOR_PROFILE
+        from config import story
+        orig = story.AUTHOR_PROFILE
         src_file = ap.STORY_LIB
         try:
             lib = Path(tempfile.mkdtemp(prefix="lib_")) / "collected.jsonl"
@@ -190,20 +190,20 @@ class TestAuthorEndpoints(unittest.TestCase):
                 ok = server.runner._dispatch(
                     server._RunSpec(mode="profile", author="提炼作者"))
             self.assertTrue(ok)
-            self.assertEqual(sconfig.AUTHOR_PROFILE, "提炼作者")
+            self.assertEqual(story.AUTHOR_PROFILE, "提炼作者")
             saved = Path(ap.AUTHORS_DIR, "提炼作者.json")
             self.assertTrue(saved.exists(), "签名必须落盘")
             self.assertIn("测试文风",
                           server.runner.last_context["profile"]["summary"])
         finally:
-            sconfig.AUTHOR_PROFILE = orig
+            story.AUTHOR_PROFILE = orig
             ap.STORY_LIB = src_file
 
     def test_dispatch_general_profile_success(self):
         import applications.zhihu_story.author_profiler as ap
         from pathlib import Path
-        from applications.zhihu_story import config as sconfig
-        orig = sconfig.AUTHOR_PROFILE
+        from config import story
+        orig = story.AUTHOR_PROFILE
         src_file = ap.STORY_LIB
         try:
             lib = Path(tempfile.mkdtemp(prefix="lib_")) / "collected.jsonl"
@@ -219,11 +219,11 @@ class TestAuthorEndpoints(unittest.TestCase):
                 ok = server.runner._dispatch(
                     server._RunSpec(mode="general_profile"))
             self.assertTrue(ok)
-            self.assertEqual(sconfig.AUTHOR_PROFILE, "通用")
+            self.assertEqual(story.AUTHOR_PROFILE, "通用")
             saved = Path(ap.AUTHORS_DIR, "_general.json")
             self.assertTrue(saved.exists(), "通用签名必须落盘")
         finally:
-            sconfig.AUTHOR_PROFILE = orig
+            story.AUTHOR_PROFILE = orig
             ap.STORY_LIB = src_file
 
 

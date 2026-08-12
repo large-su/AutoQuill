@@ -45,57 +45,57 @@ class TestMaterialLikesGate(unittest.TestCase):
         cls.wf = ZhihuWorkflow()
 
     def test_gate_disabled_passes_all(self):
-        from applications.zhihu_story import config
-        orig = config.ENABLE_MATERIAL_LIKES_GATE
+        from config import story
+        orig = story.ENABLE_MATERIAL_LIKES_GATE
         try:
-            config.ENABLE_MATERIAL_LIKES_GATE = False
+            story.ENABLE_MATERIAL_LIKES_GATE = False
             ok, _ = self.wf._material_likes_pass(0, 200)
             self.assertTrue(ok)
             ok, _ = self.wf._material_likes_pass(None, 200)
             self.assertTrue(ok)
         finally:
-            config.ENABLE_MATERIAL_LIKES_GATE = orig
+            story.ENABLE_MATERIAL_LIKES_GATE = orig
 
     def test_below_minimum_rejected(self):
-        from applications.zhihu_story import config
-        orig = config.ENABLE_MATERIAL_LIKES_GATE
+        from config import story
+        orig = story.ENABLE_MATERIAL_LIKES_GATE
         try:
-            config.ENABLE_MATERIAL_LIKES_GATE = True
+            story.ENABLE_MATERIAL_LIKES_GATE = True
             ok, reason = self.wf._material_likes_pass(100, 200)
             self.assertFalse(ok)
             self.assertIn("100 < 200", reason)
         finally:
-            config.ENABLE_MATERIAL_LIKES_GATE = orig
+            story.ENABLE_MATERIAL_LIKES_GATE = orig
 
     def test_at_or_above_minimum_passes(self):
-        from applications.zhihu_story import config
-        orig = config.ENABLE_MATERIAL_LIKES_GATE
+        from config import story
+        orig = story.ENABLE_MATERIAL_LIKES_GATE
         try:
-            config.ENABLE_MATERIAL_LIKES_GATE = True
+            story.ENABLE_MATERIAL_LIKES_GATE = True
             ok, _ = self.wf._material_likes_pass(200, 200)
             self.assertTrue(ok)
             ok, _ = self.wf._material_likes_pass(1089, 200)
             self.assertTrue(ok)
         finally:
-            config.ENABLE_MATERIAL_LIKES_GATE = orig
+            story.ENABLE_MATERIAL_LIKES_GATE = orig
 
     def test_unknown_likes_follows_policy(self):
-        from applications.zhihu_story import config
-        orig_gate = config.ENABLE_MATERIAL_LIKES_GATE
-        orig_policy = config.MATERIAL_UNKNOWN_LIKES_POLICY
+        from config import story
+        orig_gate = story.ENABLE_MATERIAL_LIKES_GATE
+        orig_policy = story.MATERIAL_UNKNOWN_LIKES_POLICY
         try:
-            config.ENABLE_MATERIAL_LIKES_GATE = True
-            config.MATERIAL_UNKNOWN_LIKES_POLICY = "drop"
+            story.ENABLE_MATERIAL_LIKES_GATE = True
+            story.MATERIAL_UNKNOWN_LIKES_POLICY = "drop"
             ok, reason = self.wf._material_likes_pass(None, 200)
             self.assertFalse(ok)
             self.assertIn("drop", reason)
-            config.MATERIAL_UNKNOWN_LIKES_POLICY = "keep"
+            story.MATERIAL_UNKNOWN_LIKES_POLICY = "keep"
             ok, reason = self.wf._material_likes_pass(None, 200)
             self.assertTrue(ok)
             self.assertIn("keep", reason)
         finally:
-            config.ENABLE_MATERIAL_LIKES_GATE = orig_gate
-            config.MATERIAL_UNKNOWN_LIKES_POLICY = orig_policy
+            story.ENABLE_MATERIAL_LIKES_GATE = orig_gate
+            story.MATERIAL_UNKNOWN_LIKES_POLICY = orig_policy
 
     def test_extract_content_applies_gate(self):
         # single 路径（extract_content）必须应用同一门槛并重新选题
@@ -139,9 +139,9 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
         return inspect.getsource(getattr(self.wf, method_name))
 
     def test_init_reads_author_profile_config(self):
-        from applications.zhihu_story import config
-        # self.author 必须来自 config.AUTHOR_PROFILE（作者技能注入开关）
-        self.assertEqual(self.wf.author, config.AUTHOR_PROFILE or None)
+        from config import story
+        # self.author 必须来自 config.story.AUTHOR_PROFILE（作者技能注入开关）
+        self.assertEqual(self.wf.author, story.AUTHOR_PROFILE or None)
 
     def test_select_topic_requires_login_and_scans(self):
         src = self._src("select_topic")
