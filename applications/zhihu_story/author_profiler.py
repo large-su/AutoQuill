@@ -486,8 +486,18 @@ def _call_profile_llm(prompt, max_tokens=20000):
     return None
 
 
-def profile_author(author, min_likes=0, out_dir=None):
+def _report(progress, text, pct=None):
+    """进度回调辅助：webui 传入时输出阶段文本（剖析中无百分比）。"""
+    if progress:
+        progress(text, pct)
+
+
+def profile_author(author, min_likes=0, out_dir=None, progress=None):
     """完整流程：读故事 → 统计 → LLM 剖析 → 保存 → 返回 profile。
+
+    参数：
+        progress: 可选回调 progress(text, pct)；pct=None 表示不确定
+        进度（剖析中，无法给出完成百分比）。
 
     返回：
         dict（含 text_stats / signature / source_stories）
@@ -495,12 +505,14 @@ def profile_author(author, min_likes=0, out_dir=None):
     """
     from applications.zhihu_story.prompts import AUTHOR_PROFILE_PROMPT
 
+    _report(progress, f"读取作者「{author}」的采集样本…")
     stories = load_author_stories(author, min_likes=min_likes)
     if len(stories) < 2:
         log.warning("author_profiler: 作者「%s」可用故事不足（%d 篇），"
                     "至少需要 2 篇", author, len(stories))
         return None
 
+    _report(progress, f"已读取 {len(stories)} 篇样本，正在做文本统计…", 15)
     stats = compute_text_stats(stories)
     prompt = AUTHOR_PROFILE_PROMPT.format(
         author=author,
@@ -512,6 +524,7 @@ def profile_author(author, min_likes=0, out_dir=None):
     log.info("author_profiler: 剖析「%s」（%d 篇，共 %d 字）...",
              author, len(stories), stats["total_chars"])
     start = time.time()
+    _report(progress, "大模型剖析中（分析文风与技法，通常 1-3 分钟）…")
     signature = _call_profile_llm(prompt)
     if not signature:
         log.error("author_profiler: 剖析失败（LLM 未返回有效 JSON）")
@@ -530,7 +543,9 @@ def profile_author(author, min_likes=0, out_dir=None):
         "signature": signature,
     }
 
+    _report(progress, "剖析完成，正在保存签名…", 95)
     path = save_profile(profile, out_dir=out_dir)
+    _report(progress, f"签名已保存 → {os.path.basename(path)}", 100)
     log.info("author_profiler: 技能签名已保存 → %s", path)
     return profile
 
@@ -590,7 +605,8 @@ def load_general_stories(min_likes=0, source=None, authors=None):
     return stories
 
 
-def profile_general(min_likes=0, out_dir=None, authors=None, max_stories=30):
+def profile_general(min_likes=0, out_dir=None, authors=None, max_stories=30,
+                    progress=None):
     """提炼【通用写作风格签名】（顶层）：跨作者的精华作品共同技法。
 
     与 profile_author 的差异：样本来自多位作者，提炼的是知乎高赞
@@ -601,6 +617,7 @@ def profile_general(min_likes=0, out_dir=None, authors=None, max_stories=30):
     """
     from applications.zhihu_story.prompts import GENERAL_PROFILE_PROMPT
 
+    _report(progress, "读取采集库样本（跨全部作者）…")
     stories = load_general_stories(
         min_likes=min_likes, source=None, authors=authors)
     stories = stories[:max_stories] if max_stories else stories
@@ -609,6 +626,7 @@ def profile_general(min_likes=0, out_dir=None, authors=None, max_stories=30):
                     "至少 3 篇），跳过", len(stories))
         return None
 
+    _report(progress, f"已读取 {len(stories)} 篇样本，正在做文本统计…", 15)
     # 通用统计需要 author 字段参与，compute_text_stats 不关心作者名
     stats = compute_text_stats(stories)
     prompt = GENERAL_PROFILE_PROMPT.format(
@@ -622,6 +640,7 @@ def profile_general(min_likes=0, out_dir=None, authors=None, max_stories=30):
              "共 %d 字）...", len({s["author"] for s in stories}),
              len(stories), stats["total_chars"])
     start = time.time()
+    _report(progress, "大模型剖析中（分析高赞故事共性，通常 1-3 分钟）…")
     signature = _call_profile_llm(prompt)
     if not signature:
         log.error("author_profiler: 通用风格剖析失败（LLM 未返回有效 JSON）")
@@ -640,7 +659,9 @@ def profile_general(min_likes=0, out_dir=None, authors=None, max_stories=30):
         "signature": signature,
     }
 
+    _report(progress, "剖析完成，正在保存签名…", 95)
     path = save_profile(profile, out_dir=out_dir, filename=GENERAL_PROFILE_FILE)
+    _report(progress, "签名已保存", 100)
     log.info("author_profiler: 通用技能签名已保存 → %s", path)
     return profile
 

@@ -27,6 +27,9 @@ _FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 # 日志行带 "2026-08-11 12:00:00 [INFO] " 前缀，故不用 ^ 锚点
 _STAGE_RE = re.compile(r"步骤\s*(\d+)\s*[:：]")
 _PROGRESS_RE = re.compile(r"生成中…\s*累计输出\s*(\d+)\s*字符")
+# 任务阶段进度（文风提炼等无字符输出的任务）：文本 + 可选百分比；
+# pct 缺失表示不确定进度（LLM 剖析中）
+_TASK_PROGRESS_RE = re.compile(r"任务进度[：:]\s*(.+?)(?:\s*\|\s*(\d+)\s*%)?$")
 _RESULT_OK_RE = re.compile(
     r"(提取成功|格式检测|流式生成完成|草稿已保存"
     r"|服务端草稿已确认|✓)")
@@ -97,6 +100,12 @@ def parse_line(line):
     m = _PROGRESS_RE.search(text)
     if m:
         return ("progress", {"chars": int(m.group(1)), "text": text})
+
+    m = _TASK_PROGRESS_RE.search(text)
+    if m:
+        pct = int(m.group(2)) if m.group(2) else None
+        return ("progress", {"task": True, "pct": pct,
+                             "text": m.group(1).strip()})
 
     if _RUN_END_RE.search(text):
         return ("run_end", {"text": text})

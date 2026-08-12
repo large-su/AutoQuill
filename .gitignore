@@ -1,6 +1,9 @@
 # 敏感配置（含 API Key）
 config/llm_providers.json
 
+# 界面运行时模型切换的持久化（本机偏好）
+config/webui_model.json
+
 # 浏览器登录态（含会话 Cookie，等同账号凭证）
 config/browser_state.json
 data/browser_profile/
@@ -33,5 +36,13 @@ config/1.txt
 # Playwright MCP 运行日志与页面快照（调试产物）
 .playwright-mcp/
 
+# 打包产物（一键启动器）
+build/
+dist/
+AutoQuill.exe
+
 # 个人编辑器配置（含本机路径）
 .vscode/
+
+# Claude Code 个人配置（权限白名单等，仅本机）
+.claude/settings.local.json

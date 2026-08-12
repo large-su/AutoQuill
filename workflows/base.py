@@ -54,7 +54,7 @@ class WorkflowBase:
         raise NotImplementedError
 
     def publish(self, story, title, url, md_path=None):
-        """步骤4：发布到平台"""
+        """步骤4：发布到平台。返回故事 md 文件绝对路径。"""
         raise NotImplementedError
 
     def collect_materials_batch(self, target):
@@ -166,8 +166,15 @@ class WorkflowBase:
     # 单次运行（传统模式：生成即发布）
     # ============================================================
 
-    def run_single(self):
-        """传统模式：选题→提取→采样生成→校验→发布"""
+    def run_single(self, on_extracted=None, on_story=None):
+        """传统模式：选题→提取→采样生成→校验→发布
+
+        on_extracted: 可选回调 fn(title, answer, footer, url)，
+        提取完成后立即调用（Web 控制台展示提取结果用）。
+        on_story: 可选回调 fn(story_text, md_path)，故事生成并存盘后
+        立即调用（Web 控制台展示生成故事卡用；不保证已发布——
+        格式不合规被跳过时同样回调，供人工核对废稿）。
+        """
         from applications.zhihu_story.config import MIN_ANSWER_LENGTH
         from config import LLM_MODE
         from core.story_text import (
@@ -182,17 +189,31 @@ class WorkflowBase:
         # 返回的最终 URL：不可回答重选题后，实际提取的题可能与首次选题
         # 不同（线上发布曾导航到被跳过的旧题而失败）
         title, answer, _footer, url = self.extract_content()
+        if on_extracted:
+            try:
+                on_extracted(title, answer, _footer, url)
+            except Exception:
+                log.warning("on_extracted 回调失败", exc_info=True)
 
         # 采样模式：参考文章片段直接注入（零 LLM 提炼），不再走配方
         story = self.generate_story(title, answer)
 
         if story and LLM_MODE == "web":
             story = fix_story_format(clean_story_output(story))
-        
+
         if not story or len(story) < 500:
             log.error(f"故事过短或生成失败"
                       f"（{len(story or '')}字符），跳过")
             return False
+
+        # 生成即存盘：即使格式不合规被跳过，废稿也要落盘供人工核对
+        # （用户需要在 UI 里看到生成结果，而非静默丢弃）
+        md_path = self.save_story_file(story)
+        if on_story:
+            try:
+                on_story(story, md_path)
+            except Exception:
+                log.warning("on_story 回调失败", exc_info=True)
 
         # 格式合规检测
         fmt_score, is_valid, fmt_details = validate_story_format(story)
@@ -231,7 +252,7 @@ class WorkflowBase:
                             f"标记废稿，跳过")
                 return False
 
-        self.publish(story, title, url)
+        self.publish(story, title, url, md_path)
         log.info("本轮完成！")
         return True
 
@@ -362,7 +383,7 @@ class WorkflowBase:
         if LLM_MODE == "api":
             log.info(f"阶段2：并行生成 {len(materials)} 篇故事")
         else:
-            log.info(f"阶段2：串行生成 {len(materials)} 篇故事（Web 模式）")
+            log.info(f"阶段2：批量生成 {len(materials)} 篇故事（Web 模式）")
         log.info(f"{'─'*50}\n")
 
         start_all = time.time()
@@ -726,36 +747,80 @@ class WorkflowBase:
         print()
 
     def _batch_generate_web(self, materials):
-        """
-        Web 生成入口：根据 config 里 parallel_tabs 自动选择串行/并行。
-
-        parallel_tabs <= 1 → 走原有串行逻辑（单 tab，单会话）
-        parallel_tabs  > 1 → 走 ParallelWebRunner（独立 Edge 窗口 + 多 tab）
-
-        ★ 长文模式（LONG_FORM_MODE=True）强制走串行：
-        长文需要两轮生成（大纲→正文），ParallelWebRunner 目前只支持单步任务，
-        无法在单个 slot 内串联两轮 prompt。长文走串行可保证每个故事的大纲+正文
-        在同一会话中完成，上下文连贯。
-        """
+        """Web 生成入口：parallel_tabs > 1 且任务数 > 1 → 并行，否则串行。"""
         from config import WEB_DRIVER_NAME, WEB_DRIVERS
-        
-        try:
-            from applications.zhihu_story.config import LONG_FORM_MODE
-        except ImportError:
-            LONG_FORM_MODE = False
-
         drv_cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
-        parallel_tabs = drv_cfg.get("parallel_tabs", 1)
-
-        if parallel_tabs > 1 and not LONG_FORM_MODE:
+        if drv_cfg.get("parallel_tabs", 1) > 1 and len(materials) > 1:
             self._batch_generate_web_parallel(materials, drv_cfg)
         else:
-            if LONG_FORM_MODE and parallel_tabs > 1:
-                log.info("  ⚠ 长文模式不支持并行，自动切换为串行生成")
             self._batch_generate_web_serial(materials)
 
+    def _batch_generate_web_parallel(self, materials, drv_cfg):
+        """Web 并行生成（DOM 版：共享 context 的 N 个独立页面）。
+
+        每 slot 一个独立 driver 实例（create_driver），单线程主循环
+        轮询派发/收集（web_drivers/parallel.py），与 API 并行
+        ThreadPoolExecutor 不同：页面操作必须单线程。
+        """
+        from llm_api import build_story_prompt, _load_author_profile_or_none
+        from core.story_text import clean_story_output, fix_story_format
+        from web_drivers.parallel import ParallelWebRunner
+
+        num_slots = min(drv_cfg.get("parallel_tabs", 2), len(materials))
+        threshold = drv_cfg.get("consecutive_fail_threshold", 2)
+        scan_interval = drv_cfg.get("scan_interval", 2)
+
+        log.info(f"  启用并行模式：{num_slots} 个页面 "
+                 f"（总任务 {len(materials)} 个）")
+
+        # 构造 (prompt, meta) 任务列表（与串行 _generate_web_short_form
+        # 一致地注入作者文风——旧版并行漏传，此处对齐）
+        meta = getattr(self, "_meta_knowledge", None)
+        author = getattr(self, "author", None)
+        tasks = []
+        for mat in materials:
+            full_prompt, _mode = build_story_prompt(
+                mat['title'], mat['answer'], recipe=mat.get('recipe'),
+                meta_knowledge=meta,
+                author_profile=_load_author_profile_or_none(author),
+            )
+            tasks.append((full_prompt, mat))
+
+        runner = ParallelWebRunner(
+            num_slots=num_slots,
+            threshold=threshold,
+            scan_interval=scan_interval,
+        )
+        results = []
+        try:
+            runner.setup()
+            results = runner.run(tasks)
+        except Exception as e:
+            log.error(f"并行运行器异常：{e}")
+        finally:
+            try:
+                runner.teardown()
+            except Exception as e:
+                log.warning(f"teardown 异常：{e}")
+
+        # 映射结果回 materials（与串行同款清洗与保存）
+        for i, mat in enumerate(materials):
+            story = results[i] if i < len(results) else None
+            if story and len(story) >= 500:
+                story = fix_story_format(clean_story_output(story))
+                mat['story'] = story
+                mat['md_path'] = self.save_story_file(story, mat['index'])
+                log.info(f"  ✓ 任务 {mat['index']} 并行生成成功"
+                         f"（{len(story)} 字符）")
+            else:
+                mat['story'] = None
+                log.warning(f"  ✗ 任务 {mat['index']} 并行生成失败")
+
+        from web_drivers import reset_driver
+        reset_driver()  # 兜底关单例页（并行本身不用单例）
+
     def _batch_generate_web_serial(self, materials):
-        """Web 串行生成（原有逻辑，单 tab 复用同一会话）"""
+        """Web 串行生成（单 tab 复用同一会话）"""
         from core.story_text import clean_story_output, fix_story_format
 
         for i, mat in enumerate(materials):
@@ -782,63 +847,6 @@ class WorkflowBase:
 
         from web_drivers import reset_driver
         reset_driver()
-
-    def _batch_generate_web_parallel(self, materials, drv_cfg):
-        """Web 并行生成（独立 Edge 窗口 + N 个 tab）"""
-        from llm_api import build_story_prompt, _load_author_profile_or_none
-        from core.story_text import clean_story_output, fix_story_format
-        from web_drivers.parallel_runner import ParallelWebRunner
-
-        # 并行 tab 数不超过任务数
-        num_slots = min(drv_cfg.get("parallel_tabs", 3), len(materials))
-        threshold = drv_cfg.get("consecutive_fail_threshold", 2)
-        scan_interval = drv_cfg.get("scan_interval", 2)
-
-        log.info(f"  启用并行模式：{num_slots} 个 tab "
-                 f"（总任务 {len(materials)} 个）")
-
-        # 构造 (prompt, meta) 任务列表
-        meta = getattr(self, "_meta_knowledge", None)
-        author_profile = _load_author_profile_or_none(
-            getattr(self, "author", None))
-        tasks = []
-        for mat in materials:
-            full_prompt, _mode = build_story_prompt(
-                mat['title'], mat['answer'], recipe=mat.get('recipe'),
-                meta_knowledge=meta, author_profile=author_profile,
-            )
-            tasks.append((full_prompt, mat))
-
-        runner = ParallelWebRunner(
-            num_slots=num_slots,
-            threshold=threshold,
-            scan_interval=scan_interval,
-        )
-
-        results = [None] * len(tasks)
-        try:
-            runner.setup()
-            results = runner.run(tasks)
-        except Exception as e:
-            log.error(f"并行运行器异常：{e}")
-        finally:
-            try:
-                runner.teardown()
-            except Exception as e:
-                log.warning(f"teardown 异常：{e}")
-
-        # 映射结果回 materials
-        for i, mat in enumerate(materials):
-            story = results[i] if i < len(results) else None
-            if story and len(story) >= 500:
-                story = fix_story_format(clean_story_output(story))
-                mat['story'] = story
-                mat['md_path'] = self.save_story_file(story, mat['index'])
-                log.info(f"  ✓ 任务 {mat['index']} 并行生成成功"
-                         f"（{len(story)} 字符）")
-            else:
-                mat['story'] = None
-                log.warning(f"  ✗ 任务 {mat['index']} 并行生成失败")
 
     def _batch_retry_api(self, non_compliant, compliant,
                          print_progress_fn, reset_progress_fn):
@@ -929,33 +937,88 @@ class WorkflowBase:
         return retried_ok
 
     def _batch_retry_web(self, non_compliant, compliant):
-        """
-        Web 重试入口：根据 config 里 parallel_tabs 自动选择串行/并行。
+        """Web 重试入口：parallel_tabs > 1 且任务数 > 1 → 并行，否则串行。
 
         逻辑与 _batch_generate_web 类似，但多一步 format_score 比较：
         只有重试版本的 fmt_score 严格大于原版本才采用。
-
-        ★ 长文模式强制走串行：并行 runner 只支持单步 prompt，
-        无法串联大纲→正文两轮流程。
         """
         from config import WEB_DRIVER_NAME, WEB_DRIVERS
-
-        try:
-            from applications.zhihu_story.config import LONG_FORM_MODE
-        except ImportError:
-            LONG_FORM_MODE = False
-
         drv_cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
-        parallel_tabs = drv_cfg.get("parallel_tabs", 1)
-
-        if parallel_tabs > 1 and not LONG_FORM_MODE:
+        if drv_cfg.get("parallel_tabs", 1) > 1 and len(non_compliant) > 1:
             return self._batch_retry_web_parallel(
-                non_compliant, compliant, drv_cfg
+                non_compliant, compliant, drv_cfg)
+        return self._batch_retry_web_serial(non_compliant, compliant)
+
+    def _batch_retry_web_parallel(self, non_compliant, compliant, drv_cfg):
+        """Web 并行重试不合规文章（复用并行调度器，保留 fmt_score 严格大于语义）。"""
+        from llm_api import build_story_prompt, _load_author_profile_or_none
+        from core.story_text import (
+            clean_story_output, fix_story_format, validate_story_format
+        )
+        from web_drivers.parallel import ParallelWebRunner
+
+        num_slots = min(drv_cfg.get("parallel_tabs", 2), len(non_compliant))
+        threshold = drv_cfg.get("consecutive_fail_threshold", 2)
+        scan_interval = drv_cfg.get("scan_interval", 2)
+
+        log.info(f"  并行重试：{num_slots} 个页面 "
+                 f"（共 {len(non_compliant)} 篇不合规）")
+
+        meta = getattr(self, "_meta_knowledge", None)
+        author = getattr(self, "author", None)
+        tasks = []
+        for mat in non_compliant:
+            full_prompt, _mode = build_story_prompt(
+                mat['title'], mat['answer'], recipe=mat.get('recipe'),
+                meta_knowledge=meta,
+                author_profile=_load_author_profile_or_none(author),
             )
-        else:
-            if LONG_FORM_MODE and parallel_tabs > 1:
-                log.info("  ⚠ 长文模式不支持并行重试，自动切换为串行")
-            return self._batch_retry_web_serial(non_compliant, compliant)
+            tasks.append((full_prompt, mat))
+
+        runner = ParallelWebRunner(
+            num_slots=num_slots,
+            threshold=threshold,
+            scan_interval=scan_interval,
+        )
+        results = []
+        try:
+            runner.setup()
+            results = runner.run(tasks)
+        except Exception as e:
+            log.error(f"并行重试运行器异常：{e}")
+        finally:
+            try:
+                runner.teardown()
+            except Exception as e:
+                log.warning(f"teardown 异常：{e}")
+
+        retried_ok = 0
+        for i, mat in enumerate(non_compliant):
+            retry_story = results[i] if i < len(results) else None
+            if retry_story and len(retry_story) >= 500:
+                retry_story = fix_story_format(
+                    clean_story_output(retry_story)
+                )
+                retry_fmt, retry_valid, _ = validate_story_format(
+                    retry_story
+                )
+                if retry_valid and retry_fmt > mat['format_score']:
+                    mat['story'] = retry_story
+                    mat['format_score'] = retry_fmt
+                    mat['md_path'] = self.save_story_file(
+                        retry_story, f"{mat['index']}_retry"
+                    )
+                    compliant.append(mat)
+                    retried_ok += 1
+                    log.info(f"  ✓ 任务 {mat['index']} 重试合规（{retry_fmt}/10）")
+                else:
+                    log.info(f"  ✗ 任务 {mat['index']} 重试仍不合规，标记废稿")
+            else:
+                log.error(f"  任务 {mat['index']} 重试失败")
+
+        from web_drivers import reset_driver
+        reset_driver()  # 兜底关单例页
+        return retried_ok
 
     def _batch_retry_web_serial(self, non_compliant, compliant):
         """Web 串行重试不合规文章（原有逻辑）"""
@@ -995,82 +1058,4 @@ class WorkflowBase:
 
         from web_drivers import reset_driver
         reset_driver()
-        return retried_ok
-
-    def _batch_retry_web_parallel(self, non_compliant, compliant, drv_cfg):
-        """Web 并行重试不合规文章"""
-        from llm_api import build_story_prompt, _load_author_profile_or_none
-        from core.story_text import (
-            clean_story_output,
-            fix_story_format, validate_story_format
-        )
-        from web_drivers.parallel_runner import ParallelWebRunner
-
-        if not non_compliant:
-            return 0
-
-        num_slots = min(
-            drv_cfg.get("parallel_tabs", 3), len(non_compliant)
-        )
-        threshold = drv_cfg.get("consecutive_fail_threshold", 2)
-        scan_interval = drv_cfg.get("scan_interval", 2)
-
-        log.info(f"  启用并行重试：{num_slots} 个 tab "
-                 f"（重试任务 {len(non_compliant)} 个）")
-
-        meta = getattr(self, "_meta_knowledge", None)
-        author_profile = _load_author_profile_or_none(
-            getattr(self, "author", None))
-        tasks = []
-        for mat in non_compliant:
-            full_prompt, _mode = build_story_prompt(
-                mat['title'], mat['answer'], recipe=mat.get('recipe'),
-                meta_knowledge=meta, author_profile=author_profile,
-            )
-            tasks.append((full_prompt, mat))
-
-        runner = ParallelWebRunner(
-            num_slots=num_slots,
-            threshold=threshold,
-            scan_interval=scan_interval,
-        )
-
-        results = [None] * len(tasks)
-        try:
-            runner.setup()
-            results = runner.run(tasks)
-        except Exception as e:
-            log.error(f"并行重试运行器异常：{e}")
-        finally:
-            try:
-                runner.teardown()
-            except Exception as e:
-                log.warning(f"teardown 异常：{e}")
-
-        retried_ok = 0
-        for i, mat in enumerate(non_compliant):
-            retry_story = results[i] if i < len(results) else None
-            if retry_story and len(retry_story) >= 500:
-                retry_story = fix_story_format(
-                    clean_story_output(retry_story)
-                )
-                retry_fmt, retry_valid, _ = validate_story_format(
-                    retry_story
-                )
-                if retry_valid and retry_fmt > mat['format_score']:
-                    mat['story'] = retry_story
-                    mat['format_score'] = retry_fmt
-                    mat['md_path'] = self.save_story_file(
-                        retry_story, f"{mat['index']}_retry"
-                    )
-                    compliant.append(mat)
-                    retried_ok += 1
-                    log.info(f"  ✓ 任务 {mat['index']} "
-                             f"并行重试合规（{retry_fmt}/10）")
-                else:
-                    log.info(f"  ✗ 任务 {mat['index']} "
-                             f"并行重试仍不合规")
-            else:
-                log.info(f"  ✗ 任务 {mat['index']} 并行重试失败")
-
         return retried_ok

@@ -23,12 +23,15 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body {
-    background: var(--bg);
+    background:
+      radial-gradient(1100px 420px at 50% -140px, rgba(99,102,241,0.10), transparent 60%),
+      var(--bg);
     color: var(--text);
     font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
     font-size: 14px;
     overflow: hidden;
   }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: #2b3550; border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: #38456b; }
@@ -81,10 +84,12 @@
   /* ---------- 主区布局 ---------- */
   main {
     display: grid;
-    grid-template-columns: 300px minmax(0, 1fr) 380px;
+    grid-template-columns: 300px minmax(0, 1fr) 400px;
     gap: 14px;
     padding: 14px 16px;
     height: calc(100vh - 52px);
+    max-width: 1720px;
+    margin: 0 auto;
   }
   .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
   .card {
@@ -127,25 +132,30 @@
     color: var(--text); font-size: 13px;
   }
   .params-batch input:focus { outline: none; border-color: var(--accent); }
-  .run-row { display: flex; gap: 8px; margin-top: 10px; }
-  button {
+  .run-row { display: flex; gap: 8px; margin-top: 12px; }
+  button { font-family: inherit; }
+  /* 按钮体系：.btn 基础 + 变体 primary / ghost / danger / sm */
+  .btn {
     border: none; border-radius: 8px; cursor: pointer;
     font-size: 13.5px; font-weight: 600;
-    padding: 10px 0; font-family: inherit;
-    transition: filter 0.15s, opacity 0.15s;
+    padding: 9px 16px; color: var(--text);
+    background: var(--panel-2); border: 1px solid var(--border);
+    transition: filter 0.15s, background 0.15s, border-color 0.15s;
   }
-  button:hover { filter: brightness(1.12); }
-  button:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
-  .btn-run {
-    flex: 1.4; color: #fff;
+  .btn:hover:not(:disabled) { filter: brightness(1.12); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+  .btn.primary {
+    color: #fff;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    border-color: transparent;
     box-shadow: 0 2px 10px rgba(99,102,241,0.35);
   }
-  .btn-stop {
-    flex: 1; color: var(--red);
-    background: transparent; border: 1px solid #5f2e35;
-  }
-  .btn-stop:hover { background: rgba(248,113,113,0.08); }
+  .btn.ghost { background: transparent; }
+  .btn.danger { color: var(--red); background: transparent; border-color: #5f2e35; }
+  .btn.danger:hover:not(:disabled) { background: rgba(248,113,113,0.08); }
+  .btn.sm { padding: 5px 12px; font-size: 12px; border-radius: 7px; }
+  .run-row .btn-run { flex: 1.4; }
+  .run-row .btn-stop { flex: 1; }
 
   .cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .cfg-cell {
@@ -157,6 +167,44 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cfg-cell .v.on { color: var(--green); }
   .cfg-cell .v.off { color: var(--muted); font-weight: 400; }
+
+  /* 配置速览：设置行（标签 + 控件 + 应用按钮） */
+  .model-pick { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 12px; }
+  .set-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 9px; }
+  .set-row:last-child { margin-bottom: 0; }
+  .mp-k { flex: 0 0 100%; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .model-pick select {
+    flex: 1; min-width: 0; padding: 6px 8px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    color: var(--text); font-size: 12.5px; font-family: inherit;
+  }
+  .model-pick select:focus { outline: none; border-color: var(--accent); }
+  select { font-family: inherit; }
+  input[type="text"], input[type="number"] { font-family: inherit; }
+  .seg { display: inline-flex; border-radius: 8px; overflow: hidden;
+         border: 1px solid var(--border); background: var(--panel-2); }
+  .seg-opt {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11.5px; color: var(--muted); cursor: pointer;
+    padding: 5px 9px; transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .seg-opt:hover { color: var(--text); }
+  .seg-opt:has(input:checked) {
+    background: rgba(99,102,241,0.18); color: var(--text);
+  }
+  .seg-opt input { display: none; }
+  /* 采集行控件 */
+  .model-pick input[type="text"], .model-pick input[type="number"] {
+    padding: 6px 9px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    color: var(--text); font-size: 12.5px; font-family: inherit;
+  }
+  .model-pick input[type="text"] { flex: 1; min-width: 0; }
+  .model-pick input[type="text"]:focus, .model-pick input[type="number"]:focus,
+  .model-pick select:focus { outline: none; border-color: var(--accent); }
+  .btn-model { flex: none; }
+  .mp-note { font-size: 11px; color: var(--muted); line-height: 1.6; }
 
   /* ---------- 中列：日志 ---------- */
   .log-col { flex: 1; }
@@ -181,6 +229,14 @@
     content: ""; position: absolute; inset: 0;
     background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
     animation: slide 1.4s infinite;
+  }
+  .progress-fill.indeterminate {
+    width: 30% !important;
+    animation: indeterminate 1.6s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% { margin-left: -30%; }
+    100% { margin-left: 100%; }
   }
   @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
   .progress-text { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
@@ -241,6 +297,39 @@
   .story-item:hover { border-color: var(--accent); }
   .story-item .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .story-item .s { color: var(--muted); font-size: 11px; flex: none; }
+  .story-more {
+    margin-top: 4px; padding: 7px 10px;
+    background: transparent; border: 1px dashed var(--border);
+    border-radius: 7px; color: var(--muted); font-size: 12px;
+  }
+  .story-more:hover { color: var(--accent); border-color: var(--accent); filter: none; }
+
+  /* 采集库管理弹层 */
+  .slib-toolbar { display: flex; gap: 8px; align-items: center; }
+  .slib-toolbar .btn { flex: 1; }
+  .slib-total { font-size: 11px; color: var(--muted); }
+  .slib-author {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    margin-bottom: 8px;
+  }
+  .slib-author .info { flex: 1; min-width: 0; }
+  .slib-author .nm { font-weight: 600; font-size: 13px; }
+  .slib-author .dt { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .slib-author .has-profile { color: var(--amber); font-size: 11px; }
+  .slib-detail { margin-bottom: 10px; }
+  .slib-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    margin-bottom: 4px; font-size: 12px;
+  }
+  .slib-item .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slib-item .m { color: var(--muted); font-size: 11px; flex: none; }
+  .slib-item .btn-sm { padding: 3px 9px; }
+  .slib-item .btn-sm.danger { border-color: var(--border); color: var(--muted); }
+  .slib-item .btn-sm.danger:hover { color: var(--red); border-color: #5f2e35; background: rgba(248,113,113,0.08); }
 
   /* 故事详情弹层 */
   .modal-mask {
@@ -311,14 +400,72 @@
         <label><span>发布数量</span><input type="number" id="pubCount" min="0" max="20" value="3"></label>
       </div>
       <div class="run-row">
-        <button class="btn-run" id="btnRun">运行</button>
-        <button class="btn-stop" id="btnStop" disabled>停止</button>
+        <button class="btn primary btn-run" id="btnRun">运行</button>
+        <button class="btn danger btn-stop" id="btnStop" disabled>停止</button>
       </div>
     </div>
 
     <div class="card">
       <h2><span class="badge">⚙</span>配置速览</h2>
       <div class="cfg-grid" id="cfgGrid"><div class="empty-note">加载中…</div></div>
+      <div class="model-pick" id="modelPick" hidden>
+        <div class="set-row">
+          <span class="mp-k">故事模型（运行时切换，下次生成立即生效）</span>
+          <select id="providerSel"></select>
+          <select id="modelSel"></select>
+          <button class="btn primary btn-model" id="modelApply">应用</button>
+        </div>
+        <div class="set-row">
+          <span class="mp-k">生成通道</span>
+          <span class="seg">
+            <label class="seg-opt"><input type="radio" name="genMode" value="api">API（付费，快）</label>
+            <label class="seg-opt"><input type="radio" name="genMode" value="web">Web 网页版（免费）</label>
+          </span>
+          <button class="btn primary btn-model" id="modeApply">应用</button>
+        </div>
+        <div class="set-row">
+          <span class="mp-k">浏览器模式</span>
+          <span class="seg">
+            <label class="seg-opt"><input type="radio" name="browserMode" value="false">前台（调试可观察）</label>
+            <label class="seg-opt"><input type="radio" name="browserMode" value="true">无头（不打扰工作）</label>
+          </span>
+          <button class="btn primary btn-model" id="browserApply">应用</button>
+        </div>
+        <div class="set-row">
+          <span class="mp-k">作者文风</span>
+          <select id="authorSel"><option value="">（加载中…）</option></select>
+          <button class="btn primary btn-model" id="authorApply" disabled>应用</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="badge">✦</span>文风提炼</h2>
+      <div class="set-row">
+        <select id="profileSourceSel"><option value="">（加载中…）</option></select>
+        <button class="btn primary btn-model" id="btnProfile" disabled>提炼作者文风</button>
+      </div>
+      <div class="set-row">
+        <button class="btn primary btn-model" id="btnGeneralProfile" style="flex:1">提炼通用文风（跨作者）</button>
+      </div>
+      <div class="mp-note">样本来自采集库 data/collected_stories.jsonl；作者名与采集库一致。提炼需调用 LLM（约 1-3 分钟），完成后自动切换为该文风。</div>
+    </div>
+
+    <div class="card">
+      <h2><span class="badge">◈</span>故事采集</h2>
+      <div class="set-row">
+        <input type="text" id="collectUrl" placeholder="作者回答列表 URL：https://www.zhihu.com/people/xxx/answers" style="flex:1">
+      </div>
+      <div class="set-row">
+        <input type="number" id="collectCount" value="10" min="1" max="500" style="width:64px" title="本次最多新增篇数">
+        <span class="mp-note" style="flex:1">作者名自动识别</span>
+        <button class="btn primary btn-model" id="btnCollect">开始采集</button>
+      </div>
+      <div class="mp-note">全自动流程：先读取作者名 → 库中已有该作者则追加新样本，没有则自动建档。每次只采新的，重复的自动跳过（断点续采）。</div>
+      <div class="set-row" style="margin-top:10px">
+        <span class="mp-note" style="flex:1">需要清理错误采集的内容？</span>
+        <button class="btn ghost btn-model" id="btnManageLib">管理采集库</button>
+      </div>
     </div>
   </div>
 
@@ -365,6 +512,22 @@
       </details>
     </div>
 
+    <div class="card res-card" id="collectCard">
+      <h2><span class="badge">◈</span>采集结果</h2>
+      <div class="res-title" id="collectTitle"></div>
+      <div class="res-sub" id="collectSummary"></div>
+    </div>
+
+    <div class="card res-card" id="profileCard">
+      <h2><span class="badge">✦</span>文风签名</h2>
+      <div class="res-title" id="profileTitle"></div>
+      <div class="res-sub" id="profilePath"></div>
+      <details id="profileDetail" open>
+        <summary>签名摘要</summary>
+        <div class="body" id="profileBody"></div>
+      </details>
+    </div>
+
     <div class="card">
       <h2><span class="badge">☰</span>历史故事</h2>
       <div class="story-list" id="storyList"><div class="empty-note">加载中…</div></div>
@@ -383,6 +546,17 @@
   </div>
 </div>
 
+<!-- 采集库管理弹层 -->
+<div class="modal-mask" id="libMask">
+  <div class="modal" style="width:min(760px,100%)">
+    <div class="modal-head">
+      <span class="n">采集库管理</span>
+      <button class="close" id="libClose">关闭</button>
+    </div>
+    <div class="modal-body" id="libBody"></div>
+  </div>
+</div>
+
 <script>
 "use strict";
 
@@ -397,7 +571,7 @@ const STATE_TEXT = {
 
 const CFG_LABELS = {
   LLM_MODE: "LLM 模式", LLM_PROVIDER: "提供商", LLM_MODEL: "模型",
-  WEB_DRIVER_NAME: "浏览器", QUESTION_SELECT_MODE: "选题模式",
+  QUESTION_SELECT_MODE: "选题模式",
   STORY_MATERIAL_MODE: "素材模式", AUTHOR_PROFILE: "作者风格",
   ENABLE_FORMAT_RETRY: "格式重试", MIN_ANSWER_LENGTH: "最短回答",
   ENABLE_STORY_FILTER: "故事过滤", ENABLE_MATERIAL_LIKES_GATE: "点赞门槛",
@@ -409,18 +583,67 @@ let es = null;
 let currentMode = "extract";
 let genChars = 0;
 let formatScore = null;
+let genMode = null;
+let browserHeadless = false;
+let taskState = "idle";
 
 /* ---------- 状态 ---------- */
 
 function setState(state, message) {
+  taskState = state;
   const pill = $("statusPill");
   pill.className = "status-pill " + (state === "running" ? "running" : state);
   $("statusText").textContent = STATE_TEXT[state] || state;
   if (message && state !== "running") $("statusText").textContent = STATE_TEXT[state] || state;
   $("btnRun").disabled = (state === "running" || state === "stopping");
   $("btnStop").disabled = !(state === "running" || state === "stopping");
-  if (state !== "running") $("progressWrap").classList.remove("show");
+  if (state !== "running") {
+    stopTaskTimer();
+    $("progressWrap").classList.remove("show");
+  }
 }
+
+/* ---------- 任务阶段进度（文风提炼等） ---------- */
+
+function applyTaskProgress(p) {
+  // SSE 顺序：state(done) 事件先于最后一条进度行到达，这里用本地状态
+  // 拦截过期进度，避免任务结束后进度条又被弹出来
+  if (taskState !== "running") return;
+  $("progressWrap").classList.add("show");
+  if (typeof p.pct === "number") {
+    stopTaskTimer();
+    $("progressFill").classList.remove("indeterminate");
+    $("progressFill").style.width = Math.min(100, p.pct) + "%";
+    $("progressText").textContent = p.text || "";
+  } else {
+    $("progressFill").classList.add("indeterminate");
+    $("progressFill").style.width = "100%";
+    startTaskTimer(p.text || "处理中…");
+  }
+}
+
+async function pollTaskProgress() {
+  // SSE 断连时（任务由命令行/其他页面触发）轮询 /api/status 兜底：
+  // 以服务端状态为准同步本地状态，并应用当前阶段进度
+  try {
+    const r = await fetch("/api/status");
+    const st = await r.json();
+    if (st.state !== taskState) {
+      setState(st.state, st.message);
+      if (st.state === "running") {
+        if (!es) connectSSE();
+      } else {
+        refreshStatus();
+        loadStories();
+        loadAuthors();
+        loadProfileSources();
+      }
+    }
+    if (st.state === "running" && st.progress) applyTaskProgress(st.progress);
+  } catch (e) { /* ignore */ }
+}
+
+setInterval(pollTaskProgress, 3000);
 
 /* ---------- 日志 ---------- */
 
@@ -466,6 +689,17 @@ function renderContext(ctx) {
   } else {
     $("sampleDetail").style.display = "none";
   }
+  if (ctx.collect) {
+    $("collectCard").classList.add("show");
+    $("collectTitle").textContent = ctx.collect.title || "故事采集";
+    $("collectSummary").textContent = ctx.collect.summary || "";
+  }
+  if (ctx.profile) {
+    $("profileCard").classList.add("show");
+    $("profileTitle").textContent = ctx.profile.title || "文风签名";
+    $("profilePath").textContent = ctx.profile.path || "";
+    $("profileBody").textContent = ctx.profile.summary || "(无摘要)";
+  }
 }
 
 function renderStory(story, title) {
@@ -481,6 +715,8 @@ function renderStory(story, title) {
 
 /* ---------- 历史故事 ---------- */
 
+const STORY_MAX_VISIBLE = 10;
+
 async function loadStories() {
   try {
     const r = await fetch("/api/stories");
@@ -491,18 +727,34 @@ async function loadStories() {
       return;
     }
     list.innerHTML = "";
-    data.stories.forEach((s) => {
-      const item = document.createElement("div");
-      item.className = "story-item";
-      const d = new Date(s.mtime * 1000);
-      const time = `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-      item.innerHTML = `<span class="n">${esc(s.name)}</span><span class="s">${(s.size / 1024).toFixed(1)}k · ${time}</span>`;
-      item.onclick = () => openStory(s.name);
-      list.appendChild(item);
-    });
+    const all = data.stories;
+    renderStoryItems(all.slice(0, STORY_MAX_VISIBLE));
+    if (all.length > STORY_MAX_VISIBLE) {
+      const btn = document.createElement("button");
+      btn.className = "story-more";
+      btn.textContent = `展开全部（共 ${all.length} 条）`;
+      btn.onclick = () => {
+        btn.remove();
+        renderStoryItems(all);
+      };
+      list.appendChild(btn);
+    }
   } catch (e) {
     $("storyList").innerHTML = '<div class="empty-note">加载失败</div>';
   }
+}
+
+function renderStoryItems(stories) {
+  const list = $("storyList");
+  stories.forEach((s) => {
+    const item = document.createElement("div");
+    item.className = "story-item";
+    const d = new Date(s.mtime * 1000);
+    const time = `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    item.innerHTML = `<span class="n">${esc(s.name)}</span><span class="s">${(s.size / 1024).toFixed(1)}k · ${time}</span>`;
+    item.onclick = () => openStory(s.name);
+    list.appendChild(item);
+  });
 }
 
 async function openStory(name) {
@@ -538,6 +790,453 @@ async function loadConfig() {
   }
 }
 
+/* ---------- 模型切换 ---------- */
+
+const providerSel = $("providerSel");
+const modelSel = $("modelSel");
+const modelNote = $("modelNote");
+let modelProviders = [];
+let modelCurrent = null;
+let modelDirty = false;
+
+async function loadModels() {
+  try {
+    const r = await fetch("/api/models");
+    const data = await r.json();
+    modelProviders = data.providers;
+    modelCurrent = data.current;
+    if (!modelProviders.length) return;
+    $("modelPick").hidden = false;
+    modelProviders.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.name;
+      providerSel.appendChild(opt);
+    });
+    providerSel.value = modelCurrent.provider;
+    renderModelOptions();
+    modelSel.value = modelCurrent.model_id;
+  } catch (e) { /* 配置不可用时不显示选择器 */ }
+}
+
+function renderModelOptions() {
+  const p = modelProviders.find((x) => x.name === providerSel.value);
+  modelSel.innerHTML = "";
+  (p ? p.models : []).forEach((m) => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.id;
+    modelSel.appendChild(opt);
+  });
+  modelDirty = true;
+}
+
+providerSel.addEventListener("change", () => {
+  renderModelOptions();
+  modelNote.textContent = "";
+});
+modelSel.addEventListener("change", () => { modelNote.textContent = ""; });
+
+async function loadMode() {
+  try {
+    const r = await fetch("/api/mode");
+    const data = await r.json();
+    genMode = data.mode;
+    document.querySelectorAll('input[name="genMode"]').forEach((el) => {
+      el.checked = (el.value === genMode);
+    });
+  } catch (e) { /* 旧服务无 /api/mode，保持默认 */ }
+}
+
+async function applyMode() {
+  const sel = document.querySelector('input[name="genMode"]:checked');
+  if (!sel || sel.value === genMode) return;
+  const btn = $("modeApply");
+  btn.disabled = true;
+  btn.textContent = "切换中…";
+  try {
+    const r = await fetch("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: sel.value }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
+    const data = await r.json();
+    genMode = data.effective.mode;
+    loadConfig();
+    addLog(`生成通道已切换 → ${genMode === "web" ? "Web 网页版" : "API"}`, "result");
+  } catch (e) {
+    alert("切换失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "应用";
+  }
+}
+
+async function loadBrowserMode() {
+  try {
+    const r = await fetch("/api/browser");
+    const data = await r.json();
+    browserHeadless = data.headless;
+    document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
+      el.checked = (el.value === String(browserHeadless));
+    });
+  } catch (e) { /* 旧服务无 /api/browser，保持默认 */ }
+}
+
+async function applyBrowserMode() {
+  const sel = document.querySelector('input[name="browserMode"]:checked');
+  if (!sel || sel.value === String(browserHeadless)) return;
+  const btn = $("browserApply");
+  btn.disabled = true;
+  btn.textContent = "切换中…";
+  try {
+    const r = await fetch("/api/browser", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ headless: sel.value === "true" }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
+    const data = await r.json();
+    browserHeadless = data.effective.headless;
+    addLog(`浏览器模式已切换 → ${browserHeadless ? "无头（工作，下次任务生效）" : "前台（调试）"}`, "result");
+  } catch (e) {
+    alert("切换失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "应用";
+  }
+}
+
+$("modelApply").addEventListener("click", async () => {
+  $("modelApply").disabled = true;
+  modelNote.textContent = "切换中…";
+  try {
+    const r = await fetch("/api/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: providerSel.value, model_id: modelSel.value }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.status);
+    modelNote.textContent = `已生效 → ${data.effective.provider} / ${data.effective.api_model}`;
+    modelCurrent = data.effective;
+    loadConfig(); // 刷新配置速览里的提供商/模型
+    addLog(`模型已切换 → ${data.effective.provider} / ${data.effective.api_model}`, "result");
+  } catch (e) {
+    modelNote.textContent = "切换失败：" + e.message;
+  } finally {
+    $("modelApply").disabled = false;
+  }
+});
+
+/* ---------- 作者文风 ---------- */
+
+const authorSel = $("authorSel");
+const authorApply = $("authorApply");
+
+async function loadAuthors() {
+  try {
+    const r = await fetch("/api/authors");
+    const data = await r.json();
+    authorSel.innerHTML = '<option value="">（不注入文风）</option>';
+    (data.authors || []).forEach((a) => {
+      const opt = document.createElement("option");
+      opt.value = a.name;
+      opt.textContent = `${a.general ? "通用" : a.name}（${a.stories_count} 篇样本）`;
+      authorSel.appendChild(opt);
+    });
+    const cur = data.current || "";
+    authorSel.value = (cur === "通用") ? "通用" : cur;
+    authorSel.disabled = false;
+    authorApply.disabled = false;
+    // 提炼完成后自动把新文风加进下拉
+    window._authorsCache = data.authors || [];
+  } catch (e) { /* 旧服务无 /api/authors */ }
+}
+
+authorApply.addEventListener("click", async () => {
+  const name = authorSel.value;
+  const btn = authorApply;
+  btn.disabled = true;
+  btn.textContent = "切换中…";
+  try {
+    const r = await fetch("/api/author", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
+    const data = await r.json();
+    addLog(`作者文风已切换 → ${data.effective.author_profile || "（不注入）"}`, "result");
+    loadConfig();
+  } catch (e) {
+    alert("文风切换失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "应用";
+  }
+});
+
+/* ---------- 任务进度计时器（剖析中无百分比 → 显示已等待秒数） ---------- */
+
+let taskTimer = null;
+let taskTimerBase = 0;
+let taskTimerText = "";
+
+function startTaskTimer(text) {
+  if (taskTimer && taskTimerText === text) return;  // 重复轮询不重置计时
+  stopTaskTimer();
+  taskTimerText = text;
+  taskTimerBase = Date.now();
+  const tick = () => {
+    const sec = Math.floor((Date.now() - taskTimerBase) / 1000);
+    const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+    const ss = String(sec % 60).padStart(2, "0");
+    $("progressText").textContent = `${text} 已等待 ${mm}:${ss}（通常 1-3 分钟，可随时点停止）`;
+  };
+  tick();
+  taskTimer = setInterval(tick, 1000);
+}
+
+function stopTaskTimer() {
+  if (taskTimer) { clearInterval(taskTimer); taskTimer = null; }
+  taskTimerText = "";
+}
+
+/* ---------- 文风提炼 ---------- */
+
+const profileSourceSel = $("profileSourceSel");
+const btnProfile = $("btnProfile");
+const btnGeneralProfile = $("btnGeneralProfile");
+
+async function loadProfileSources() {
+  try {
+    const r = await fetch("/api/profile-sources");
+    const data = await r.json();
+    if (!data.authors.length) {
+      profileSourceSel.innerHTML = '<option value="">（采集库为空）</option>';
+      return;
+    }
+    profileSourceSel.innerHTML = "";
+    data.authors.forEach((a) => {
+      const opt = document.createElement("option");
+      opt.value = a.name;
+      opt.textContent = `${a.name}（${a.records} 条记录）`;
+      profileSourceSel.appendChild(opt);
+    });
+    profileSourceSel.disabled = false;
+    btnProfile.disabled = false;
+  } catch (e) { /* ignore */ }
+}
+
+function runProfileMode(mode, author) {
+  const body = { mode };
+  if (author) body.author = author;
+  $("logBox").innerHTML = "";
+  genChars = 0;
+  formatScore = null;
+  fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((r) => {
+    if (!r.ok) {
+      return r.json().catch(() => ({})).then((err) => {
+        addLog("启动失败：" + (err.detail || r.status), "error");
+        return null;
+      });
+    }
+    connectSSE();
+    return null;
+  }).catch((e) => addLog("无法连接服务：" + e, "error"));
+}
+
+btnProfile.addEventListener("click", () => {
+  if (profileSourceSel.disabled || !profileSourceSel.value) return;
+  runProfileMode("profile", profileSourceSel.value);
+});
+
+btnGeneralProfile.addEventListener("click", () => {
+  runProfileMode("general_profile");
+});
+
+/* ---------- 故事采集 ---------- */
+
+const btnCollect = $("btnCollect");
+
+function runCollect() {
+  const url = $("collectUrl").value.trim();
+  if (!url) {
+    alert("请输入作者回答列表 URL（形如 https://www.zhihu.com/people/xxx/answers）");
+    return;
+  }
+  if (!/^https?:\/\//.test(url)) {
+    alert("URL 须以 http(s):// 开头");
+    return;
+  }
+  const count = parseInt($("collectCount").value, 10) || 10;
+  const body = {
+    mode: "collect",
+    url,
+    count: Math.min(500, Math.max(1, count)),
+  };
+  $("logBox").innerHTML = "";
+  genChars = 0;
+  formatScore = null;
+  btnCollect.disabled = true;
+  btnCollect.textContent = "采集中…";
+  fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((r) => {
+    if (!r.ok) {
+      return r.json().catch(() => ({})).then((err) => {
+        addLog("启动失败：" + (err.detail || r.status), "error");
+        return null;
+      });
+    }
+    connectSSE();
+    return null;
+  }).catch((e) => addLog("无法连接服务：" + e, "error"))
+    .finally(() => {
+      btnCollect.disabled = false;
+      btnCollect.textContent = "开始采集";
+    });
+}
+
+btnCollect.addEventListener("click", runCollect);
+
+/* ---------- 采集库管理 ---------- */
+
+const libMask = $("libMask");
+const libBody = $("libBody");
+let libAuthors = [];
+
+function escAttr(s) {
+  return String(s ?? "").replace(/"/g, "&quot;");
+}
+
+async function loadStoryLib() {
+  try {
+    const r = await fetch("/api/storylib");
+    const data = await r.json();
+    libAuthors = data.authors || [];
+    renderStoryLib();
+  } catch (e) {
+    libBody.innerHTML = '<div class="empty-note">采集库加载失败</div>';
+  }
+}
+
+function renderStoryLib() {
+  if (!libAuthors.length) {
+    libBody.innerHTML = '<div class="empty-note">采集库为空（还没有采集过任何故事）</div>';
+    return;
+  }
+  const total = libAuthors.reduce((n, a) => n + a.records, 0);
+  let html = `<div class="slib-total" style="margin-bottom:10px">共 ${libAuthors.length} 位作者，${total} 条记录。删除后不可恢复。</div>`;
+  libAuthors.forEach((a) => {
+    const hp = a.has_profile
+      ? `<div class="has-profile">⚠ 已有文风签名（data/authors/）——删除样本不会删签名，可另行处理</div>` : "";
+    html += `
+      <div class="slib-author" data-author="${escAttr(a.name)}">
+        <div class="info">
+          <div class="nm">${esc(a.name)}</div>
+          <div class="dt">${a.records} 条记录${hp ? "" : ""}</div>
+          ${hp}
+        </div>
+        <button class="btn-sm" data-act="toggle">展开</button>
+        <button class="btn-sm" data-act="del">删除全部</button>
+      </div>`;
+  });
+  libBody.innerHTML = html;
+}
+
+async function loadAuthorDetails(author) {
+  try {
+    const r = await fetch("/api/storylib?author=" + encodeURIComponent(author));
+    return (await r.json()).records || [];
+  } catch (e) { return []; }
+}
+
+libBody.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const row = btn.closest(".slib-author");
+  const author = row.dataset.author;
+  const act = btn.dataset.act;
+
+  if (act === "toggle") {
+    const open = (btn.textContent === "收起");
+    btn.textContent = open ? "展开" : "收起";
+    const detail = row.querySelector(".slib-detail");
+    if (open) { if (detail) detail.remove(); return; }
+    const records = await loadAuthorDetails(author);
+    const items = records.map((rec) => `
+      <div class="slib-item" data-url="${escAttr(rec.answer_url)}">
+        <span class="t">${esc(rec.title)}</span>
+        <span class="m">${rec.chars} 字 · ${esc(rec.collected_at)}</span>
+        <button class="btn-sm" data-act="delOne">删除</button>
+      </div>`).join("");
+    const d = document.createElement("div");
+    d.className = "slib-detail";
+    d.innerHTML = items || '<div class="empty-note">（无记录）</div>';
+    row.appendChild(d);
+    return;
+  }
+
+  if (act === "del") {
+    const n = row.querySelector(".dt").textContent;
+    if (!confirm(`删除作者「${author}」的全部采集记录？\n（${n}，不可恢复）`)) return;
+    const r = await fetch("/api/storylib", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ author }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert("删除失败：" + (err.detail || r.status));
+      return;
+    }
+    loadStoryLib();
+    loadProfileSources();
+    return;
+  }
+
+  if (act === "delOne") {
+    const url = btn.closest(".slib-item").dataset.url;
+    const t = btn.closest(".slib-item").querySelector(".t").textContent;
+    if (!confirm(`删除单条记录「${t}」？\n（不可恢复）`)) return;
+    const r = await fetch("/api/storylib", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert("删除失败：" + (err.detail || r.status));
+      return;
+    }
+    // 刷新列表 + 重新展开该作者详情
+    loadStoryLib();
+    loadProfileSources();
+    btn.closest(".slib-item").remove();
+    const left = row.querySelectorAll(".slib-item").length;
+    if (!left) { const d = row.querySelector(".slib-detail"); if (d) d.remove(); }
+    return;
+  }
+});
+
+$("btnManageLib").addEventListener("click", () => {
+  libMask.classList.add("show");
+  loadStoryLib();
+});
+$("libClose").addEventListener("click", () => libMask.classList.remove("show"));
+libMask.addEventListener("click", (e) => {
+  if (e.target === libMask) libMask.classList.remove("show");
+});
+
 /* ---------- 任务运行 ---------- */
 
 function connectSSE() {
@@ -550,9 +1249,15 @@ function connectSSE() {
   es.addEventListener("run_end", (e) => handleLogEvent(e, "run_end"));
   es.addEventListener("progress", (e) => {
     const p = JSON.parse(e.data);
-    genChars = p.chars;
+    if (p.task) {
+      // 阶段进度（文风提炼等）：pct 有值=定宽；无值=不确定（LLM 剖析中）
+      applyTaskProgress(p);
+      return;
+    }
     $("progressWrap").classList.add("show");
+    genChars = p.chars;
     const pct = Math.min(100, Math.round((genChars / 8000) * 100));
+    $("progressFill").classList.remove("indeterminate");
     $("progressFill").style.width = pct + "%";
     $("progressText").textContent = `模型输出中… 已生成 ${genChars} 字（估算目标 8000）`;
     // 顺手从日志行里抓格式分
@@ -566,6 +1271,8 @@ function connectSSE() {
       genChars = 0;
       refreshStatus();
       loadStories();
+      loadAuthors();  // 文风提炼完成后下拉即时更新
+      loadProfileSources();  // 采集完成后来源下拉即时更新
     }
   });
   es.onopen = () => addLog("已连接实时日志通道", "result");
@@ -575,7 +1282,9 @@ async function refreshStatus() {
   try {
     const r = await fetch("/api/status");
     const st = await r.json();
-    if (st.context && st.context.title) renderContext(st.context);
+    if (st.context && (st.context.title || st.context.profile || st.context.collect)) {
+      renderContext(st.context);
+    }
     if (st.story && st.story.text) {
       const ctx = st.context || {};
       renderStory(st.story, ctx.title || null);
@@ -636,12 +1345,23 @@ $("modalMask").addEventListener("click", (e) => {
 
 (async () => {
   loadConfig();
+  loadModels();
+  loadMode();
+  $("modeApply").addEventListener("click", applyMode);
+  loadBrowserMode();
+  $("browserApply").addEventListener("click", applyBrowserMode);
+  loadAuthors();
+  loadProfileSources();
   loadStories();
   try {
     const r = await fetch("/api/status");
     const st = await r.json();
     setState(st.state, st.message);
-    if (st.state === "running") connectSSE();
+    if (st.state === "running") {
+      connectSSE();
+      if (st.progress) applyTaskProgress(st.progress);  // SSE 连接前的进度
+    }
+    else refreshStatus();  // 空闲时恢复上次运行的结果卡片
   } catch (e) {
     setState("error", "无法连接后端");
   }

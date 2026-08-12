@@ -457,42 +457,18 @@ _HINTS = {
 
 
 def calibrate_mode():
-    """交互式坐标校准"""
-    from config import LLM_MODE, WEB_DRIVER_NAME
+    """交互式坐标校准（仅 OCR 提取用；Web 驱动已 DOM 化无需坐标）"""
+    from config import LLM_MODE
 
     required = _get_required_keys()
 
-    # 获取当前 Web 驱动的可选校准坐标
     driver_keys = {}
     driver_hints = {}
-    if LLM_MODE == "web":
-        try:
-            from web_drivers import get_driver
-            drv = get_driver()
-            driver_keys = drv.get_calibration_keys()
-            driver_hints = drv.get_calibration_hints()
-        except Exception:
-            pass
 
     print(f"""
     ===== 校准模式 =====
     必须校准 {len(required)} 个基础边界点
     """)
-
-    if LLM_MODE == "web" and driver_keys:
-        from config import WEB_DRIVERS
-        drv_cfg = WEB_DRIVERS.get(WEB_DRIVER_NAME, {})
-        icon_rel = drv_cfg.get("copy_icon", "")
-        if icon_rel:
-            icon_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), icon_rel
-            )
-            if os.path.exists(icon_path):
-                print(f"  ✓ 检测到 {icon_rel}，复制按钮将用图标匹配")
-            else:
-                print("  提示：网页模式下复制按钮可通过以下两种方式定位：")
-                print(f"    方式1（推荐）：截取复制图标保存为 {icon_rel}")
-                print("    方式2：校准时额外标定复制按钮坐标（下方会询问）")
 
     existing = {}
     if os.path.exists(COORDS_FILE):
@@ -571,16 +547,6 @@ def calibrate_mode():
         print(f"    ✓ ({x}, {y})")
 
     save_coords(c)
-
-    # 网页模式下询问是否额外校准驱动的可选坐标
-    if LLM_MODE == "web":
-        for dk, dd in driver_keys.items():
-            if dk not in c:
-                add = input(
-                    f"\n  是否额外校准「{dd}」坐标（作为兜底）？(y/n) >> "
-                ).strip().lower()
-                if add == 'y':
-                    _calibrate_single_key(dk, c, driver_hints)
 
     print("\n  校准完成！")
 

@@ -93,7 +93,7 @@ class ImageGenWorkflow:
     def _generate_and_download(self, prompt, save_dir):
         """阶段 1-2：Aizex Web 绘图 + 下载保存"""
         from config import WEB_DRIVERS
-        from web_drivers.aizex import AizexDriver
+        from web_drivers.legacy.aizex import AizexDriver
 
         # 图像生成必须使用 Aizex（GPT-5.5 Thinking Extended），
         # 不受 WEB_DRIVER_NAME 影响

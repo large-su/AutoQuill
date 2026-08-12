@@ -39,6 +39,9 @@ _ZHIHU_HOME = "https://www.zhihu.com/"
 # 分钟无日志），任何交互都不允许无界等待。
 _EVAL_TIMEOUT = 15000
 _NAV_TIMEOUT = 20000
+# 浏览器进程启动超时（毫秒）。启动无日志是历史卡死事故的高发段：
+# playwright 驱动或 Edge 拉起失败时无任何输出，必须显式超时。
+_LAUNCH_TIMEOUT_MS = 60000
 
 
 class WorkflowCancelled(Exception):
@@ -243,6 +246,18 @@ def normalize_question_url(href):
     return f"https://www.zhihu.com/question/{m.group(1)}"
 
 
+def extract_answer_id(href):
+    """从链接提取答案 ID；无法识别（非 /answer/ 链接）返回 None。
+
+    作者采集场景必须用独立回答页 /answer/{aid}：知乎只渲染该作者
+    的回答（无排名、无懒加载）。绝不能把链接规整成问题页——那会
+    提取到问题下排名第一的回答，而不是该作者的回答。"""
+    if not href:
+        return None
+    m = re.search(r"/answer/(\d+)", href)
+    return m.group(1) if m else None
+
+
 def build_story_record(data, author, source="author_page_dom"):
     """把提取结果构造成采集库记录（补作者/来源/时间戳）。"""
     footer = dict(data.get("footer") or {})
@@ -276,17 +291,28 @@ class ZhihuBrowser:
         （持久化 profile 本身也保留 cookie，这里双保险——
         无状态文件时保持全新会话，供首次手动登录。）"""
         from playwright.sync_api import sync_playwright
+        t0 = time.time()
+        log.info("browser_adapter: 启动浏览器…（Playwright 驱动）")
         self._pw = sync_playwright().start()
+        log.info("browser_adapter: 驱动就绪（%.1fs），拉起 Edge 持久化上下文…",
+                 time.time() - t0)
         os.makedirs(self.user_data_dir, exist_ok=True)
-        self.context = self._pw.chromium.launch_persistent_context(
-            user_data_dir=self.user_data_dir,
-            executable_path=EDGE_PATH,
-            headless=self.headless,
-            locale="zh-CN",
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        try:
+            self.context = self._pw.chromium.launch_persistent_context(
+                user_data_dir=self.user_data_dir,
+                executable_path=EDGE_PATH,
+                headless=self.headless,
+                locale="zh-CN",
+                timeout=_LAUNCH_TIMEOUT_MS,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except Exception:
+            # 启动失败：丢弃半初始化驱动，避免残留进程占住 profile 锁
+            self._pw = None
+            raise
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.load_storage_state()
+        log.info("browser_adapter: 浏览器就绪（共 %.1fs）", time.time() - t0)
         return self
 
     def close(self):
@@ -296,11 +322,16 @@ class ZhihuBrowser:
             except Exception:
                 pass
             self.context = None
-        if getattr(self, "_pw", None):
-            try:
-                self._pw.stop()
-            except Exception:
-                pass
+        _pw = getattr(self, "_pw", None)
+        if _pw is not None:
+            # start() 半途失败时 _pw 可能是未初始化对象（无 stop），
+            # 用 getattr 防护，close 不能再次抛错掩盖原异常
+            stop = getattr(_pw, "stop", None)
+            if stop:
+                try:
+                    stop()
+                except Exception:
+                    pass
             self._pw = None
 
     def __enter__(self):
@@ -424,19 +455,23 @@ class ZhihuBrowser:
         current = normalize_question_url(self.page.url)
         if not force and current and target and current == target:
             try:
-                self.page.wait_for_selector(
-                    ".RichContent-inner, .RichText, .QuestionAnswer-content",
-                    timeout=8000)
+                # 同页幂等：滚动触发懒加载等正文容器（不整页重载）。
+                # 固定 8s 干等对冷加载必失败（正文不滚动不渲染）
+                self._wait_answer_container(timeout=8)
+            except WorkflowCancelled:
+                raise
             except Exception:
                 pass
             return self
         _check_cancel()
         self.page.goto(target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT)
         try:
-            self.page.wait_for_selector(".RichContent-inner, .RichText, .QuestionAnswer-content",
-                                        timeout=8000)
+            if not self._wait_answer_container(timeout=8):
+                log.warning("browser_adapter: 问题页正文容器未在 8s 内出现，继续")
+        except WorkflowCancelled:
+            raise
         except Exception:
-            log.warning("browser_adapter: 问题页正文容器未在 8s 内出现，继续")
+            pass
         time.sleep(0.5)
         return self
 
@@ -447,24 +482,47 @@ class ZhihuBrowser:
         导致首答被误判为过短而降级 OCR；且知乎问题页不滚动就不
         渲染首答（实测：刚进入只有骨架，下滑后才加载）。
 
-        循环：检测 → 无则下滑一小段触发渲染 → 等一会 → 滑回原位
-        → 再检测。滑回原位是关键：一直下滑会触发无限滚动不断加载
-        更多回答（页面越拖越长、首答 scope 漂移），回位后只保留
-        首屏已渲染的内容。"""
+        循环：检测 → 无则下滑触发渲染 → 等渲染完成（轮询检测，
+        最多 ~2s）→ 滑回原位 → 再检测。回位是关键：一直下滑会
+        触发无限滚动不断加载更多回答（页面越拖越长、首答 scope
+        漂移），回位后只保留首屏已渲染的内容。
+
+        渲染窗口：曾固定下滑后 1s 即回位——知乎懒加载渲染需要
+        更久，回位时内容还没渲染出来，检测永远落空、15s 超时。
+        现在下滑后轮询等容器出现（快的页面几百 ms 即返回），
+        渲染成功再回位（已渲染的 DOM 不因回位消失）。"""
+        selector = ("'.QuestionAnswer-content, .AnswerItem, "
+                    ".RichContent-inner'")
         deadline = time.time() + timeout
+        start = time.time()
+        last_log = 0.0
         while time.time() < deadline:
             _check_cancel()
-            has = self._safe_evaluate(
-                "() => !!(document.querySelector("
-                "'.QuestionAnswer-content, .AnswerItem, .RichContent-inner'))")
-            if has:
+            if self._safe_evaluate(
+                    f"() => !!document.querySelector({selector})"):
                 return True
             # 下滑一小段触发懒加载渲染
             self._safe_evaluate("() => { window.scrollBy(0, 600); return true; }")
-            self.page.wait_for_timeout(1000)
+            # 渲染窗口：轮询等容器出现，最多 ~2s（间隔 500ms×4）
+            rendered = False
+            for _ in range(4):
+                _check_cancel()
+                if self._safe_evaluate(
+                        f"() => !!document.querySelector({selector})"):
+                    rendered = True
+                    break
+                self.page.wait_for_timeout(500)
             # 滑回原位：避免触发无限加载更多回答
             self._safe_evaluate("() => { window.scrollTo(0, 0); return true; }")
             self.page.wait_for_timeout(400)
+            if rendered:
+                return True
+            # 进度日志：此循环可能长达 15s，无日志会让用户误以为卡住
+            now = time.time()
+            if now - last_log >= 5:
+                last_log = now
+                log.info("browser_adapter: 等待首答渲染… 已等 %.0fs/%ds"
+                         "（下滑触发懒加载）", now - start, timeout)
         return False
 
     def _answer_text_len(self):
@@ -484,6 +542,8 @@ class ZhihuBrowser:
         按钮，轮询正文长度连续两轮不变视为就绪。不做任何滚动。
         返回就绪时的正文长度（0 = 始终未见）。"""
         deadline = time.time() + timeout
+        start = time.time()
+        last_log = 0.0
         last_len, stable = 0, 0
         while time.time() < deadline:
             _check_cancel()
@@ -497,6 +557,12 @@ class ZhihuBrowser:
             else:
                 stable = 0
             last_len = cur
+            # 进度日志：展开后正文渐进加载可能拖满 15s，无日志易误判卡住
+            now = time.time()
+            if now - last_log >= 5:
+                last_log = now
+                log.info("browser_adapter: 首答就绪中… 已等 %.0fs/%ds"
+                         "（展开阅读全文，正文稳定检测）", now - start, timeout)
         return last_len
 
     def get_primary_answer(self, url=None, min_length=100, retries=2):
@@ -544,10 +610,25 @@ class ZhihuBrowser:
         return self._safe_evaluate(_AUTHOR_LINKS_JS) or []
 
     def get_author_answer(self, answer_url, author, min_length=100):
-        """打开某篇答案页，提取该作者的回答全文。返回 dict 或 None。"""
-        self.open_question(answer_url)
-        if self._wait_answer_container(timeout=15):
-            self._settle_answer_page(timeout=15)
+        """打开该作者某篇答案的独立回答页，提取回答全文。
+
+        链接形如 /question/{qid}/answer/{aid}；独立回答页 /answer/{aid}
+        只渲染该作者的回答——不存在问题页「排名第一」问题，正文也
+        立即在 DOM（不触发问题页懒加载）。无法识别 aid 时退回原链接。
+        返回 {title, answer, footer}；不合格返回 None。"""
+        aid = extract_answer_id(answer_url)
+        target = f"https://www.zhihu.com/answer/{aid}" if aid else answer_url
+        _check_cancel()
+        self.page.goto(target, wait_until="domcontentloaded",
+                       timeout=_NAV_TIMEOUT)
+        try:
+            if not self._wait_answer_container(timeout=15):
+                log.warning("browser_adapter: 回答页正文容器未出现，继续")
+        except WorkflowCancelled:
+            raise
+        except Exception:
+            pass
+        self._settle_answer_page(timeout=15)
         data = self._safe_evaluate(_PRIMARY_ANSWER_JS) or {}
         answer = (data.get("answer") or "").strip()
         if len(answer) < min_length:
@@ -622,11 +703,19 @@ class ZhihuBrowser:
         （段落 \n\n 渲染为 <br><br>），匹配前剥标签+空白，否则跨段
         marker 永远匹配不上。"""
         deadline = time.time() + timeout
+        start = time.time()
+        last_log = 0.0
         while time.time() < deadline:
             html = self.get_draft_content()
             plain = re.sub(r"<[^>]+>", "", html)
             if marker in re.sub(r"\s+", "", plain):
                 return True
+            # 进度日志：草稿确认最长等 60s，全程无日志会让用户干等
+            now = time.time()
+            if now - last_log >= 10:
+                last_log = now
+                log.info("browser_adapter: 等待服务端草稿确认… 已等 %.0fs/%ds"
+                         "（草稿 API 轮询）", now - start, timeout)
             self.page.wait_for_timeout(2000)
         return False
 
@@ -638,6 +727,8 @@ class ZhihuBrowser:
         ★ 关键：该问题下已有草稿时，知乎显示「编辑回答」而非
         「写回答」——两者都是打开编辑器的入口，必须都接受。"""
         deadline = time.time() + timeout
+        start = time.time()
+        last_log = 0.0
         while time.time() < deadline:
             clicked = self._safe_evaluate("""(texts) => {
               const clean = s => s.replace(/[\\u200b-\\u200d\\ufeff]/g, '').trim();
@@ -649,6 +740,12 @@ class ZhihuBrowser:
             }""", list(self._WRITE_BUTTON_TEXTS))
             if clicked:
                 return True
+            # 进度日志：生成长耗时后页面可能渲染慢，等待窗口可达 20s
+            now = time.time()
+            if now - last_log >= 5:
+                last_log = now
+                log.info("browser_adapter: 定位「写回答/编辑回答」按钮…"
+                         " 已等 %.0fs/%ds", now - start, timeout)
             self.page.wait_for_timeout(1000)
         return False
 
@@ -860,11 +957,18 @@ _shared_browser = None
 
 
 def get_browser():
-    """获取全局共享的 ZhihuBrowser（懒启动）。"""
+    """获取全局共享的 ZhihuBrowser（懒启动）。
+
+    headless 每次动态读取 config.BROWSER_HEADLESS——Web 控制台切换
+    「调试/工作模式」后下一次任务启动即生效。"""
     global _shared_browser
     if _shared_browser is None:
-        _shared_browser = ZhihuBrowser()
+        from config import BROWSER_HEADLESS
+        _shared_browser = ZhihuBrowser(headless=BROWSER_HEADLESS)
         _shared_browser.start()
+        log.info("browser_adapter: 浏览器模式：%s",
+                 "无头（工作模式）" if BROWSER_HEADLESS
+                 else "前台（调试模式）")
     return _shared_browser
 
 

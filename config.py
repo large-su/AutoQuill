@@ -18,6 +18,12 @@ import time
 # "web" = 浏览器操作网页版（免费但慢）
 LLM_MODE = "api"
 
+# 浏览器是否无头运行（调试/工作模式）
+# False = 弹到前台（默认，调试可观察；同账号下可见生成过程）
+# True  = 无头后台运行（工作模式，不打扰电脑其他工作）
+# 运行时可用 set_runtime_browser_headless() 切换，下次任务启动生效
+BROWSER_HEADLESS = False
+
 # ============================================================
 # LLM API 配置
 # ============================================================
@@ -112,36 +118,25 @@ LLM_API_PRESENCE_PENALTY = 0   # 存在惩罚:已出现过的词,后续一律降
 # ============================================================
 # 切换网站只需改 WEB_DRIVER_NAME，新增网站在 WEB_DRIVERS 中添加条目
 
-WEB_DRIVER_NAME = "DeepSeek"       # 当前使用的 Web 驱动："DeepSeek" / "Aizex"
+WEB_DRIVER_NAME = "DeepSeek"       # 当前使用的 Web 驱动："DeepSeek"
 
 WEB_DRIVERS = {
+    # DeepSeek 条目为 DOM 驱动（web_drivers/deepseek.py）使用；
+    # 旧 OCR 参数（copy_icon 等）已随重写移除，并行参数为 DOM 版
     "DeepSeek": {
         "url": "https://chat.deepseek.com/",
-        "chat_placeholder": "给 DeepSeek 发送消息",
-        "copy_icon": "images/deepseek_copy_icon.png",
-        # 模式切换
+        # 模式开关（DOM 点击；缺省不点，保持网页上次状态）
         "mode": "expert",          # "fast" = 快速模式 / "expert" = 专家模式
         "deep_think": False,       # 深度思考（R1）
         "smart_search": False,     # 智能搜索
-        # 等待时间
-        "wait_load": 4.0,
-        "wait_after_paste": 0.5,
-        "wait_after_send": 1.5,
-        "wait_before_url_cache": 3,
-        "wait_copy_click": 0.6,
-        "wait_scroll_end": 0.8,
         # 生成完成检测
-        "wait_first_reply": 0,     # DeepSeek 响应快，不需要初始等待
-        "poll_interval": 5,
-        "stable_count": 2,
-        "max_wait": 360,
-        "pagedown_per_cycle": 1,   # 每次 OCR 前按一次 PageDown（防止鼠标误触中断自动滚动）
-        # 并行模式参数（1 = 走旧的串行逻辑；>1 启用并行）
-        # ⚠️ DeepSeek 网页端限制同一账号最多 2 个并发生成，超过会排队/失败
-        # 所以这里实际有意义的值只能是 1 或 2
-        "parallel_tabs": 2,
-        "consecutive_fail_threshold": 2,      # 连续失败 N 次后重置该 slot 的会话
-        "scan_interval": 2,                   # 主循环每轮扫描间隔（秒）
+        "poll_interval": 4,        # 轮询间隔（秒）
+        "stable_count": 2,         # 文本长度连续 N 轮不变 → 完成
+        "max_wait": 600,           # 单次生成最长等待（秒）
+        # 并行模式参数（parallel_tabs > 1 且任务数 > 1 → 走 DOM 并行调度器）
+        "parallel_tabs": 2,                  # 并行页面数；DeepSeek 网页版同账号并发上限实测为 2
+        "consecutive_fail_threshold": 2,     # 连续失败 N 次后重置该 slot 的会话
+        "scan_interval": 2,                  # 主循环每轮扫描间隔（秒）
     },
     "Aizex": {
         "url": "https://leopard-x.memofun.net/",
@@ -234,3 +229,145 @@ def random_delay(delay_range):
 
 def random_mouse_duration():
     return random.uniform(MOUSE_MOVE_DURATION[0], MOUSE_MOVE_DURATION[1])
+
+# ============================================================
+# 运行时模型切换（Web 控制台用）
+#
+# 原理：llm_api 等模块在函数内 `from config import ...`，每次
+# 调用都读取当前模块属性——直接重赋值 LLM_PROVIDER / LLM_MODEL_ID
+# 及其派生常量即可让切换立即生效，无需重启服务。
+# 选择持久化到 config/webui_model.json（已 gitignore，不入库），
+# 下次启动自动恢复。
+# ============================================================
+
+_WEBUI_MODEL_FILE = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), "config", "webui_model.json")
+
+
+def _save_webui_state(**extra):
+    """持久化 Web 控制台运行时选择到 webui_model.json。
+
+    先读旧文件再合并：模型/通道/浏览器/文风 四组字段共存，
+    任何一次切换都不能覆盖掉其他字段（否则重启后丢失）。
+    仅当当前 provider 真实存在于注册表时落盘——测试里用假服务商
+    切换时 persist=True 会污染真实配置文件，启动恢复即炸。"""
+    try:
+        _load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
+    except ValueError:
+        return
+    data = {}
+    try:
+        with open(_WEBUI_MODEL_FILE, encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        pass
+    if not isinstance(data, dict):
+        data = {}
+    data["provider"] = LLM_PROVIDER
+    data["model_id"] = LLM_MODEL_ID
+    data.update(extra)
+    try:
+        with open(_WEBUI_MODEL_FILE, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def set_runtime_model(provider=None, model_id=None, persist=True):
+    """运行时切换故事生成模型（服务商 + 模型 ID），返回生效配置。
+
+    provider / model_id 缺省则保持当前值；persist=False 不落盘。
+    仅影响故事生成（LLM_*）；知识库任务（KB_*）保持独立配置。
+    """
+    global LLM_PROVIDER, LLM_MODEL_ID
+    global LLM_PROVIDER_CONFIG, LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
+    global LLM_API_EXTRA_BODY, LLM_API_MAX_TOKENS
+
+    # 先 resolve 目标再验证：无效 provider 抛 ValueError 时全局不被污染，
+    # 否则测试里假服务商切换会污染真实配置、后续恢复即炸
+    target_provider = provider or LLM_PROVIDER
+    target_model = model_id or LLM_MODEL_ID
+    cfg = _load_provider_config(target_provider, target_model)
+
+    LLM_PROVIDER = target_provider
+    LLM_MODEL_ID = target_model
+    LLM_PROVIDER_CONFIG = cfg
+    LLM_API_KEY = cfg.get("apiKey", "")
+    LLM_API_BASE_URL = cfg.get("baseUrl", "")
+    LLM_API_MODEL = cfg.get("model", LLM_MODEL_ID)
+    LLM_API_EXTRA_BODY = dict(cfg.get("extra_body") or {})
+    LLM_API_MAX_TOKENS = int(cfg.get("maxOutputTokens") or 65536)
+
+    if persist:
+        _save_webui_state(mode=LLM_MODE)
+
+    return {"provider": LLM_PROVIDER, "model_id": LLM_MODEL_ID,
+            "api_model": LLM_API_MODEL}
+
+
+def set_runtime_mode(mode, persist=True):
+    """运行时切换生成通道：api（API 调用）/ web（网页版浏览器操作）。
+
+    LLM_MODE 在 workflows 里都是函数内动态读取，重赋值后下次生成
+    立即生效；持久化到 webui_model.json（已 gitignore，不入库），
+    下次启动自动恢复。
+    """
+    global LLM_MODE
+    if mode not in ("api", "web"):
+        raise ValueError(f"未知生成通道：{mode}，可选：api / web")
+    LLM_MODE = mode
+    if persist:
+        _save_webui_state(mode=mode)
+    return {"mode": LLM_MODE}
+
+
+def set_runtime_browser_headless(headless, persist=True):
+    """运行时切换浏览器无头模式（调试 False=弹前台 / 工作 True=后台）。
+
+    get_browser() 每次任务启动时动态读取，切换后下一次任务生效
+    （当前运行中的任务不受影响）；持久化到 webui_model.json。
+    """
+    global BROWSER_HEADLESS
+    BROWSER_HEADLESS = bool(headless)
+    if persist:
+        _save_webui_state(headless=BROWSER_HEADLESS)
+    return {"headless": BROWSER_HEADLESS}
+
+
+def set_runtime_author_profile(name, persist=True):
+    """运行时切换故事生成注入的作者文风（空串/None = 不注入）。
+
+    直接重赋值 applications.zhihu_story.config.AUTHOR_PROFILE——workflow
+    每次任务新建实例时函数内重新 import 读取，切换后下一任务立即生效；
+    持久化到 webui_model.json（author_profile 字段），启动自动恢复。
+    """
+    from applications.zhihu_story import config as sconfig
+    sconfig.AUTHOR_PROFILE = name or ""
+    if persist:
+        _save_webui_state(author_profile=sconfig.AUTHOR_PROFILE)
+    return {"author_profile": sconfig.AUTHOR_PROFILE}
+
+
+def _apply_webui_model_override():
+    """启动时恢复 Web 控制台上次选择的模型与生成通道（若存在且仍有效）。"""
+    try:
+        if not _os.path.exists(_WEBUI_MODEL_FILE):
+            return
+        with open(_WEBUI_MODEL_FILE, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        provider, model_id = data.get("provider"), data.get("model_id")
+        if provider and model_id:
+            set_runtime_model(provider, model_id, persist=False)
+        mode = data.get("mode")
+        if mode in ("api", "web"):
+            set_runtime_mode(mode, persist=False)
+        headless = data.get("headless")
+        if isinstance(headless, bool):
+            set_runtime_browser_headless(headless, persist=False)
+        if "author_profile" in data:
+            set_runtime_author_profile(data["author_profile"], persist=False)
+    except Exception:
+        pass  # 配置损坏/服务商被移除 → 保持默认
+
+
+_apply_webui_model_override()

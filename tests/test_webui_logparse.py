@@ -26,6 +26,21 @@ class TestParseLine(unittest.TestCase):
         self.assertEqual(ev, "progress")
         self.assertEqual(p["chars"], 1234)
 
+    def test_task_progress_with_pct(self):
+        ev, p = log_capture.parse_line("任务进度：已读取 5 篇样本 | 15%")
+        self.assertEqual(ev, "progress")
+        self.assertTrue(p.get("task"))
+        self.assertEqual(p["pct"], 15)
+        self.assertIn("已读取 5 篇样本", p["text"])
+
+    def test_task_progress_indeterminate(self):
+        # 剖析中：无百分比 → pct=None（前端显示不确定动画）
+        ev, p = log_capture.parse_line(
+            "任务进度：大模型剖析中（分析文风与技法）…")
+        self.assertEqual(ev, "progress")
+        self.assertTrue(p.get("task"))
+        self.assertIsNone(p["pct"])
+
     def test_result_ok(self):
         for kw in ("提取成功", "格式检测：9/10", "流式生成完成",
                    "草稿已保存", "✓ 服务端草稿已确认"):

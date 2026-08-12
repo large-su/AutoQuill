@@ -209,6 +209,28 @@ class ZhihuWorkflow(WorkflowBase):
         browser.open_question(best["href"])
         return best["href"]
 
+    def _material_likes_pass(self, likes, min_likes):
+        """点赞门槛判定（batch 与 single 共用）。返回 (通过?, 原因)。
+
+        - gate 关闭 → 恒通过
+        - likes 未识别 → 按 MATERIAL_UNKNOWN_LIKES_POLICY
+          （keep=保留 / drop=跳过，drop 也记「未识别」原因便于排查）
+        - likes < min_likes → 不通过，附数字原因
+        """
+        from applications.zhihu_story.config import (
+            ENABLE_MATERIAL_LIKES_GATE,
+            MATERIAL_UNKNOWN_LIKES_POLICY,
+        )
+        if not ENABLE_MATERIAL_LIKES_GATE:
+            return True, ""
+        if likes is None:
+            if str(MATERIAL_UNKNOWN_LIKES_POLICY).lower() == "keep":
+                return True, "likes 未识别（keep 策略保留）"
+            return False, "likes 未识别（drop 策略跳过）"
+        if likes < min_likes:
+            return False, f"likes {likes} < {min_likes}"
+        return True, ""
+
     def _apply_story_filter(self, questions):
         """规则筛选：用关键词白名单过滤非故事类问题（替代 LLM 筛选）。"""
         if not questions:
@@ -334,6 +356,7 @@ class ZhihuWorkflow(WorkflowBase):
 
         browser = self._browser()
         MAX_TOPIC_RETRY = 3
+        gate_reject_count = 0   # 点赞门槛拒绝计数（重试耗尽时提示）
 
         for attempt in range(MAX_TOPIC_RETRY + 1):
             if attempt > 0:
@@ -366,6 +389,17 @@ class ZhihuWorkflow(WorkflowBase):
                 if len(answer) >= MIN_ANSWER_LENGTH:
                     title = (data or {}).get("title") or ""
                     footer = (data or {}).get("footer") or {}
+                    # ★ 点赞门槛（与 batch 收集同一判定）：未达最低
+                    # 赞同数的题目重新选题，避免 low-quality 素材入库
+                    from applications.zhihu_story.config import (
+                        MATERIAL_MIN_LIKES)
+                    pass_likes, like_reason = self._material_likes_pass(
+                        (footer or {}).get("likes"), MATERIAL_MIN_LIKES)
+                    if not pass_likes:
+                        gate_reject_count += 1
+                        log.warning(f"  点赞门槛未过：{like_reason}"
+                                    f"，重新选题")
+                        continue
                     # ★ 返回最终实际提取的问题 URL：不可回答重选题后
                     # 不能沿用首次选题的 URL（否则发布导航到被跳过的题）
                     final_url = normalize_question_url(browser.page.url) or url
@@ -386,7 +420,10 @@ class ZhihuWorkflow(WorkflowBase):
                 break  # DOM 提取被显式关闭，走 OCR 降级
 
         # DOM 多次尝试全部失败，最后才降级 UIA/OCR 屏幕通道
-        log.warning("  DOM 通道多次尝试未获合格首答，降级 UIA/OCR 屏幕通道")
+        if gate_reject_count:
+            log.warning(f"  DOM 通道多次尝试未获合格首答"
+                        f"（其中 {gate_reject_count} 次被点赞门槛拒绝），"
+                        f"降级 UIA/OCR 屏幕通道")
         title, answer, footer = self._extract_answer_with_fallback()
 
         if not title or not answer or len(answer) < MIN_ANSWER_LENGTH:
@@ -396,6 +433,14 @@ class ZhihuWorkflow(WorkflowBase):
 
         log.info(f"提取成功！标题：{title[:50]}... | "
                  f"回答：{len(answer)}字符")
+        from applications.zhihu_story.config import (
+            ENABLE_MATERIAL_LIKES_GATE, MATERIAL_MIN_LIKES)
+        if ENABLE_MATERIAL_LIKES_GATE:
+            likes = (footer or {}).get("likes")
+            log.warning(
+                f"  ⚠ 降级路径不强制点赞门槛（gate 已开："
+                f"要求 ≥{MATERIAL_MIN_LIKES}，实测赞={likes}）——"
+                f"如需严格执行请重新运行")
         final_url = normalize_question_url(browser.page.url) or url
         return title, answer, footer, final_url
 
@@ -438,6 +483,7 @@ class ZhihuWorkflow(WorkflowBase):
         # 不再收尾 reload：草稿已落盘，刷新只会制造一次多余的页面
         # 加载（对用户观感就是「又跳了一下」），且破坏验收时的编辑器态
         log.info(f"草稿已保存，完成：「{title[:30]}...」")
+        return md_abs_path
 
     # ============================================================
     # 批量素材收集（DOM 通道）
@@ -458,9 +504,7 @@ class ZhihuWorkflow(WorkflowBase):
             MIN_ANSWER_LENGTH,
             BATCH_QUESTIONS_PER_PAGE,
             SCROLLS_PER_REFRESH,
-            ENABLE_MATERIAL_LIKES_GATE,
             MATERIAL_MIN_LIKES,
-            MATERIAL_UNKNOWN_LIKES_POLICY,
             MAX_TOTAL_ATTEMPTS,
             ENABLE_DOM_ANSWER_EXTRACTION,
         )
@@ -474,7 +518,6 @@ class ZhihuWorkflow(WorkflowBase):
         refresh_count = 0
         total_scrolls = 0
         total_attempts = 0
-        unknown_likes_policy = str(MATERIAL_UNKNOWN_LIKES_POLICY).lower()
 
         def _advance_to_next_screen(page_idx, reason):
             """当前屏无可采内容时滚动下翻，避免重复解析同一屏。"""
@@ -588,18 +631,12 @@ class ZhihuWorkflow(WorkflowBase):
                             continue
 
                         likes = (footer or {}).get("likes")
-                        if ENABLE_MATERIAL_LIKES_GATE:
-                            if likes is None:
-                                if unknown_likes_policy == "drop":
-                                    log.info("    ✗ 赞同数未识别，"
-                                             "按配置跳过素材")
-                                    continue
-                                log.info("    · 赞同数未识别，按配置保留")
-                            elif likes < MATERIAL_MIN_LIKES:
-                                log.info("    ✗ 赞同数不足："
-                                         f"{likes} < {MATERIAL_MIN_LIKES}，"
-                                         "跳过素材")
-                                continue
+                        pass_likes, like_reason = self._material_likes_pass(
+                            likes, MATERIAL_MIN_LIKES)
+                        if not pass_likes:
+                            log.info(f"    ✗ 点赞门槛未过：{like_reason}"
+                                     f"，跳过素材")
+                            continue
 
                         materials.append({
                             "title": title,

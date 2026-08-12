@@ -765,6 +765,8 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
                     now = time.time()
                     if stream_state['first_content_at'] is None:
                         stream_state['first_content_at'] = now
+                        log.info(f"  {label}：收到首个 token（等待 "
+                                 f"{now - stream_started:.1f}s），开始输出")
                     stream_state['last_content_at'] = now
                     continue
                 content = delta.get("content", "")
@@ -772,6 +774,8 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
                     now = time.time()
                     if stream_state['first_content_at'] is None:
                         stream_state['first_content_at'] = now
+                        log.info(f"  {label}：收到首个 token（等待 "
+                                 f"{now - stream_started:.1f}s），开始输出")
                     stream_state['last_content_at'] = now
                     full_content += content
                     if on_chunk:
@@ -884,15 +888,18 @@ def generate_story(question_title, reference_answer=None, recipe=None,
     print("  ── 生成内容开始 ──")
 
     # 心跳：长生成可能持续数分钟，期间无日志会让外层看门狗
-    # （日志 mtime 静默超时）误判卡死杀进程——定期写进度
-    _heartbeat = {"n": 0}
+    # （日志 mtime 静默超时）误判卡死杀进程——定期写进度。
+    # ★ 展示「累计总量」而非每 400 字窗口：窗口计数会反复显示
+    # ~400，让人误以为生成卡住
+    _heartbeat = {"n": 0, "total": 0}
 
     def _on_chunk(c):
         sys.stdout.write(c)
         sys.stdout.flush()
         _heartbeat["n"] += len(c)
+        _heartbeat["total"] += len(c)
         if _heartbeat["n"] >= 400:
-            log.info(f"    生成中… 累计输出 {_heartbeat['n']} 字符")
+            log.info(f"    生成中… 累计输出 {_heartbeat['total']} 字符")
             _heartbeat["n"] = 0
 
     full_content, elapsed, error = _call_llm_streaming(

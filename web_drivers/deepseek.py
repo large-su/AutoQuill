@@ -1,143 +1,257 @@
 # ============================================================
-# web_drivers/deepseek.py — DeepSeek 网页版驱动
+# web_drivers/deepseek.py — DeepSeek 网页版驱动（DOM 语义化）
 #
-# DeepSeek 特性：
-#   - 页面自动滚动跟随输出，无需手动翻页
-#   - 生成完成检测：原地 OCR 检测文字稳定性
-#   - 首次打开需切换模式（快速/专家、深度思考、智能搜索）
+# 重写自 v2.1 的 OCR/坐标实现：现在全部通过 DOM 指令操作
+# chat.deepseek.com，与物理鼠标/分辨率/OCR 解绑。
+#
+# 流程（基类生命周期固定）：
+#   open_session → setup（可选模式开关）→ input（fill 输入框）
+#   → send（点发送/Enter）→ wait_complete（停止按钮消失 + 文本稳定）
+#   → read_result（最后一条助手回复全文）
+#
+# selector 稳定性：所有关键元素走候选列表 _probe_selectors，
+# 前端改版时扩展候选即可；全失败走 _dump_page_state 人工介入。
+#
+# 运行：python -m web_drivers.deepseek --probe 真实浏览器探测 selector
 # ============================================================
 
-import pyautogui
-import time
 import logging
+import time
 
 from web_drivers.base import WebLLMDriver
 
 log = logging.getLogger(__name__)
 
+# 输入框候选（chat.deepseek.com 各版本的 textarea/contenteditable）
+_INPUT_SELECTORS = (
+    "textarea#chat-input",
+    "textarea[data-testid='chat_input_input']",
+    "textarea[placeholder*='给 DeepSeek']",
+    "div[contenteditable='true']",
+)
+
+# 发送按钮候选（优先按钮，兜底键盘 Enter）
+_SEND_SELECTORS = (
+    "button[type='submit']",
+    "button[aria-label*='发送']",
+    "div[class*='send']",
+)
+
+# 生成完成标志：停止按钮消失（DeepSeek 生成时显示停止按钮）。
+# 新版 UI 是纯图标 role=button，无 aria-label；生成中动态探测兜底
+_STOP_SELECTORS = (
+    "button[aria-label*='停止']",
+    "button[data-testid*='stop']",
+    "button[class*='stop']",
+    "div[role=button][class*='stop']",
+    "div[aria-label*='停止']",
+)
+
+# 回复容器候选：最后一条助手消息
+_RESULT_SELECTORS = (
+    "div[class*='message'] div[class*='markdown']",
+    "div[class*='ds-markdown']",
+    "div[class*='assistant'] div[class*='markdown']",
+)
+
 
 class DeepSeekDriver(WebLLMDriver):
-    """DeepSeek 网页版驱动"""
+    """DeepSeek 网页版（chat.deepseek.com）DOM 驱动。"""
 
-    name = "DeepSeek"
+    def new_chat(self):
+        """重置为全新对话：重新导航 + 等待输入框渲染（SPA 挂载）。
 
-    # ============================================================
-    # 初始化：模式切换
-    # ============================================================
+        并行调度每派发一个任务前调用。输入框未在 5s 内渲染不 raise
+        ——交给 input() 的 _dump_page_state 带页面状态 loud-fail。
+        """
+        self.open_session()
+        for _ in range(10):
+            if self._probe_selectors(_INPUT_SELECTORS, attr="tagName")[0]:
+                return self
+            self._page_instance().wait_for_timeout(500)
+        log.warning("web_drivers: new_chat 后未等到输入框渲染，交给 input 兜底")
+        return self
 
     def setup(self):
-        """首次打开后切换模式（快速/专家、深度思考、智能搜索）"""
-        from ocr_utils import find_text_on_screen
+        """可选：模式开关（专家模式/深度思考/智能搜索）。
 
-        cfg = self.config
-        mode = cfg.get("mode", "expert")
-        deep_think = cfg.get("deep_think", False)
-        smart_search = cfg.get("smart_search", False)
-
-        mode_name = "快速模式" if mode == "fast" else "专家模式"
-        log.info(f"  设置 DeepSeek：模式={mode_name} "
-                 f"深度思考={'开' if deep_think else '关'} "
-                 f"智能搜索={'开' if smart_search else '关'}")
-
-        pos = find_text_on_screen(mode_name)
-        if pos:
-            pyautogui.click(pos[0], pos[1])
-            time.sleep(0.5)
-            log.info(f"    点击「{mode_name}」→ ({pos[0]}, {pos[1]})")
-
-        if deep_think:
-            pos = find_text_on_screen("深度思考")
-            if pos:
-                pyautogui.click(pos[0], pos[1])
-                time.sleep(0.5)
-                log.info(f"    点击「深度思考」→ ({pos[0]}, {pos[1]})")
-
-        if smart_search:
-            pos = find_text_on_screen("智能搜索")
-            if pos:
-                pyautogui.click(pos[0], pos[1])
-                time.sleep(0.5)
-                log.info(f"    点击「智能搜索」→ ({pos[0]}, {pos[1]})")
-
-        log.info("  DeepSeek 模式设置完成")
-
-    # ============================================================
-    # 生成完成检测：页面自动滚动，原地 OCR 稳定性检测
-    # ============================================================
-
-    def wait_complete(self):
+        用 DOM 点击配置里的开关名（缺省不点，保持网页上次状态）。
         """
-        生成完成检测：
+        switches = []
+        mode = self.config.get("mode")
+        if mode == "expert":
+            switches.append("专家模式")
+        if self.config.get("deep_think"):
+            switches.append("深度思考")
+        if self.config.get("smart_search"):
+            switches.append("智能搜索")
+        for label in switches:
+            if not self._click_button_by_text(label):
+                log.info("web_drivers: 未找到开关「%s」（可能已开启/改版），继续",
+                         label)
+        return self
 
-        DeepSeek 页面默认会自动滚动跟随输出，但鼠标误触可能导致滚动中断。
-        因此每次 OCR 检测前主动按一次 PageDown 兜底，确保屏幕始终在底部。
+    def input(self, prompt):
+        """向输入框写入 prompt（textarea fill 纯文本，不需要剪贴板）。"""
+        sel, _ = self._probe_selectors(_INPUT_SELECTORS, attr="tagName")
+        if not sel:
+            self._dump_page_state("找不到 DeepSeek 输入框")
+        page = self._page_instance()
+        try:
+            page.locator(sel).fill(prompt)
+        except Exception as exc:
+            log.warning("web_drivers: 输入框 fill 失败：%s", exc)
+            self._dump_page_state("输入框写入失败")
+        log.info("web_drivers: prompt 已写入（%d 字符）", len(prompt))
+        return self
 
-        检测逻辑：连续 stable_count 次 OCR 结果不变 → 判定完成。
+    def send(self):
+        """发送：优先 Enter（新版 DeepSeek 发送按钮输入前不渲染），
+        输入后若有发送按钮再点击兜底。"""
+        page = self._page_instance()
+        # fill 已聚焦 textarea，Enter 即发送（DeepSeek 默认 Enter 发送）
+        try:
+            page.keyboard.press("Enter")
+            log.info("web_drivers: 已按 Enter 发送")
+            return self
+        except Exception as exc:
+            log.warning("web_drivers: Enter 发送失败：%s", exc)
+        sel, _ = self._probe_selectors(_SEND_SELECTORS, attr="tagName")
+        if sel:
+            try:
+                page.locator(sel).click()
+                log.info("web_drivers: 已点击发送按钮（%s）", sel)
+                return self
+            except Exception as exc:
+                log.warning("web_drivers: 发送按钮点击失败：%s", exc)
+        self._dump_page_state("发送失败（Enter 与按钮均不可用）")
+        return self
+
+    def wait_complete(self, max_wait=None):
+        """轮询等待生成完成：停止按钮消失 + 文本长度连续稳定。
+
+        与 API 模式观感一致：心跳日志「生成中… 累计输出 N 字符」
+        由 webui/log_capture 识别为进度条事件（前端零改动）。
+        取消检查点每轮执行——Web 控制台「停止」按钮直接生效。
         """
-        import pyautogui as _pg
-
-        cfg = self.config
-        poll_interval = cfg.get("poll_interval", 5)
+        from applications.zhihu_story.browser_adapter import _check_cancel
+        from config import WEB_DRIVERS, WEB_DRIVER_NAME
+        cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
+        max_wait = max_wait or cfg.get("max_wait", 600)
+        poll_interval = cfg.get("poll_interval", 4)
         stable_count = cfg.get("stable_count", 2)
-        max_wait = cfg.get("max_wait", 360)
-        pagedown_n = cfg.get("pagedown_per_cycle", 1)
 
-        # 初始等待：跳过模型思考静默期
-        first_wait = cfg.get("wait_first_reply", 0)
-        if first_wait > 0:
-            log.info(f"  初始等待 {first_wait}s（模型思考中）...")
-            time.sleep(first_wait)
-
-        log.info(f"轮询检测（每{poll_interval}s，"
-                 f"每次PageDown×{pagedown_n}，"
-                 f"连续{stable_count}次稳定，上限{max_wait}s）...")
-
-        prev_text = ""
+        deadline = time.time() + max_wait
+        last_len = 0
         stable = 0
+        stop_seen = False  # 停止按钮曾出现（生成中）→ 消失才算完成
         start = time.time()
-
-        while time.time() - start < max_wait:
-            # ★ 主动 PageDown 兜底：防止鼠标误触中断 DeepSeek 的自动滚动
-            for _ in range(pagedown_n):
-                _pg.press('pagedown')
-                time.sleep(0.3)
-
-            time.sleep(poll_interval)
-
-            current_text, line_count = self._ocr_current_screen()
-            elapsed = int(time.time() - start)
-            log.info(f"  [{elapsed}s] 行数={line_count}")
-
-            if current_text and current_text == prev_text:
-                stable += 1
-                log.info(f"  稳定 ({stable}/{stable_count})")
-                if stable >= stable_count:
-                    log.info("  ✓ 生成完成！")
-                    return True
-            else:
+        while time.time() < deadline:
+            _check_cancel()
+            cur_len = self._current_reply_len()
+            # 停止按钮只在生成中出现：探测到过且现在消失 → 完成。
+            # 从未探测到（selector 改版等）→ 只用文本稳定判定，绝不误判完成。
+            if self._stop_button_present():
+                stop_seen = True
+            elif stop_seen:
+                log.info("web_drivers: 停止按钮已消失，生成完成（%.1fs，%d 字符）",
+                         time.time() - start, cur_len)
+                return True
+            if cur_len != last_len:
                 stable = 0
-
-            prev_text = current_text
-
-        log.warning(f"  超时（{max_wait}s）")
+                last_len = cur_len
+                if cur_len:
+                    log.info("生成中… 累计输出 %d 字符", cur_len)
+            else:
+                stable += 1
+            if stable >= stable_count and cur_len:
+                log.info("web_drivers: 文本稳定 %d 轮，判定完成（%.1fs，%d 字符）",
+                         stable_count, time.time() - start, cur_len)
+                return True
+            self._page_instance().wait_for_timeout(poll_interval * 1000)
+        log.warning("web_drivers: 生成超时（%ds）", max_wait)
         return False
 
-    # ============================================================
-    # 校准支持
-    # ============================================================
+    def read_result(self):
+        """读取最后一条助手回复全文（innerText）。"""
+        sel, text = self._probe_selectors(_RESULT_SELECTORS, attr="innerText")
+        if not sel or not text:
+            self._dump_page_state("找不到回复内容（可能未登录或前端改版）")
+        text = text.strip()
+        if not text:
+            self._dump_page_state("回复内容为空（可能未登录或生成失败）")
+        return text
 
-    @classmethod
-    def get_calibration_keys(cls):
-        return {
-            "deepseek_copy_btn": "DeepSeek 回复底部的复制图标按钮"
-                                 "（可选，有图标匹配可跳过）",
-        }
+    # ---------------- 内部工具 ----------------
 
-    @classmethod
-    def get_calibration_hints(cls):
-        return {
-            "deepseek_copy_btn": (
-                "在 DeepSeek 中让它生成一段回复，然后将鼠标移到\n"
-                "    回复底部左下角的复制图标上（第一个小图标）"
-            ),
-        }
+    def _stop_button_present(self):
+        """停止按钮当前是否存在（生成中显示，完成即消失）。"""
+        return bool(self._probe_selectors(_STOP_SELECTORS, attr="tagName")[0])
+
+    def _current_reply_len(self):
+        """当前最后一条回复的文本长度（进度心跳用）。"""
+        sel, text = self._probe_selectors(_RESULT_SELECTORS, attr="innerText")
+        return len(text or "")
+
+    def _click_button_by_text(self, label):
+        """按可见文本点击开关（模式开关用）。
+
+        DeepSeek 新版 UI 开关是 ds-toggle-button（div 元素带可见文本），
+        不是 <button> 标签——查找所有可见元素而非仅 button。
+        """
+        js = (
+            "async function() {"
+            "  const els = Array.from(document.querySelectorAll("
+            "      'button, [role=button], .ds-toggle-button'));"
+            "  const el = els.find(b => b.innerText.trim() === arguments[0]);"
+            "  if (el) { el.click(); return true; }"
+            "  return false;"
+            "}"
+        )
+        try:
+            return bool(self._safe_evaluate(js, label))
+        except Exception:
+            return False
+
+
+# ---------------- --probe CLI ----------------
+# 真实浏览器探测 chat.deepseek.com 的关键 selector，打印命中结果。
+# 用法：python -m web_drivers.deepseek --probe
+# （需 Edge 持久化 profile 已登录 DeepSeek，或先在页面手动登录）
+
+def _probe():
+    from applications.zhihu_story.browser_adapter import get_browser
+    browser = get_browser()
+    page = browser.context.new_page()
+    url = "https://chat.deepseek.com/"
+    page.goto(url, wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(3000)
+    print(f"\n=== DeepSeek selector 探测: {page.title()} ===")
+    groups = [
+        ("输入框", _INPUT_SELECTORS),
+        ("发送按钮", _SEND_SELECTORS),
+        ("停止按钮", _STOP_SELECTORS),
+        ("回复容器", _RESULT_SELECTORS),
+    ]
+    for name, candidates in groups:
+        hit = None
+        for s in candidates:
+            try:
+                if page.query_selector(s):
+                    hit = s
+                    break
+            except Exception:
+                pass
+        print(f"  {name}: {hit or '（未命中）'}")
+    print("\n  --- 页面文本片段 ---")
+    try:
+        body = page.evaluate("() => document.body.innerText.slice(0, 200)")
+        print("  " + (body or "")[:200].replace("\n", " | "))
+    except Exception:
+        pass
+    page.close()
+    browser.close()
+
+
+if __name__ == "__main__":
+    _probe()

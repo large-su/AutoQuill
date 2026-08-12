@@ -370,6 +370,9 @@ def _run_resume(argv):
 def main():
     # --web 必须先于 banner 处理：banner 含 emoji，GBK 控制台打印即崩；
     # 且 Web 控制台不需要 OCR/API 检查
+    if '--headless' in sys.argv:
+        from config import set_runtime_browser_headless
+        set_runtime_browser_headless(True, persist=False)
     if '--web' in sys.argv:
         from webui.server import run as run_web
         run_web()
@@ -398,6 +401,7 @@ def main():
     ║  --debug-ocr-region  进入回答页并标注 OCR 区域║
     ║  --test-api  测试 API 连接                   ║
     ║  --image-gen 图像生成模式                    ║
+    ║  --headless  浏览器无头运行（工作模式）       ║
     ║  --web       本地 Web 控制台（127.0.0.1）    ║
     ║                                              ║
     ║  v3.0：DOM 直连 + Web 控制台                 ║
@@ -466,29 +470,16 @@ def main():
     else:
         from config import WEB_DRIVERS
         drv_cfg = WEB_DRIVERS.get(WEB_DRIVER_NAME, {})
-        print(f"  Web 驱动：{WEB_DRIVER_NAME}")
-
-        icon_rel = drv_cfg.get("copy_icon", "")
-        if icon_rel:
-            icon_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), icon_rel
-            )
-            if os.path.exists(icon_path):
-                print(f"  复制按钮：图标匹配（{icon_rel}）")
-            else:
-                print(f"  ⚠ 复制按钮图片未找到：{icon_rel}")
-
-        if WEB_DRIVER_NAME == "DeepSeek":
-            mode_name = ("快速模式" if drv_cfg.get("mode") == "fast"
-                         else "专家模式")
-            extras = []
-            if drv_cfg.get("deep_think"):
-                extras.append("深度思考")
-            if drv_cfg.get("smart_search"):
-                extras.append("智能搜索")
-            extras_str = "+".join(extras) if extras else "无"
-            print(f"  {WEB_DRIVER_NAME}：{mode_name} | "
-                  f"附加功能：{extras_str}")
+        mode_name = ("快速模式" if drv_cfg.get("mode") == "fast"
+                     else "专家模式")
+        extras = []
+        if drv_cfg.get("deep_think"):
+            extras.append("深度思考")
+        if drv_cfg.get("smart_search"):
+            extras.append("智能搜索")
+        extras_str = "+".join(extras) if extras else "无"
+        print(f"  Web 驱动：{WEB_DRIVER_NAME}（DOM）| {mode_name} | "
+              f"附加功能：{extras_str}")
 
     # 素材模式
     mat_mode_names = {

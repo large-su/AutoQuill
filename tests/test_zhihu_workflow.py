@@ -36,6 +36,97 @@ class TestZhihuWorkflowDomOnly(unittest.TestCase):
         self.assertNotIn("desktop_utils", main_part)
 
 
+class TestMaterialLikesGate(unittest.TestCase):
+    """点赞门槛共享判定（batch 与 single 同源）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from workflows.zhihu import ZhihuWorkflow
+        cls.wf = ZhihuWorkflow()
+
+    def test_gate_disabled_passes_all(self):
+        from applications.zhihu_story import config
+        orig = config.ENABLE_MATERIAL_LIKES_GATE
+        try:
+            config.ENABLE_MATERIAL_LIKES_GATE = False
+            ok, _ = self.wf._material_likes_pass(0, 200)
+            self.assertTrue(ok)
+            ok, _ = self.wf._material_likes_pass(None, 200)
+            self.assertTrue(ok)
+        finally:
+            config.ENABLE_MATERIAL_LIKES_GATE = orig
+
+    def test_below_minimum_rejected(self):
+        from applications.zhihu_story import config
+        orig = config.ENABLE_MATERIAL_LIKES_GATE
+        try:
+            config.ENABLE_MATERIAL_LIKES_GATE = True
+            ok, reason = self.wf._material_likes_pass(100, 200)
+            self.assertFalse(ok)
+            self.assertIn("100 < 200", reason)
+        finally:
+            config.ENABLE_MATERIAL_LIKES_GATE = orig
+
+    def test_at_or_above_minimum_passes(self):
+        from applications.zhihu_story import config
+        orig = config.ENABLE_MATERIAL_LIKES_GATE
+        try:
+            config.ENABLE_MATERIAL_LIKES_GATE = True
+            ok, _ = self.wf._material_likes_pass(200, 200)
+            self.assertTrue(ok)
+            ok, _ = self.wf._material_likes_pass(1089, 200)
+            self.assertTrue(ok)
+        finally:
+            config.ENABLE_MATERIAL_LIKES_GATE = orig
+
+    def test_unknown_likes_follows_policy(self):
+        from applications.zhihu_story import config
+        orig_gate = config.ENABLE_MATERIAL_LIKES_GATE
+        orig_policy = config.MATERIAL_UNKNOWN_LIKES_POLICY
+        try:
+            config.ENABLE_MATERIAL_LIKES_GATE = True
+            config.MATERIAL_UNKNOWN_LIKES_POLICY = "drop"
+            ok, reason = self.wf._material_likes_pass(None, 200)
+            self.assertFalse(ok)
+            self.assertIn("drop", reason)
+            config.MATERIAL_UNKNOWN_LIKES_POLICY = "keep"
+            ok, reason = self.wf._material_likes_pass(None, 200)
+            self.assertTrue(ok)
+            self.assertIn("keep", reason)
+        finally:
+            config.ENABLE_MATERIAL_LIKES_GATE = orig_gate
+            config.MATERIAL_UNKNOWN_LIKES_POLICY = orig_policy
+
+    def test_extract_content_applies_gate(self):
+        # single 路径（extract_content）必须应用同一门槛并重新选题
+        src = inspect.getsource(self.wf.extract_content)
+        self.assertIn("_material_likes_pass", src)
+        self.assertIn("MATERIAL_MIN_LIKES", src)
+        self.assertIn("重新选题", src)
+        # DOM 成功路径在 return 之前判定；降级路径有明确提示
+        self.assertLess(src.index("_material_likes_pass"),
+                        src.index("return title, answer, footer, final_url"))
+
+    def test_batch_collection_applies_gate(self):
+        # batch 路径（collect_materials_batch）必须走同一 helper
+        src = inspect.getsource(self.wf.collect_materials_batch)
+        self.assertIn("_material_likes_pass", src)
+        self.assertIn("点赞门槛未过", src)
+        self.assertNotIn("ENABLE_MATERIAL_LIKES_GATE", src)  # 判定已收敛到 helper
+
+    def test_degradation_log_counts_gate_rejects(self):
+        # ★ 诊断性回归：重试耗尽降级 UIA/OCR 时，日志必须带
+        #   点赞门槛拒绝次数（「其中 N 次被点赞门槛拒绝」），
+        #   否则用户无法区分「门槛卡死」与「答案质量问题」。
+        src = inspect.getsource(self.wf.extract_content)
+        self.assertIn("gate_reject_count = 0", src)
+        self.assertIn("gate_reject_count += 1", src)
+        self.assertIn("gate_reject_count} 次被点赞门槛拒绝", src)
+        # 计数在 DOM 重试循环内累加，先累计后降级
+        self.assertLess(src.index("gate_reject_count += 1"),
+                        src.index("降级 UIA/OCR 屏幕通道"))
+
+
 class TestZhihuWorkflowSemantics(unittest.TestCase):
     """workflow 各步骤的 DOM 语义接线。"""
 
@@ -145,6 +236,27 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
         self.assertIn(
             "title, answer, _footer, url = self.extract_content()", src)
 
+    def test_run_single_saves_draft_before_format_check(self):
+        # ★ 回归：故事生成后立即存盘 + on_story 回调（在格式校验前）。
+        #   曾因格式不合规被跳过时故事既没落盘也不回调 → Web 控制台
+        #   看不到生成结果，用户白白等 1-2 分钟。
+        from workflows.base import WorkflowBase
+        src = inspect.getsource(WorkflowBase.run_single)
+        # 存盘必须先于格式合规检测（废稿也要留档）
+        self.assertLess(
+            src.index("md_path = self.save_story_file(story)"),
+            src.index("validate_story_format(story)"))
+        # on_story 回调在存盘后立即触发（不依赖发布成败）
+        self.assertLess(
+            src.index("on_story(story, md_path)"),
+            src.index("validate_story_format(story)"))
+
+    def test_run_single_publish_reuses_saved_md_path(self):
+        # publish 复用已保存的 md_path，避免废稿/正稿重复落盘
+        from workflows.base import WorkflowBase
+        src = inspect.getsource(WorkflowBase.run_single)
+        self.assertIn("self.publish(story, title, url, md_path)", src)
+
     def test_publish_uses_editor_write_channel(self):
         src = self._src("publish")
         # 主通道：编辑器直接写入故事全文（可验证的可靠通道）
@@ -198,13 +310,11 @@ class TestAuthorInjectionInBase(unittest.TestCase):
         self.assertIn('author=getattr(self, "author", None)', src)
         self.assertIn("mat.get('recipe')", src)  # 防配方参数被误改
 
-    def test_batch_web_parallel_injects_author_profile(self):
-        src = self._src("_batch_generate_web_parallel")
-        self.assertIn("author_profile", src)
-
-    def test_batch_retry_web_parallel_injects_author_profile(self):
-        src = self._src("_batch_retry_web_parallel")
-        self.assertIn("author_profile", src)
+    def test_batch_web_serial_injects_author_profile(self):
+        # DOM 化后批量生成统一走串行（旧并行已随 OCR 栈移除）；
+        # 作者注入经由 _generate_web → _generate_web_short_form 链路
+        src = self._src("_batch_generate_web_serial")
+        self.assertIn("_generate_web", src)
 
 
 if __name__ == "__main__":

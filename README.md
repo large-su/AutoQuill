@@ -99,11 +99,10 @@ AutoQuillV3.0/
 │   ├── zhihu.py                   #   ZhihuWorkflow — 知乎平台专属实现
 │   └── image_gen.py               #   ImageGenWorkflow — 图像生成编排
 │
-├── web_drivers/                   # Layer 3: Web LLM 驱动适配器
-│   ├── base.py                    #   WebLLMDriver 基类
-│   ├── deepseek.py                #   DeepSeek 网站驱动
-│   ├── aizex.py                   #   Aizex 网站驱动
-│   └── parallel_runner.py         #   并行 Web 模式多标签页调度
+├── web_drivers/                   # Layer 3: Web LLM 驱动适配器（DOM 语义化）
+│   ├── base.py                    #   WebLLMDriver 基类（Playwright DOM 技术栈）
+│   ├── deepseek.py                #   DeepSeek 网站驱动（DOM，--probe 可探测 selector）
+│   └── legacy/                    #   旧 OCR/坐标驱动（仅 --image-gen 的 Aizex 使用）
 │
 ├── tools/                         # 独立工具（不在运行时路径上）
 │   ├── debug_legacy.py            #   OCR/UIA 时代调试命令（main.py 移出，CLI 保留）
@@ -237,17 +236,17 @@ from applications.zhihu_story.action import get_bounds
 ### 4.2 安装依赖
 
 ```bash
-pip install playwright pyperclip requests rapidocr-onnxruntime pillow numpy pyautogui
+pip install -r requirements.txt
+```
+
+若用浏览器登录态（见 4.4）首次需安装 Edge 驱动：
+
+```bash
 python -m playwright install msedge
 ```
 
-可选（彩色终端进度面板）：
-
-```bash
-pip install rich
-```
-
-> `pyautogui` 仅降级/调试通道使用（坐标时代遗留）；主流程（DOM 通道）不依赖它。
+> `pyautogui` / `rich` / `rapidocr` 等仅为旧坐标调试工具使用（`tools/`、`--calibrate`）；
+> 主流程（DOM 通道 + Web 控制台）不依赖它们。
 
 ### 4.3 配置模型
 
@@ -280,6 +279,23 @@ python main.py --image-gen    # 图像生成模式
 ```
 
 > 主流程不再需要坐标校准；`--calibrate`/`--test-ocr` 等仅旧坐标调试工具使用。
+
+### 4.7 一键启动（Web 控制台）
+
+**方式一：启动器 exe（推荐）**——双击项目根目录的 `AutoQuill.exe`，自动完成：
+检查 Python 环境与依赖 → 后台启动服务 → 自动打开浏览器
+（http://127.0.0.1:8787）。**关闭启动器窗口即停止服务**；服务已在运行时重复
+双击只会重新打开浏览器，不会重复启动。
+
+- exe 必须与项目根目录（与 `main.py` 同级）放在一起
+- 首次使用需已安装依赖（见 4.2）并完成 API Key / 登录态配置（见 4.3、4.4）
+- 服务日志见 `logs/webui.log`；重新打包：`pip install pyinstaller && python -m PyInstaller --onefile --console --name AutoQuill --specpath build --distpath dist tools/launcher.py`
+
+**方式二：直接运行**——`python main.py --web` 后手动打开 http://127.0.0.1:8787
+
+Web 控制台支持：环节测试（选题/提取/生成）、单轮/批量运行、实时日志、历史故事查看、
+配置速览，以及**运行时切换模型**（服务商 + 模型下拉框，下次生成立即生效并持久化，
+见 `config/webui_model.json`，已 gitignore 不入库）。
 
 ---
 

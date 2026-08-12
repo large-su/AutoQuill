@@ -11,6 +11,7 @@ import unittest
 
 from applications.zhihu_story.browser_adapter import (
     normalize_question_url,
+    extract_answer_id,
     build_story_record,
     clean_story_markdown,
     story_markdown_to_html,
@@ -76,6 +77,31 @@ class TestNormalizeQuestionUrl(unittest.TestCase):
     def test_empty(self):
         self.assertIsNone(normalize_question_url(""))
         self.assertIsNone(normalize_question_url(None))
+
+
+class TestExtractAnswerId(unittest.TestCase):
+    def test_full_answer_url(self):
+        self.assertEqual(
+            extract_answer_id(
+                "https://www.zhihu.com/question/509766383/answer/1942712179510998697"),
+            "1942712179510998697")
+
+    def test_protocol_relative(self):
+        self.assertEqual(
+            extract_answer_id("//www.zhihu.com/question/1/answer/2063252941843206790"),
+            "2063252941843206790")
+
+    def test_bare_answer_url(self):
+        self.assertEqual(
+            extract_answer_id("https://www.zhihu.com/answer/1942712179510998697"),
+            "1942712179510998697")
+
+    def test_question_url_rejected(self):
+        self.assertIsNone(extract_answer_id("https://www.zhihu.com/question/42"))
+
+    def test_empty(self):
+        self.assertIsNone(extract_answer_id(""))
+        self.assertIsNone(extract_answer_id(None))
 
 
 class TestBuildStoryRecord(unittest.TestCase):
@@ -214,7 +240,8 @@ class TestSemanticInterfaces(unittest.TestCase):
         self.assertIn("_wait_answer_container", src)
         self.assertIn("page.reload", src)
         src2 = self._src("_wait_answer_container")
-        self.assertIn("wait_for_timeout(1000)", src2)
+        # 渲染窗口：下滑后轮询等容器出现（500ms×4，最多 ~2s）
+        self.assertIn("wait_for_timeout(500)", src2)
 
     def test_extraction_path_settles_lazy_loading(self):
         # 问题页懒加载：提取前必须先走就绪流程（滚动→展开→稳定），
@@ -223,12 +250,23 @@ class TestSemanticInterfaces(unittest.TestCase):
             src = self._src(method)
             self.assertIn("_settle_answer_page", src, method)
 
+    def test_get_author_answer_uses_answer_page_not_question(self):
+        # ★ 回归：作者采集必须走独立回答页 /answer/{aid}——链接若被
+        #   规整成问题页，提取到的是排名第一的回答而非作者的回答
+        src = self._src("get_author_answer")
+        self.assertIn("extract_answer_id(answer_url)", src)
+        self.assertIn("answer/{aid}", src)   # 独立回答页
+        self.assertNotIn("open_question", src)   # 不再经问题页幂等导航
+        self.assertNotIn("normalize_question_url", src)
+
     def test_wait_container_detect_scroll_return_loop(self):
-        # 懒加载循环：检测 → 无则下滑触发渲染 → 等一会 → 滑回原位 → 再检测。
-        # 滑回原位是关键：一直下滑会触发无限加载更多回答、首答 scope 漂移
+        # 懒加载循环：检测 → 无则下滑触发渲染 → 等渲染完成（最多 ~2s）
+        # → 滑回原位 → 再检测。回位是关键：一直下滑会触发无限加载更多
+        # 回答、首答 scope 漂移。渲染窗口不得短于渲染耗时：曾固定 1s
+        # 即回位，知乎懒加载未完成、检测永远落空（线上事故）
         src = self._src("_wait_answer_container")
         self.assertIn("scrollBy(0, 600)", src)   # 下滑触发渲染
-        self.assertIn("wait_for_timeout(1000)", src)
+        self.assertIn("wait_for_timeout(500)", src)
         self.assertIn("scrollTo(0, 0)", src)     # 滑回原位
         self.assertIn("wait_for_timeout(400)", src)
 

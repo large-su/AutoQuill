@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from applications.zhihu_story.author_profiler import (
     compute_text_stats,
@@ -206,6 +207,63 @@ class TestParseProfileJson(unittest.TestCase):
         self.assertIsNone(_parse_profile_json("完全不是 JSON"))
         self.assertIsNone(_parse_profile_json(""))
         self.assertIsNone(_parse_profile_json('{"no_style": 1}'))
+
+
+class TestProfileProgress(unittest.TestCase):
+    """文风提炼的分阶段进度回调（webui 进度条驱动）。"""
+
+    def setUp(self):
+        from applications.zhihu_story import author_profiler as ap
+        self._ap = ap
+        self._orig_lib = ap.STORY_LIB
+        self._orig_dir = ap.AUTHORS_DIR
+        self.tmp = tempfile.TemporaryDirectory()
+        ap.STORY_LIB = os.path.join(self.tmp.name, "lib.jsonl")
+        ap.AUTHORS_DIR = os.path.join(self.tmp.name, "authors")
+        _write_lib(ap.STORY_LIB, [
+            {"author": "甲", "title": f"t{i}", "answer": "长" * 300,
+             "footer": {"likes": 200}}
+            for i in range(3)
+        ])
+
+    def tearDown(self):
+        self._ap.STORY_LIB = self._orig_lib
+        self._ap.AUTHORS_DIR = self._orig_dir
+        self.tmp.cleanup()
+
+    def test_stages_reported_in_order(self):
+        events = []
+        fake = {"style": "短句", "tone": "冷"}
+        with mock.patch.object(self._ap, "_call_profile_llm",
+                               return_value=fake):
+            profile = self._ap.profile_author(
+                "甲", progress=lambda t, p=None: events.append((t, p)))
+        self.assertIsNotNone(profile)
+        self.assertGreaterEqual(len(events), 4)
+        # 阶段顺序：读取 → 统计 → 剖析中 → 保存
+        self.assertIn("读取作者", events[0][0])
+        self.assertTrue(any("文本统计" in t for t, _ in events))
+        self.assertTrue(any("剖析中" in t for t, _ in events))
+        self.assertTrue(any("保存" in t for t, _ in events))
+        # 剖析中阶段无百分比（不确定进度）
+        pct = [p for t, p in events if "剖析中" in t][0]
+        self.assertIsNone(pct)
+        # 有确定进度的阶段最终到 100
+        known = [p for _, p in events if p is not None]
+        self.assertEqual(known[-1], 100)
+
+    def test_insufficient_stories_stops_before_llm(self):
+        _write_lib(self._ap.STORY_LIB, [
+            {"author": "甲", "title": "t1", "answer": "长" * 300,
+             "footer": {"likes": 200}}])
+        events = []
+        with mock.patch.object(self._ap, "_call_profile_llm") as m:
+            result = self._ap.profile_author(
+                "甲", progress=lambda t, p=None: events.append(t))
+        self.assertIsNone(result)
+        m.assert_not_called()
+        self.assertFalse(any("剖析中" in t for t in events),
+                         "样本不足不应进入剖析阶段")
 
 
 class TestSaveLoadProfile(unittest.TestCase):

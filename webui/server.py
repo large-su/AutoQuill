@@ -16,6 +16,8 @@
 import builtins
 import json
 import logging
+import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -36,7 +38,8 @@ HOST = "127.0.0.1"
 PORT = 8787
 
 # watchdog：日志超过 STALL 秒无进展或总时长超过 OVERALL 秒 → 判定卡死
-STALL_LIMIT = 180.0
+# 240s 而非 180s：慢速页面/模型首 token 前等待窗口可能较长，留足余量
+STALL_LIMIT = 240.0
 OVERALL_LIMIT = 900.0
 
 # run 线程最后一条日志的时间戳（CaptureHandler.emit 更新）
@@ -57,9 +60,12 @@ class _TimedHandler(logging.Handler):
 
 
 class _RunSpec(BaseModel):
-    mode: str  # select | extract | generate | single | batch
+    mode: str  # select | extract | generate | single | batch | profile | general_profile | collect
     gen_count: int = 5
     publish_count: int = 3
+    author: str = ""   # profile 模式：要提炼文风的作者名（collect 模式作者名自动识别）
+    url: str = ""      # collect 模式：作者回答列表页 URL
+    count: int = 5     # collect 模式：本次最多新增篇数
 
 
 class TaskRunner:
@@ -77,6 +83,7 @@ class TaskRunner:
         self.message = ""
         self.last_context = {}   # {title, answer, footer, url}
         self.last_story = {}     # {text, md_path, chars}
+        self.progress = None     # {text, pct}：阶段进度（SSE 断连时前端轮询）
         self._handler = None
 
     # ---------------- 状态 ----------------
@@ -88,6 +95,7 @@ class TaskRunner:
                 "message": self.message,
                 "context": self.last_context,
                 "story": self.last_story,
+                "progress": self.progress,
             }
 
     def _set_state(self, state, message=""):
@@ -155,7 +163,7 @@ class TaskRunner:
             if self._stop_flag.is_set():
                 self._finish("stopped", f"已中断：{exc}")
             else:
-                log.error("Web 任务异常：%s", exc)
+                log.error("Web 任务异常：%s", exc, exc_info=True)
                 self._finish("error", str(exc))
         finally:
             builtins.input = _orig_input
@@ -209,16 +217,116 @@ class TaskRunner:
             return True
 
         if mode == "single":
-            return wf.run_single()
+            # run_single 内部完成提取与发布，通过回调把结果回填到
+            # 上下文，让前端「提取结果」「生成故事」两张卡片在
+            # 单轮全流程后都能展示
+            def _on_extracted(title, answer, footer, url):
+                self.last_context = {
+                    "title": title, "answer": answer,
+                    "footer": footer or {}, "url": url or "",
+                }
+                from core.story_text import sample_reference_sections
+                self.last_context["sample_preview"] = \
+                    sample_reference_sections(answer) if answer else ""
+
+            def _on_story(story, md_path):
+                self.last_story = {
+                    "text": story,
+                    "md_path": str(md_path),
+                    "chars": len(story),
+                }
+
+            return wf.run_single(on_extracted=_on_extracted,
+                                 on_story=_on_story)
 
         if mode == "batch":
             published = wf.run_batch(
                 spec.gen_count, publish_count=spec.publish_count)
             return bool(published)
 
+        if mode == "profile":
+            # 作者文风提炼：读采集库 → 统计 → LLM 剖析 → 存 data/authors/
+            from applications.zhihu_story.author_profiler import (
+                AUTHORS_DIR, profile_author)
+            if not spec.author:
+                raise HTTPException(400, "缺少作者名（须与采集库 author 字段一致）")
+            profile = profile_author(
+                spec.author, progress=_task_progress_log)
+            if not profile:
+                raise RuntimeError(
+                    f"提炼失败：作者「{spec.author}」在采集库中可用故事不足 2 篇"
+                    f"或 LLM 剖析未返回有效签名")
+            # 提炼即选择：立刻切换为当前文风，下次生成立即生效
+            from config import set_runtime_author_profile
+            eff = set_runtime_author_profile(spec.author)
+            path = os.path.join(AUTHORS_DIR, f"{spec.author}.json")
+            self.last_context = {
+                "profile": {"title": f"文风签名：{spec.author}",
+                            "path": path,
+                            "summary": _profile_summary(profile)},
+            }
+            log.info("文风「%s」已保存 → %s（当前注入文风：%s）",
+                     spec.author, path, eff["author_profile"])
+            for line in _profile_summary(profile).splitlines():
+                log.info("  %s", line)
+            return True
+
+        if mode == "collect":
+            # 作者故事采集：URL → 自动识别作者 → 滚动列表去重采集
+            if not spec.url:
+                raise HTTPException(400, "缺少作者回答列表页 URL"
+                                        "（zhihu.com/people/{token}/answers）")
+            if spec.count < 1 or spec.count > 500:
+                raise HTTPException(400, "采集数量须在 1-500 之间")
+            from applications.zhihu_story.collector import collect_author_stories
+            from applications.zhihu_story.browser_adapter import get_browser
+            result = collect_author_stories(
+                spec.url, count=spec.count, browser=get_browser())
+            collected = result["collected"]
+            author = result["author"]
+            total = result.get("existing", 0) + len(collected)
+            self.last_context = {
+                "collect": {
+                    "title": f"故事采集：{author}",
+                    "summary": f"新增 {len(collected)} 篇"
+                               f"（该作者库中共 {total} 篇；"
+                               "重复/过短自动跳过）",
+                },
+            }
+            log.info("采集结果：作者「%s」新增 %d 篇，该作者库中共 %d 篇",
+                     author, len(collected), total)
+            return bool(collected)
+
+        if mode == "general_profile":
+            # 通用写作风格提炼（跨作者顶层，存 _general.json）
+            from applications.zhihu_story.author_profiler import (
+                AUTHORS_DIR, GENERAL_PROFILE_FILE, profile_general)
+            profile = profile_general(progress=_task_progress_log)
+            if not profile:
+                raise RuntimeError(
+                    "通用风格提炼失败：采集库可用故事不足 3 篇"
+                    "或 LLM 剖析未返回有效签名")
+            from config import set_runtime_author_profile
+            eff = set_runtime_author_profile("通用")
+            path = os.path.join(AUTHORS_DIR, GENERAL_PROFILE_FILE)
+            self.last_context = {
+                "profile": {"title": "文风签名：通用（跨作者）",
+                            "path": path,
+                            "summary": _profile_summary(profile)},
+            }
+            log.info("通用文风已保存 → %s（当前注入文风：%s）",
+                     path, eff["author_profile"])
+            for line in _profile_summary(profile).splitlines():
+                log.info("  %s", line)
+            return True
+
         raise HTTPException(400, f"未知模式：{mode}")
 
     def _finish(self, state, message):
+        # 先清进度再改状态：SSE/轮询看到 state 时 progress 必已为空，
+        # 前端不会用过期进度覆盖完成态
+        with self._lock:
+            self.progress = None  # 任务结束，进度清空
         self._set_state(state, message)
         log.info("任务结束：%s", message)
 
@@ -226,6 +334,10 @@ class TaskRunner:
 
     def _watchdog(self, spec: _RunSpec):
         deadline = time.time() + OVERALL_LIMIT
+        # 文风提炼是一次性 LLM 剖析（非流式），调用期间无日志，
+        # 单独放宽卡死阈值（剖析请求最长可达 10 分钟）
+        stall = STALL_LIMIT * 3 if spec.mode in ("profile", "general_profile") \
+            else STALL_LIMIT
         while True:
             time.sleep(15)
             if self._stop_flag.is_set():
@@ -234,7 +346,7 @@ class TaskRunner:
                 if self.state != "running":
                     return
             age = time.time() - _last_log_ts[0]
-            if age > STALL_LIMIT:
+            if age > stall:
                 log.warning("watchdog：日志 %.0fs 无进展，判定卡死并中断",
                             age)
                 self._stop_flag.set()  # 取消钩子生效，检查点抛异常
@@ -245,6 +357,39 @@ class TaskRunner:
                 self._set_state("timeout", f"总时长超 {OVERALL_LIMIT:.0f}s")
                 self._stop_flag.set()
                 return
+
+
+def _task_progress_log(text, pct=None):
+    """progress 回调 → 「任务进度」日志行（log_capture 解析成 progress
+    事件推给前端；pct=None 表示不确定进度，前端显示动画+计时）。
+
+    同时写入 runner.progress：SSE 断连（如任务由命令行/其他浏览器
+    触发）时前端轮询 /api/status 也能拿到当前阶段进度。
+    """
+    line = f"任务进度：{text}" + (f" | {pct}%" if pct is not None else "")
+    log.info(line)
+    with runner._lock:
+        runner.progress = {"text": text, "pct": pct}
+
+
+def _profile_summary(profile):
+    """把提炼出的技能签名渲染成可读摘要（前端展示用）。"""
+    sig = profile.get("signature") or {}
+    lines = [f"文风：{sig.get('style', '（未提炼）')}",
+             f"基调：{sig.get('tone', '（未提炼）')}",
+             f"句法节奏：{sig.get('sentence_rhythm', '（未提炼）')}"]
+    for k, label in (("opening_patterns", "开头技法"),
+                     ("narrative_techniques", "叙事技法"),
+                     ("signature_phrases", "惯用句式"),
+                     ("avoid", "回避清单")):
+        items = sig.get(k) or []
+        if items:
+            lines.append(f"{label}（{len(items)} 条）：")
+            lines += [f"  - {i}" for i in items[:6]]
+    src = profile.get("source_stories") or []
+    lines.append(f"样本：{len(src)} 篇"
+                 f"（{profile.get('profiled_at', '')}）")
+    return "\n".join(lines)
 
 
 runner = TaskRunner()
@@ -264,7 +409,7 @@ def index():
 
 @app.get("/api/config")
 def api_config():
-    """配置速览（只读，import 时一次性求值）。"""
+    """配置速览（只读）。模型字段取根 config 的实际生效值（运行时可切换）。"""
     cfg = {}
     try:
         from applications.zhihu_story import config as sconfig
@@ -272,19 +417,281 @@ def api_config():
                   "STORY_MATERIAL_MODE", "AUTHOR_PROFILE",
                   "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
                   "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES",
-                  "LONG_FORM_MODE", "META_LEARN_ENABLE", "KB_ENABLE",
-                  "LLM_MODEL"):
+                  "LONG_FORM_MODE", "META_LEARN_ENABLE", "KB_ENABLE"):
             cfg[k] = getattr(sconfig, k, None)
     except Exception as exc:
         cfg["_app_error"] = str(exc)
     try:
-        from config import LLM_MODE, LLM_PROVIDER, WEB_DRIVER_NAME
+        # WEB_DRIVER_NAME 是早期网页驱动时代的残留（知乎 workflow
+        # 固定走 browser_adapter 直连 Edge），不再对外展示
+        from config import LLM_MODE, LLM_PROVIDER, LLM_MODEL_ID
         cfg["LLM_MODE"] = LLM_MODE
         cfg["LLM_PROVIDER"] = LLM_PROVIDER
-        cfg["WEB_DRIVER_NAME"] = WEB_DRIVER_NAME
+        cfg["LLM_MODEL"] = LLM_MODEL_ID
     except Exception as exc:
         cfg["_root_error"] = str(exc)
     return cfg
+
+
+@app.get("/api/models")
+def api_models():
+    """列出可切换的服务商与模型（不含任何密钥）。"""
+    from config import _PROVIDERS_FILE, LLM_PROVIDER, LLM_MODEL_ID
+    try:
+        with open(_PROVIDERS_FILE, "r", encoding="utf-8") as f:
+            providers = json.load(f)
+    except OSError:
+        raise HTTPException(500, "llm_providers.json 读取失败")
+    return {
+        "current": {"provider": LLM_PROVIDER, "model_id": LLM_MODEL_ID},
+        "providers": [
+            {"name": p["name"],
+             "models": [{"id": m["id"]} for m in p.get("models", [])]}
+            for p in providers
+        ],
+    }
+
+
+class _ModelSpec(BaseModel):
+    provider: str
+    model_id: str
+
+
+class _ModeSpec(BaseModel):
+    mode: str
+
+
+class _BrowserSpec(BaseModel):
+    headless: bool  # False=前台调试 / True=无头工作
+
+
+@app.post("/api/model")
+def api_set_model(spec: _ModelSpec):
+    """运行时切换故事生成模型（立即生效，持久化到 webui_model.json）。"""
+    from config import set_runtime_model
+    try:
+        eff = set_runtime_model(spec.provider, spec.model_id)
+    except Exception as exc:
+        raise HTTPException(400, f"模型切换失败：{exc}")
+    log.info("Web 控制台切换模型 → %s / %s", eff["provider"], eff["model_id"])
+    return {"ok": True, "effective": eff}
+
+
+@app.get("/api/mode")
+def api_mode():
+    """生成通道：api（API 调用）/ web（网页版浏览器操作）。"""
+    from config import LLM_MODE
+    return {"mode": LLM_MODE, "allowed": ["api", "web"]}
+
+
+@app.post("/api/mode")
+def api_set_mode(spec: _ModeSpec):
+    """运行时切换生成通道（立即生效，持久化到 webui_model.json）。"""
+    from config import set_runtime_mode
+    try:
+        eff = set_runtime_mode(spec.mode)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    log.info("Web 控制台切换生成通道 → %s", eff["mode"])
+    return {"ok": True, "effective": eff}
+
+
+@app.get("/api/browser")
+def api_browser():
+    """浏览器模式：headless=False 前台调试 / True 无头工作。"""
+    from config import BROWSER_HEADLESS
+    return {"headless": BROWSER_HEADLESS}
+
+
+@app.post("/api/browser")
+def api_set_browser(spec: _BrowserSpec):
+    """运行时切换浏览器模式（下次任务启动生效，持久化）。"""
+    from config import set_runtime_browser_headless
+    eff = set_runtime_browser_headless(spec.headless)
+    log.info("Web 控制台切换浏览器模式 → %s",
+             "无头（工作）" if eff["headless"] else "前台（调试）")
+    return {"ok": True, "effective": eff}
+
+
+class _AuthorSpec(BaseModel):
+    name: str  # 作者名；空串 = 不注入文风
+
+
+@app.get("/api/authors")
+def api_authors():
+    """已提炼的文风签名列表（data/authors/*.json）+ 当前注入选择。"""
+    from applications.zhihu_story.author_profiler import (
+        AUTHORS_DIR, GENERAL_PROFILE_FILE, load_author_profile)
+    from applications.zhihu_story.config import AUTHOR_PROFILE
+    authors = []
+    if os.path.isdir(AUTHORS_DIR):
+        for f in sorted(os.listdir(AUTHORS_DIR)):
+            if not f.endswith(".json"):
+                continue
+            is_general = (f == GENERAL_PROFILE_FILE)
+            name = "通用" if is_general else f[:-5]
+            profile = load_author_profile(
+                name, filename=f) if is_general else load_author_profile(name)
+            if not profile:
+                continue
+            sig = profile.get("signature") or {}
+            authors.append({
+                "name": name,
+                "general": is_general,
+                "profiled_at": profile.get("profiled_at", ""),
+                "stories_count": len(profile.get("source_stories") or []),
+                "style": (sig.get("style") or "")[:40],
+            })
+    return {"authors": authors, "current": AUTHOR_PROFILE}
+
+
+@app.post("/api/author")
+def api_set_author(spec: _AuthorSpec):
+    """运行时切换故事生成注入的作者文风（空串=不注入，持久化）。"""
+    from config import set_runtime_author_profile
+    try:
+        eff = set_runtime_author_profile(spec.name)
+    except Exception as exc:
+        raise HTTPException(400, f"文风切换失败：{exc}")
+    log.info("Web 控制台切换文风 → %r", eff["author_profile"])
+    return {"ok": True, "effective": eff}
+
+
+def _norm_storylib_url(url):
+    """采集记录 answer_url 规范化（去 hash/query），删除匹配用。"""
+    if not url:
+        return ""
+    return url.split("#")[0].split("?")[0]
+
+
+def _read_storylib():
+    """读采集库全部记录（跳过空行/坏行）。"""
+    from applications.zhihu_story.author_profiler import STORY_LIB
+    if not os.path.exists(STORY_LIB):
+        return []
+    records = []
+    with open(STORY_LIB, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def _storylib_authors(records):
+    """按作者聚合 + 是否已有文风签名文件（删除时提示存在）。"""
+    from applications.zhihu_story.author_profiler import AUTHORS_DIR
+    seen = {}
+    for rec in records:
+        a = (rec.get("author") or "").strip()
+        if a:
+            seen[a] = seen.get(a, 0) + 1
+    authors = []
+    for name, count in sorted(seen.items(), key=lambda kv: -kv[1]):
+        safe = re.sub(r'[\\/:*?"<>|]', "_", name)
+        authors.append({
+            "name": name,
+            "records": count,
+            "has_profile": os.path.exists(
+                os.path.join(AUTHORS_DIR, f"{safe}.json")),
+        })
+    return authors
+
+
+@app.get("/api/storylib")
+def api_storylib(author: str = ""):
+    """采集库管理数据：不带 author 按作者聚合（含签名存在标记）；
+    带 author 返回该作者的记录详情（单条删除用）。"""
+    records = _read_storylib()
+    if author:
+        details = []
+        for rec in records:
+            if (rec.get("author") or "").strip() != author:
+                continue
+            footer = rec.get("footer") or {}
+            details.append({
+                "title": (rec.get("title") or "（无标题）")[:60],
+                "collected_at": rec.get("collected_at", ""),
+                "answer_url": footer.get("answer_url", ""),
+                "chars": len(rec.get("answer") or ""),
+            })
+        return {"author": author, "records": details}
+    return {"authors": _storylib_authors(records)}
+
+
+class _StoryLibDelSpec(BaseModel):
+    author: str = ""   # 按作者整删
+    url: str = ""      # 按 answer_url 单条删
+
+
+@app.delete("/api/storylib")
+def api_storylib_delete(spec: _StoryLibDelSpec):
+    """删除采集记录：author 整删该作者 / url 单条删（规范化匹配）。
+
+    任务运行中拒绝（采集可能正在写库，重写会冲突）。"""
+    if runner.state in ("running", "stopping"):
+        raise HTTPException(409, "任务运行中，请先停止任务再清理采集库")
+    if not spec.author and not spec.url:
+        raise HTTPException(400, "须指定 author（整删）或 url（单条删）")
+    from applications.zhihu_story.author_profiler import STORY_LIB
+    if not os.path.exists(STORY_LIB):
+        return {"ok": True, "removed": 0, "authors": []}
+
+    target = _norm_storylib_url(spec.url)
+    kept, removed = [], 0
+    for rec in _read_storylib():
+        if spec.author:
+            if (rec.get("author") or "").strip() == spec.author:
+                removed += 1
+                continue
+        elif target:
+            if _norm_storylib_url(
+                    (rec.get("footer") or {}).get("answer_url") or "") == target:
+                removed += 1
+                continue
+        kept.append(rec)
+    if not removed:
+        raise HTTPException(404, "未找到要删除的记录")
+
+    tmp = STORY_LIB + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for rec in kept:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    os.replace(tmp, STORY_LIB)
+    log.info("采集库清理：删除 %d 条记录（author=%r url=%r），"
+             "剩余 %d 条", removed, spec.author, spec.url, len(kept))
+    return {"ok": True, "removed": removed,
+            "authors": _storylib_authors(kept)}
+
+
+@app.get("/api/profile-sources")
+def api_profile_sources():
+    """采集库（collected_stories.jsonl）中可提炼的作者与篇数。"""
+    from applications.zhihu_story.author_profiler import (
+        STORY_LIB, load_author_stories)
+    if not os.path.exists(STORY_LIB):
+        return {"authors": []}
+    seen = {}
+    with open(STORY_LIB, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            author = (rec.get("author") or "").strip()
+            if not author:
+                continue
+            seen[author] = seen.get(author, 0) + 1
+    return {"authors": [
+        {"name": k, "records": v} for k, v in
+        sorted(seen.items(), key=lambda kv: -kv[1])]}
 
 
 @app.post("/api/run")
