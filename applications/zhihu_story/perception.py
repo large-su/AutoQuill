@@ -24,15 +24,12 @@ __all__ = [
     'parse_likes_only', 'parse_footer_line', 'parse_end_timestamp',
     'extract_footer_from_lines', '_extract_footer_with_fallback',
     'get_likes_action_bounds', 'get_upvote_button_bounds',
-    # 回答加载检测
-    'wait_for_answer_load',
     # 推荐页解析
     '_TITLE_NOISE', '_RECOMMEND_NOISE_RE', '_HOT_KEYWORDS',
     '_is_metrics_line', '_is_valid_title', '_extract_metric',
-    'parse_recommend_questions',
     # 知乎内容提取
     'split_first_page', 'extract_question_title',
-    'scroll_and_ocr_answer', 'scroll_and_ocr_answer_fast',
+    'scroll_and_ocr_answer',
     'extract_zhihu_question_and_answer',
     # 清洗
     '_clean_content',
@@ -352,55 +349,6 @@ def _extract_footer_with_fallback(lines, left_x, right_x, top_y, bottom_y):
 
 
 # ============================================================
-# 智能检测回答是否已加载
-# ============================================================
-
-def wait_for_answer_load(left_x, top_y, right_x, bottom_y,
-                          poll_interval=1.0, max_wait=10.0):
-    """进入问题页后，反复向下滚动并 OCR 检测，直到回答加载出来。"""
-    from ocr_utils import ocr_region
-
-    log.info("触发回答加载...")
-
-    pyautogui.scroll(-5)
-    time.sleep(0.5)
-
-    baseline_lines, _ = ocr_region(left_x, top_y, right_x, bottom_y)
-    baseline_count = len(baseline_lines)
-
-    start = time.time()
-    scroll_count = 0
-
-    while time.time() - start < max_wait:
-        time.sleep(poll_interval)
-
-        lines, _ = ocr_region(left_x, top_y, right_x, bottom_y)
-        full_text = '\n'.join(lines)
-
-        if "人赞同了该回答" in full_text or "人赞同" in full_text:
-            log.info("  ✓ 检测到「人赞同」，回答已加载")
-            return True
-
-        if "个回答" in full_text:
-            log.info("  ✓ 检测到「个回答」，回答已加载")
-            return True
-
-        if len(lines) > baseline_count + 5:
-            log.info(f"  ✓ 行数从 {baseline_count} 增加到 {len(lines)}，回答已加载")
-            return True
-
-        elapsed = int(time.time() - start)
-        log.info(f"  [{elapsed}s] 未检测到回答... 当前 {len(lines)} 行，再滚动一次")
-
-        pyautogui.scroll(-5)
-        scroll_count += 1
-        time.sleep(0.5)
-
-    log.warning(f"  回答加载超时（{max_wait}s，滚动了 {scroll_count+1} 次），继续尝试")
-    return False
-
-
-# ============================================================
 # 推荐页问题解析
 # ============================================================
 
@@ -465,100 +413,6 @@ def _extract_metric(text, keyword):
     if '万' in segment[segment.rfind(num_str):]:
         return _parse_chinese_number(num_str + '万')
     return _parse_chinese_number(num_str)
-
-
-def parse_recommend_questions(left_x, top_y, right_x, bottom_y):
-    """OCR 推荐页左栏，解析每个问题卡片。飙升优先：有飙升只返回飙升问题，无飙升返回全部。"""
-    from ocr_utils import ocr_region_raw
-
-    extend_left = max(left_x - 100, 0)
-    left_col_right = left_x + int((right_x - left_x) * 0.55)
-    blocks = ocr_region_raw(extend_left, top_y, left_col_right, bottom_y)
-    if not blocks:
-        return []
-
-    log.info(f"  左栏 OCR: {len(blocks)} 个文字块")
-
-    for idx, (text, cx, cy) in enumerate(blocks):
-        tag = " [指标行]" if _is_metrics_line(text) else ""
-        tag += " [热门]" if any(kw in text for kw in _HOT_KEYWORDS) else ""
-        log.info(f"    块{idx}: Y={int(cy)} X={int(cx)} 「{text[:30]}」{tag}")
-
-    questions = []
-
-    for i, (text, cx, cy) in enumerate(blocks):
-        if not _is_metrics_line(text):
-            continue
-
-        metrics_text = text
-        metrics_y = cy
-
-        nearby = []
-        for j in range(i - 1, max(i - 6, -1), -1):
-            prev_text, prev_cx, prev_cy = blocks[j]
-            if metrics_y - prev_cy > 120:
-                break
-            if prev_cx < left_x - 20:
-                continue
-            nearby.append((prev_text, prev_cx, prev_cy, j))
-
-        is_hot = False
-        for nb_text, _, _, _ in nearby:
-            if any(kw in nb_text for kw in _HOT_KEYWORDS):
-                is_hot = True
-                break
-
-        title = ''
-        title_y = metrics_y
-        title_x = cx
-
-        for nb_text, nb_cx, nb_cy, nb_idx in nearby:
-            clean = nb_text.strip()
-
-            if clean in _HOT_KEYWORDS:
-                continue
-
-            for kw in _HOT_KEYWORDS:
-                if clean.startswith(kw):
-                    is_hot = True
-                    clean = clean[len(kw):].strip()
-                    break
-            if not clean:
-                continue
-
-            if not _is_valid_title(clean):
-                continue
-
-            title = clean
-            title_y = nb_cy
-            title_x = nb_cx
-            break
-
-        if not title:
-            continue
-
-        views = _extract_metric(metrics_text, '浏览')
-        answers = _extract_metric(metrics_text, '回答')
-        followers = _extract_metric(metrics_text, '关注')
-        score = (views * (followers + 1)) / (answers + 1)
-
-        questions.append({
-            'title': title,
-            'views': views,
-            'answers': answers,
-            'followers': followers,
-            'is_hot': is_hot,
-            'score': score,
-            'click_x': int(title_x),
-            'click_y': int(title_y),
-        })
-
-        log.info(f"  → {'🔥' if is_hot else '  '} {title[:30]} | "
-                 f"{views:.0f}浏览 {answers:.0f}回答 {followers:.0f}关注 "
-                 f"score={score:.0f}")
-
-    questions.sort(key=lambda q: q['score'], reverse=True)
-    return questions
 
 
 # ============================================================
@@ -724,122 +578,6 @@ def scroll_and_ocr_answer(left_x, right_x, top_y, bottom_y,
 
     return ('\n'.join(_clean_content(all_lines)),
             _merge_upvote_likes(footer, upvote_likes))
-
-
-def scroll_and_ocr_answer_fast(left_x, right_x, top_y, bottom_y,
-                                first_page_answer_lines=None, max_scrolls=20):
-    """快速版回答提取：截屏缓存 + 并行 OCR。"""
-    from config import WAIT_PAGE_DOWN
-    from concurrent.futures import ThreadPoolExecutor
-    from ocr_utils import _get_engine, _merge_to_lines, _deduplicate_lines
-
-    all_lines = list(first_page_answer_lines or [])
-    footer = None
-
-    end_found, end_idx = _check_lines_for_end(all_lines)
-    if end_found:
-        footer = _extract_footer_with_fallback(all_lines, left_x, right_x, top_y, bottom_y)
-        return '\n'.join(_clean_content(all_lines[:end_idx])), footer
-
-    w = right_x - left_x
-    h = bottom_y - top_y
-    screenshots = []
-    prev_pixels = None
-    no_change = 0
-
-    scroll_wait = max(WAIT_PAGE_DOWN * 0.6, 0.3)
-
-    log.info(f"  快速截屏中（每页 {scroll_wait:.2f}s）...")
-    scroll_start = time.time()
-
-    for idx in range(max_scrolls):
-        pyautogui.press('pagedown')
-        time.sleep(scroll_wait)
-
-        img = pyautogui.screenshot(region=(left_x, top_y, w, h))
-        np_img = np.array(img)
-
-        sampled = np_img[::8, ::8]
-        if prev_pixels is not None:
-            diff = np.mean(np.abs(sampled.astype(int) - prev_pixels.astype(int)))
-            if diff < 3:
-                no_change += 1
-                if no_change >= 2:
-                    log.info(f"    第 {idx+1} 屏无变化，停止")
-                    break
-            else:
-                no_change = 0
-
-        screenshots.append(np_img)
-        prev_pixels = sampled
-
-    scroll_time = time.time() - scroll_start
-    log.info(f"    缓存 {len(screenshots)} 张截屏（{scroll_time:.1f}s）")
-
-    if not screenshots:
-        return '\n'.join(_clean_content(all_lines)), footer
-
-    def _ocr_one(np_img):
-        engine = _get_engine()
-        result, _ = engine(np_img)
-        if not result:
-            return []
-        result.sort(key=lambda item: (
-            sum(p[1] for p in item[0]) / 4,
-            sum(p[0] for p in item[0]) / 4
-        ))
-        return _merge_to_lines(result)
-
-    ocr_start = time.time()
-    workers = min(len(screenshots), 4)
-    log.info(f"  并行 OCR（{workers} 线程）...")
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        ocr_results = list(pool.map(_ocr_one, screenshots))
-
-    ocr_time = time.time() - ocr_start
-    log.info(f"    OCR 完成：{ocr_time:.1f}s（{len(screenshots)} 张）")
-
-    prev = list(first_page_answer_lines or [])
-    ended = False
-
-    for page_idx, page_lines in enumerate(ocr_results):
-        if not page_lines:
-            continue
-
-        end_found, _ = _check_lines_for_end(page_lines)
-        new = _deduplicate_lines(prev, page_lines)
-
-        if not new:
-            continue
-
-        if end_found:
-            footer = extract_footer_from_lines(page_lines)
-            if (footer is None or footer.get('likes') is None) and page_idx + 1 < len(ocr_results):
-                next_page = ocr_results[page_idx + 1]
-                if next_page:
-                    footer_next = extract_footer_from_lines(next_page)
-                    if footer_next and footer_next.get('likes') is not None:
-                        if footer and footer.get('publish_time') and not footer_next.get('publish_time'):
-                            footer_next['publish_time'] = footer['publish_time']
-                        footer = footer_next
-
-            for i, line in enumerate(new):
-                if _is_answer_end_marker(line):
-                    all_lines.extend(new[:i])
-                    ended = True
-                    break
-            if ended:
-                break
-        else:
-            all_lines.extend(new)
-
-        prev = page_lines
-
-    total = scroll_time + ocr_time
-    log.info(f"  快速提取完成：{len(all_lines)} 行（滚屏{scroll_time:.1f}s + OCR{ocr_time:.1f}s = {total:.1f}s）")
-
-    return '\n'.join(_clean_content(all_lines)), footer
 
 
 def extract_zhihu_question_and_answer(left_x, right_x, top_y, bottom_y,

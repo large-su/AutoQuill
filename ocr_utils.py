@@ -83,20 +83,6 @@ def ocr_region_raw(left_x, top_y, right_x, bottom_y):
     blocks.sort(key=lambda b: (b[2], b[1]))
     return blocks
 
-def ocr_screenshot(region=None):
-    if region:
-        x, y, w, h = region
-        return ocr_region(x, y, x + w, y + h)
-    engine = _get_engine()
-    screenshot = pyautogui.screenshot()
-    result, _ = engine(np.array(screenshot))
-    if not result:
-        return [], []
-    result.sort(key=lambda item: (
-        sum(p[1] for p in item[0]) / 4,
-        sum(p[0] for p in item[0]) / 4
-    ))
-    return _merge_to_lines(result), result
 
 def _merge_to_lines(ocr_results, y_threshold=15):
     if not ocr_results:

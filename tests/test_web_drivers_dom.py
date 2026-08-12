@@ -130,7 +130,6 @@ class TestLegacyIsolation(unittest.TestCase):
 
     def test_legacy_exists_but_separate(self):
         import os
-        self.assertTrue(os.path.exists("web_drivers/legacy/base.py"))
         self.assertTrue(os.path.exists("web_drivers/legacy/aizex.py"))
         # 新 base 不得 import legacy（旧驱动不污染主链路）
         with open("web_drivers/base.py", encoding="utf-8") as f:

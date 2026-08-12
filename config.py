@@ -82,10 +82,6 @@ def _load_provider_config(provider_name, model_id):
 
     raise ValueError(f"config/llm_providers.json 中未找到服务商「{provider_name}」")
 
-def _load_provider(provider_name, model_id):
-    """兼容旧调用：返回 api_key, base_url, model。"""
-    cfg = _load_provider_config(provider_name, model_id)
-    return cfg.get("apiKey", ""), cfg.get("baseUrl", ""), cfg.get("model", model_id)
 
 # 解析故事生成模型
 LLM_PROVIDER_CONFIG = _load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)

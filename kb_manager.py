@@ -633,38 +633,6 @@ def classify_genre(question_title):
     log.warning(f"  题材判断失败，使用'其他'")
     return "其他"
 
-def classify_genres_batch(titles):
-    """批量题材判断。"""
-    from applications.zhihu_story.prompts import GENRE_CLASSIFY_PROMPT
-
-    if not titles:
-        return []
-    if len(titles) == 1:
-        return [classify_genre(titles[0])]
-
-    prompt = GENRE_CLASSIFY_PROMPT + "\n\n请对以下每个问题判断题材，按编号返回，每行一个（格式：编号. 题材名称）：\n"
-    for i, title in enumerate(titles):
-        prompt += f"{i + 1}. {title}\n"
-
-    reply = _call_llm(prompt, max_tokens=len(titles) * 20 + 50, temperature=0.1)
-
-    if not reply:
-        return ["其他"] * len(titles)
-
-    genres = ["其他"] * len(titles)
-    for line in reply.strip().split("\n"):
-        line = line.strip()
-        m = re.match(r'(\d+)[.、\s]+(.+)', line)
-        if m:
-            idx = int(m.group(1)) - 1
-            genre = m.group(2).strip().strip('"""' + "''。.，,")
-            if 0 <= idx < len(titles) and 2 <= len(genre) <= 10:
-                genres[idx] = genre
-
-    for i, (title, genre) in enumerate(zip(titles, genres)):
-        log.info(f"  题材：「{title[:25]}...」→ {genre}")
-
-    return genres
 
 # ============================================================
 # 知识库压缩
@@ -745,7 +713,6 @@ def compress_kb():
 
     after_count = len(merged_recipes)
     print(f"\n  压缩完成：{before_count} → {after_count} 条（减少 {before_count - after_count} 条）")
-
 
 
 # ============================================================

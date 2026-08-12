@@ -1061,7 +1061,7 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
 
 
 # ============================================================
-# KB 配置解析（DRY：filter_story_questions 和 score_stories 共用）
+# KB 配置解析（KB 优先，故事生成回退）
 # ============================================================
 
 def _resolve_kb_config():
@@ -1098,110 +1098,6 @@ def _resolve_kb_config():
 # ============================================================
 # 故事领域筛选
 # ============================================================
-
-def filter_story_questions(questions):
-    """
-    用 LLM 判断候选问题中哪些属于故事/小说/文学创作领域。
-
-    参数：
-        questions: [{title, ...}, ...]
-
-    返回：
-        过滤后的问题列表（只保留故事领域的）
-    """
-    api_key, base_url, _MODEL, extra_body = _resolve_kb_config()
-
-    if not api_key or not questions:
-        return questions
-
-    titles = [q['title'] for q in questions]
-
-    from applications.zhihu_story.prompts import FILTER_PROMPT
-    prompt = FILTER_PROMPT
-    for i, t in enumerate(titles):
-        prompt += f"{i+1}. {t}\n"
-
-    url = f"{base_url}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    payload = {
-        "model": _MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,
-        "temperature": 0.1,
-        "stream": False
-    }
-    if extra_body:
-        payload.update(extra_body)
-
-    try:
-        log.info("LLM 故事领域筛选...")
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        resp.encoding = "utf-8"  # 强制 UTF-8，避免响应头无 charset 时中文乱码
-        if resp.status_code != 200:
-            log.warning(f"筛选 API 失败：{resp.status_code}")
-            return questions
-
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"].strip()
-
-        # ★ Token 用量上报
-        try:
-            from llm_token_tracker import tracker
-            tracker.report(_MODEL, data.get("usage", {}))
-        except Exception:
-            pass
-
-        log.info(f"  LLM 回复：{reply}")
-
-        # "无"或类似回复 → 没有适合的问题
-        if reply.strip() == "无" or ("没有" in reply and len(reply) < 15):
-            log.warning("  LLM 认为没有适合写故事的问题")
-            for q in questions:
-                q['is_story'] = False
-            return []  # 返回空列表，外部会兜底
-
-        # 提取保留的编号（正向逻辑）
-        # 兼容多种格式：逗号分隔 "1,3,5" / 中文标点 "1、3、5" / 空格分隔 "1 3 5"
-        #            / "保留1,2,3" / "编号1、3" 等
-        numbers = re.findall(r'\d+', reply)
-        keep_indices = set()
-        for n in numbers:
-            idx = int(n) - 1
-            if 0 <= idx < len(questions):
-                keep_indices.add(idx)
-
-        # 兜底：如果按数字没解析到，尝试按中文大写数字或"全部保留"之类的文本
-        if not keep_indices:
-            if any(kw in reply for kw in ('全部保留', '全部适合', '都适合', '都保留',
-                                           '都适合写故事', '均适合', '均保留')):
-                log.info("  LLM 认为全部适合写故事")
-                return questions
-            log.warning("  未解析到有效编号，返回全部兜底")
-            return questions
-
-        # 正向保留
-        filtered = [questions[i] for i in sorted(keep_indices)]
-        excluded = [questions[i] for i in range(len(questions)) if i not in keep_indices]
-
-        for q in filtered:
-            q['is_story'] = True
-        for q in excluded:
-            q['is_story'] = False
-
-        kept_titles = [q['title'][:25] for q in filtered]
-        excluded_titles = [q['title'][:25] for q in excluded]
-        log.info(f"  保留 {len(filtered)}/{len(questions)} 个故事问题：{kept_titles}")
-        if excluded_titles:
-            log.info(f"  排除 {len(excluded)} 个非故事问题：{excluded_titles}")
-
-        return filtered if filtered else questions  # 兜底
-
-    except Exception as e:
-        log.warning(f"筛选出错：{e}，返回全部")
-        return questions
 
 
 # ============================================================
@@ -1256,7 +1152,6 @@ def test_api_connection():
     except Exception as e:
         print(f"  ❌ {e}")
         return False
-
 
 
 # ============================================================

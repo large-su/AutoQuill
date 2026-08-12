@@ -43,52 +43,6 @@ def navigate_to_url(url):
     random_delay(WAIT_PAGE_LOAD)
 
 
-def open_new_tab(url=None):
-    """打开新标签页，可选导航到 URL"""
-    from config import random_delay, WAIT_TAB_OPEN
-    pyautogui.hotkey('ctrl', 't')
-    random_delay(WAIT_TAB_OPEN)
-    if url:
-        navigate_to_url(url)
-
-
-def close_current_tab():
-    """关闭当前标签页"""
-    from config import random_delay, WAIT_HOTKEY
-    pyautogui.hotkey('ctrl', 'w')
-    random_delay(WAIT_HOTKEY)
-
-
-def paste_text(text=None):
-    """粘贴文本（如果提供了 text 则先复制到剪贴板）"""
-    from config import random_delay, WAIT_PASTE
-    if text is not None:
-        pyperclip.copy(text)
-        time.sleep(0.15)
-    pyautogui.hotkey('ctrl', 'v')
-    random_delay(WAIT_PASTE)
-
-
-def grab_current_url():
-    pyautogui.hotkey('ctrl', 'l')
-    time.sleep(0.2)
-    pyautogui.hotkey('ctrl', 'c')
-    time.sleep(0.2)
-    url = pyperclip.paste()
-    
-    # 关键：显式抬起所有可能粘连的修饰键，防止下面的 Esc 变成 Ctrl+Esc(=Win键)
-    pyautogui.keyUp('ctrl')
-    pyautogui.keyUp('shift')
-    pyautogui.keyUp('alt')
-    time.sleep(0.05)
-    
-    pyautogui.press('escape')
-    time.sleep(0.05)
-    pyautogui.press('escape')
-    time.sleep(0.15)
-    return url
-
-
 def take_screenshot(name="debug"):
     """保存截图到 screenshots/ 目录"""
     os.makedirs("screenshots", exist_ok=True)
@@ -157,30 +111,6 @@ def open_new_edge_window(url="about:blank", edge_exe=None):
     time.sleep(2.5)
 
     return proc
-
-
-def switch_to_tab(position):
-    """
-    切换到当前窗口内第 position 个标签页（1-9）。
-
-    使用 Ctrl+1..Ctrl+9 快捷键，position=9 在 Edge 中是"跳到最后一个 tab"，
-    其他位置精确对应 tab 顺序。并行模式下应保持 num_slots ≤ 8 以避免歧义。
-    """
-    if not (1 <= position <= 9):
-        raise ValueError(f"标签页位置必须在 1-9 之间：{position}")
-    pyautogui.hotkey('ctrl', str(position))
-    time.sleep(0.25)
-
-
-def close_browser_window():
-    """
-    关闭当前 Edge 窗口（含所有标签页）。
-
-    Ctrl+Shift+W 是 Edge 的"关闭窗口"快捷键，比逐个 Ctrl+W 更安全
-    （避免关到最后一个 tab 时触发"确认关闭"对话框）。
-    """
-    pyautogui.hotkey('ctrl', 'shift', 'w')
-    time.sleep(0.5)
 
 
 # ============================================================
@@ -331,64 +261,6 @@ def ensure_edge(url="about:blank"):
     except Exception as e:
         log.error(f"无法启动 Edge 浏览器：{e}")
         return False
-
-
-def wait_for_user(prompt="按 Enter >> ", auto_focus=True):
-    """等待用户确认，可选自动聚焦浏览器"""
-    input(prompt)
-    if auto_focus:
-        focus_edge()
-        time.sleep(0.3)
-
-
-# ============================================================
-# OCR 辅助点击
-# ============================================================
-
-def make_region(x1, y1, x2, y2):
-    """
-    将两个对角坐标转换为 pyautogui region 格式 (x, y, width, height)。
-
-    用法：make_region(left, top, right, bottom)
-    """
-    return (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
-
-
-def ocr_click_text(target_text, region=None, retries=3, wait=0.8,
-                   log_name=None, click_offset=(0, 0)):
-    """
-    全屏/指定区域 OCR 查找文字并点击。
-
-    参数：
-        target_text: 要查找的文字
-        region: 搜索区域 (x, y, w, h)，None 为全屏
-        retries: 重试次数
-        wait: 每次重试等待秒数
-        log_name: 日志中显示的名称（默认用 target_text）
-        click_offset: 点击偏移 (dx, dy)
-
-    返回 True/False
-    """
-    from ocr_utils import find_text_on_screen
-    from config import random_mouse_duration
-    name = log_name or target_text
-
-    for attempt in range(retries):
-        pos = find_text_on_screen(target_text, region=region)
-        if pos:
-            x = int(pos[0] + click_offset[0])
-            y = int(pos[1] + click_offset[1])
-            log.info(f"  OCR 定位「{name}」→ ({x}, {y})")
-            pyautogui.click(x, y, duration=random_mouse_duration())
-            time.sleep(0.3)
-            return True
-        if attempt < retries - 1:
-            log.info(f"  未找到「{name}」，重试（{attempt+1}/{retries}）")
-            time.sleep(wait)
-
-    log.warning(f"  OCR 未找到「{name}」")
-    return False
-
 
 
 # ============================================================
