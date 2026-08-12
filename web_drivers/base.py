@@ -40,10 +40,18 @@ class WebLLMDriver:
     # ---------------- 会话管理 ----------------
 
     def _get_browser(self):
-        """共享持久化浏览器（知乎流程同实例，避免 profile 锁冲突）。"""
-        if self._browser is None:
+        """共享持久化浏览器（知乎流程同实例，避免 profile 锁冲突）。
+
+        每次任务结束后 webui/server.py 会 close_shared_browser() 关闭
+        共享浏览器（context 置 None、全局引用清空）。本 driver 单例跨
+        任务存活时缓存的旧引用已失效（context 为 None），必须重新获取，
+        否则 .context.new_page() 报 'NoneType' has no attribute。
+        """
+        if (self._browser is None
+                or getattr(self._browser, "context", None) is None):
             from applications.zhihu_story.browser_adapter import get_browser
             self._browser = get_browser()
+            self._page = None  # 旧页来自已关闭的 context，一并丢弃
         return self._browser
 
     def _page_instance(self):
