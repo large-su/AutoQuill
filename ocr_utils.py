@@ -289,8 +289,3 @@ def _fuzzy_match(a, b, threshold=0.7):
     longer = max(len(a), len(b))
     matches = sum(1 for ca, cb in zip(a, b) if ca == cb)
     return (matches / longer) >= threshold
-
-# ============================================================
-# 向后兼容：重导出知乎专用感知函数
-# ============================================================
-from applications.zhihu_story.perception import *

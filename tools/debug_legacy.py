@@ -169,7 +169,8 @@ def test_ocr_mode():
     focus_edge()
     time.sleep(0.5)
 
-    from ocr_utils import ocr_region, _is_answer_end_marker
+    from ocr_utils import ocr_region
+    from applications.zhihu_story.perception import _is_answer_end_marker
     lines, _ = ocr_region(lx, ty, rx, by)
     for i, l in enumerate(lines):
         marks = []

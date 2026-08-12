@@ -315,6 +315,15 @@ def get_coord(key):
     return COORDS[key][0], COORDS[key][1]
 
 
+def get_bounds():
+    """获取 OCR 内容区域的四个边界坐标 (左, 右, 上, 下)"""
+    lx, _ = get_coord("ocr_content_left")
+    rx, _ = get_coord("ocr_content_right")
+    _, ty = get_coord("ocr_content_top")
+    _, by = get_coord("ocr_content_bottom")
+    return lx, rx, ty, by
+
+
 
 # ============================================================
 # 校准系统
@@ -534,4 +543,3 @@ def reset_progress():
 # ============================================================
 # 向后兼容：重导出知乎专用操作函数
 # ============================================================
-from applications.zhihu_story.action import get_bounds

@@ -186,7 +186,7 @@ class OcrAnswerExtractor(AnswerExtractor):
         self.max_retries = max_retries
 
     def extract(self):
-        from ocr_utils import extract_zhihu_question_and_answer
+        from applications.zhihu_story.perception import extract_zhihu_question_and_answer
         return extract_zhihu_question_and_answer(
             self.left_x, self.right_x, self.top_y, self.bottom_y,
             min_length=self.min_length,
