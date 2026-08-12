@@ -298,7 +298,9 @@ class ZhihuWorkflow(WorkflowBase):
     def _extract_answer_with_fallback(self):
         """降级通道：UIA 首答 → OCR 滚屏（DOM 主通道失败时启用）。
 
-        注意：此通道读取屏幕，需要 playwright Edge 窗口可见。
+        注意：此通道读取屏幕，需要 playwright Edge 窗口可见，
+        且必须完成坐标校准。未校准（V3.0 后默认如此）时降级
+        不可用，报诊断清晰的错误而不是裸 RuntimeError。
         """
         from config.story import (
             ENABLE_UIA_ANSWER_EXTRACTION,
@@ -313,7 +315,14 @@ class ZhihuWorkflow(WorkflowBase):
             OcrAnswerExtractor,
             FallbackAnswerExtractor,
         )
-        from desktop_utils import get_bounds
+        from desktop_utils import get_bounds, load_coords
+
+        if not load_coords():
+            raise RuntimeError(
+                "降级通道不可用：OCR 坐标未校准（需运行 --calibrate）。"
+                "DOM 主通道多次尝试未获合格首答（常见原因：首答过短、"
+                "点赞门槛拒绝），且无法降级 OCR。"
+                "请检查 DOM 提取失败原因后重试。")
 
         primary = None
         if ENABLE_UIA_ANSWER_EXTRACTION:

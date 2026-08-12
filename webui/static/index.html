@@ -255,6 +255,9 @@
   .log-line.error { color: #fca5a5; }
   .log-line.run_end { color: var(--text); font-weight: 700; }
   .log-box .placeholder { color: #56617a; font-style: italic; }
+  .log-line.muted { color: #66708a; }
+  .log-line.warn { color: #fcd34d; }
+  .log-file { font-size: 11px; color: #56617a; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* ---------- 右列：结果 ---------- */
   .right-col { overflow-y: auto; padding-right: 2px; }
@@ -482,6 +485,7 @@
         <div class="progress-text" id="progressText">等待生成…</div>
       </div>
       <div class="log-box" id="logBox"><div class="placeholder">点击「运行」开始，日志将实时显示在这里。</div></div>
+      <div class="log-file" id="logFile" title="当前进程业务日志文件路径"></div>
     </div>
   </div>
 
@@ -576,7 +580,7 @@ const CFG_LABELS = {
   ENABLE_FORMAT_RETRY: "格式重试", MIN_ANSWER_LENGTH: "最短回答",
   ENABLE_STORY_FILTER: "故事过滤", ENABLE_MATERIAL_LIKES_GATE: "点赞门槛",
   MATERIAL_MIN_LIKES: "最低点赞", LONG_FORM_MODE: "长文模式",
-  META_LEARN_ENABLE: "元学习", KB_ENABLE: "知识库",
+  KB_ENABLE: "知识库",
 };
 
 let es = null;
@@ -646,6 +650,22 @@ async function pollTaskProgress() {
 setInterval(pollTaskProgress, 3000);
 
 /* ---------- 日志 ---------- */
+
+async function loadLogHistory() {
+  try {
+    const r = await fetch("/api/logs/latest?lines=150");
+    const d = await r.json();
+    if (d.path) $("logFile").textContent = "日志文件：" + d.path.split(/[\\/]/).pop();
+    (d.lines || []).forEach((ln) => {
+      if (ln.trim()) {
+        // 回放也按严重级高亮，方便快速定位历史错误
+        const cls = /\[ERROR\]/.test(ln) ? "error"
+          : /\[WARNING\]|失败|异常/.test(ln) ? "warn" : "muted";
+        addLog(ln, cls);
+      }
+    });
+  } catch (e) { /* ignore */ }
+}
 
 function addLog(text, cls) {
   const box = $("logBox");
@@ -1275,7 +1295,13 @@ function connectSSE() {
       loadProfileSources();  // 采集完成后来源下拉即时更新
     }
   });
-  es.onopen = () => addLog("已连接实时日志通道", "result");
+  es.onopen = () => {
+    addLog("已连接实时日志通道", "result");
+    if (!window.__logHistoryLoaded) {
+      window.__logHistoryLoaded = true;
+      loadLogHistory();  // 页面刷新后回放最近日志（SSE 不补历史）
+    }
+  };
 }
 
 async function refreshStatus() {
@@ -1353,6 +1379,7 @@ $("modalMask").addEventListener("click", (e) => {
   loadAuthors();
   loadProfileSources();
   loadStories();
+  loadLogHistory();  // 页面加载即回放最近日志（运行后实时流继续追加）
   try {
     const r = await fetch("/api/status");
     const st = await r.json();

@@ -277,6 +277,7 @@ class WorkflowBase:
         )
         from config.story import (
             DEFAULT_BATCH_PUBLISH_COUNT,
+            KB_ENABLE,
         )
         from config import random_delay
         from llm_api import generate_story_parallel, score_stories

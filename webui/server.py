@@ -404,7 +404,10 @@ app = FastAPI(title="AutoQuill Web 控制台")
 def index():
     if not INDEX_HTML.exists():
         raise HTTPException(404, "index.html 未找到")
-    return FileResponse(str(INDEX_HTML))
+    # 本地控制台：禁用静态缓存，避免浏览器加载旧版 HTML
+    # （曾出现改了前端但 304 缓存旧版，日志历史不生效）
+    return FileResponse(str(INDEX_HTML),
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/config")
@@ -708,6 +711,37 @@ def api_stop():
 @app.get("/api/status")
 def api_status():
     return runner.status()
+
+
+def _current_log_file():
+    """定位当前进程的业务日志文件（main.py basicConfig 的 FileHandler）。"""
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.FileHandler):
+            p = Path(h.baseFilename)
+            if p.name.startswith("autoquill_"):
+                return p
+    return None
+
+
+@app.get("/api/logs/latest")
+def api_logs_latest(lines: int = 100):
+    """当前进程日志文件路径 + 尾部最近 N 行（前端刷新后回放用）。
+
+    SSE 只推实时日志；刷新页面后历史不可见，用户曾误以为
+    "运行日志里没有记录"。此端点补上历史回放入口。
+    """
+    log_file = _current_log_file()
+    if log_file is None or not log_file.exists():
+        return {"path": None, "lines": []}
+    n = max(1, min(int(lines), 500))
+    try:
+        with open(log_file, "r", encoding="utf-8",
+                  errors="replace") as fh:
+            tail = fh.readlines()[-n:]
+        return {"path": str(log_file), "lines": [l.rstrip("\r\n")
+                                                 for l in tail]}
+    except OSError:
+        return {"path": str(log_file), "lines": []}
 
 
 @app.get("/api/events")

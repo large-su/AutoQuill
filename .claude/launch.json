@@ -3,9 +3,7 @@
   "configurations": [
     {
       "name": "autoquill-web",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["main.py", "--web"],
-      "port": 8787
+      "url": "http://localhost:8787"
     }
   ]
 }
