@@ -501,8 +501,21 @@ class ZhihuBrowser:
             if self._safe_evaluate(
                     f"() => !!document.querySelector({selector})"):
                 return True
-            # 下滑一小段触发懒加载渲染
-            self._safe_evaluate("() => { window.scrollBy(0, 600); return true; }")
+            # 下滑触发懒加载：分段小步滚动 + 间隔（模拟人手滚轮）。
+            # 一次性 scrollBy(0,600) 是瞬间大跳，知乎懒加载有时不
+            # 触发（快速滚动被跳过/防抖）；连续小段滚动产生多次
+            # scroll 事件，渲染更可靠。6×100px，每段间隔 60ms，
+            # 总耗时 ~360ms 的连续下滑过程。
+            self._safe_evaluate(
+                "async () => {"
+                "  const steps = 6, stepPx = 100, delayMs = 60;"
+                "  for (let i = 0; i < steps; i++) {"
+                "    window.scrollBy(0, stepPx);"
+                "    await new Promise(r => setTimeout(r, delayMs));"
+                "  }"
+                "  return true;"
+                "}"
+            )
             # 渲染窗口：轮询等容器出现，最多 ~2s（间隔 500ms×4）
             rendered = False
             for _ in range(4):

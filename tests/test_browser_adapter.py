@@ -265,7 +265,10 @@ class TestSemanticInterfaces(unittest.TestCase):
         # 回答、首答 scope 漂移。渲染窗口不得短于渲染耗时：曾固定 1s
         # 即回位，知乎懒加载未完成、检测永远落空（线上事故）
         src = self._src("_wait_answer_container")
-        self.assertIn("scrollBy(0, 600)", src)   # 下滑触发渲染
+        # 下滑触发渲染：分段小步滚动 + 间隔（模拟人手滚轮），
+        # 快速瞬间滚动知乎懒加载可能不触发
+        self.assertIn("scrollBy(0, stepPx)", src)
+        self.assertIn("setTimeout", src)
         self.assertIn("wait_for_timeout(500)", src)
         self.assertIn("scrollTo(0, 0)", src)     # 滑回原位
         self.assertIn("wait_for_timeout(400)", src)
