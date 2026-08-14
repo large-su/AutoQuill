@@ -14,6 +14,17 @@ import logging
 
 log = logging.getLogger(__name__)
 
+# 命名约束节：模型训练先验里网文高频男主名（沈砚/林屿/顾言…）权重极高，
+# 生成故事时经常整套复用，读者一眼判定 AI 生成。作为公共约束追加到
+# 所有模式的 prompt 末尾（位置靠后、醒目，模型更容易遵守）。
+NAMING_CONSTRAINT = """
+
+## 主人公命名要求
+
+避免使用网文高频男主名（如沈砚、林屿、顾言、沈辞等）。
+名字要生活化、符合人物时代与身份背景或故事隐喻：
+如现代都市可用朴素常见的名字，古风可参考历史真实人名风格。"""
+
 
 def _resolve_meta_content(meta_knowledge, recipe):
     """
@@ -234,5 +245,8 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         except Exception as e:
             log.warning(f"  [作者风格注入] 渲染失败，跳过：{e}")
     mode_str = mode_str + author_tag
+
+    # === 命名约束（公共：所有模式生效，追加在 prompt 末尾） ===
+    user_message += NAMING_CONSTRAINT
 
     return user_message, mode_str
