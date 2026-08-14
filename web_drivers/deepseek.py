@@ -48,7 +48,12 @@ _STOP_SELECTORS = (
 )
 
 # 回复容器候选：最后一条助手消息
+# ★ 首个必须是正文容器（ds-assistant-message-main-content）：
+#   深度思考开启时页面有思考容器（ds-think-content）排在正文前，
+#   querySelector 只取第一个匹配——若正文不是首位会被思考过程顶掉，
+#   造成「文本稳定」误判完成 + 读回思考文本（2026-08-15 实测根因）
 _RESULT_SELECTORS = (
+    "div[class*='ds-assistant-message-main-content']",
     "div[class*='message'] div[class*='markdown']",
     "div[class*='ds-markdown']",
     "div[class*='assistant'] div[class*='markdown']",
@@ -73,23 +78,133 @@ class DeepSeekDriver(WebLLMDriver):
         return self
 
     def setup(self):
-        """可选：模式开关（专家模式/深度思考/智能搜索）。
+        """按目标状态设置模式 tab 与开关（先读后点，不破坏手动状态）。
 
-        用 DOM 点击配置里的开关名（缺省不点，保持网页上次状态）。
+        目标来自 config：mode（快速/专家）、deep_think、smart_search。
+        状态读取：模式 tab 看 radiogroup 里 aria-checked；开关看
+        ds-toggle-button 的 --selected 类。与目标不一致才点击。
         """
-        switches = []
-        mode = self.config.get("mode")
-        if mode == "expert":
-            switches.append("专家模式")
-        if self.config.get("deep_think"):
-            switches.append("深度思考")
-        if self.config.get("smart_search"):
-            switches.append("智能搜索")
-        for label in switches:
-            if not self._click_button_by_text(label):
-                log.info("web_drivers: 未找到开关「%s」（可能已开启/改版），继续",
-                         label)
+        from config import WEB_DRIVERS, WEB_DRIVER_NAME
+        cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
+        target_mode = cfg.get("mode", "fast")
+        target_think = bool(cfg.get("deep_think"))
+        target_search = bool(cfg.get("smart_search"))
+
+        # 1. 大模式 tab（快速/专家/识图）
+        current = self._radio_group_selected()
+        if current and current != target_mode:
+            if not self._click_text(f"{target_mode}模式"):
+                log.warning("web_drivers: 未找到模式 tab「%s模式」，继续",
+                            target_mode)
+            else:
+                log.info("web_drivers: 已切换到%s模式（原：%s）",
+                         target_mode, current)
+                self._page_instance().wait_for_timeout(1000)
+
+        # 2. 深度思考开关
+        self._set_toggle("深度思考", target_think)
+        # 3. 智能搜索开关（仅快速模式存在；专家模式下自动忽略）
+        if cfg.get("mode") == "fast":
+            self._set_toggle("智能搜索", target_search)
         return self
+
+    # ---------------- 模式/开关 DOM 工具 ----------------
+
+    def _radio_group_selected(self):
+        """当前选中的大模式（radiogroup 里 aria-checked=true 的文本）。"""
+        js = (
+            "() => {"
+            "  const group = document.querySelector('[role=radiogroup]');"
+            "  if (!group) return null;"
+            "  const sel = group.querySelector('[aria-checked=true]');"
+            "  return sel ? sel.innerText.trim() : null;"
+            "}"
+        )
+        try:
+            return self._safe_evaluate(js) or None
+        except Exception:
+            return None
+
+    def _click_text(self, label):
+        """点击页面中指定文本对应的最像控件的祖先元素。"""
+        js = (
+            "async function() {"
+            "  const all = Array.from(document.querySelectorAll("
+            "      'div,button,span,li,label,a,[role=tab],[role=button]'));"
+            "  const leaf = all.find(el =>"
+            "      (el.textContent || '').includes(arguments[0]) &&"
+            "      !Array.from(el.children).some(c =>"
+            "          (c.textContent || '').includes(arguments[0])) &&"
+            "      el.offsetParent !== null);"
+            "  if (!leaf) return false;"
+            "  let target = leaf;"
+            "  let p = leaf.parentElement;"
+            "  while (p) {"
+            "    const t = p.tagName.toLowerCase();"
+            "    if (t === 'button' || p.getAttribute('role') === 'tab'"
+            "        || p.getAttribute('role') === 'radio'"
+            "        || p.getAttribute('role') === 'switch'"
+            "        || /toggle/.test(String(p.className))) {"
+            "      target = p; break;"
+            "    }"
+            "    p = p.parentElement;"
+            "  }"
+            "  target.click();"
+            "  return true;"
+            "}"
+        )
+        try:
+            return bool(self._safe_evaluate(js, label))
+        except Exception:
+            return False
+
+    def _toggle_state(self, label):
+        """读取开关状态：True=开 / False=关 / None=未找到。"""
+        js = (
+            "async function() {"
+            "  const all = Array.from(document.querySelectorAll("
+            "      'div,button,span,li,label,a'));"
+            "  const leaf = all.find(el =>"
+            "      (el.textContent || '').includes(arguments[0]) &&"
+            "      !Array.from(el.children).some(c =>"
+            "          (c.textContent || '').includes(arguments[0])) &&"
+            "      el.offsetParent !== null);"
+            "  if (!leaf) return null;"
+            "  let p = leaf;"
+            "  while (p) {"
+            "    const cls = p.className ? String(p.className) : '';"
+            "    if (cls.includes('ds-toggle-button')"
+            "        && !cls.includes('__icon')) {"
+            "      return cls.includes('--selected');"
+            "    }"
+            "    p = p.parentElement;"
+            "  }"
+            "  return null;"
+            "}"
+        )
+        try:
+            r = self._safe_evaluate(js, label)
+            return bool(r) if r is not None else None
+        except Exception:
+            return None
+
+    def _set_toggle(self, label, target):
+        """把开关设置到目标状态；未找到或已达标则不动。"""
+        current = self._toggle_state(label)
+        if current is None:
+            log.info("web_drivers: 未找到开关「%s」（可能已开启/改版），继续",
+                     label)
+            return
+        if current == target:
+            log.info("web_drivers: 开关「%s」已%s，不动",
+                     label, "开启" if target else "关闭")
+            return
+        if self._click_text(label):
+            log.info("web_drivers: 开关「%s」已%s", label,
+                     "开启" if target else "关闭")
+            self._page_instance().wait_for_timeout(600)
+        else:
+            log.warning("web_drivers: 开关「%s」点击失败", label)
 
     def input(self, prompt):
         """向输入框写入 prompt（textarea fill 纯文本，不需要剪贴板）。"""

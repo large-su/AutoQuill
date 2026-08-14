@@ -433,7 +433,35 @@ def api_config():
         cfg["LLM_MODEL"] = LLM_MODEL_ID
     except Exception as exc:
         cfg["_root_error"] = str(exc)
+    try:
+        from config import WEB_DRIVERS, WEB_DRIVER_NAME
+        dcfg = WEB_DRIVERS[WEB_DRIVER_NAME]
+        cfg["WEB_PRESET"] = {
+            "preset": dcfg.get("preset", "fast"),
+            "mode": dcfg.get("mode"),
+            "deep_think": bool(dcfg.get("deep_think")),
+            "smart_search": bool(dcfg.get("smart_search")),
+            "allowed": ["fast", "expert"],
+        }
+    except Exception as exc:
+        cfg["_web_error"] = str(exc)
     return cfg
+
+
+class _WebPresetSpec(BaseModel):
+    preset: str  # fast（快速+深思+搜索）/ expert（专家+深思）
+
+
+@app.post("/api/web-preset")
+def api_set_web_preset(spec: _WebPresetSpec):
+    """切换 DeepSeek 网页版模式预设（立即生效，持久化到 webui_model.json）。"""
+    from config import set_web_mode_preset
+    try:
+        eff = set_web_mode_preset(spec.preset)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    log.info("Web 控制台切换网页模式预设 → %s", eff["preset"])
+    return {"ok": True, "effective": eff}
 
 
 @app.get("/api/models")

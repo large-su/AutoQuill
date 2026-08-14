@@ -426,6 +426,14 @@
           </span>
           <button class="btn primary btn-model" id="modeApply">应用</button>
         </div>
+        <div class="set-row" id="webPresetRow" hidden>
+          <span class="mp-k">网页模式预设（深度思考）</span>
+          <select id="webPresetSel">
+            <option value="fast">快速 + 深度思考 + 智能搜索</option>
+            <option value="expert">专家 + 深度思考</option>
+          </select>
+          <button class="btn primary btn-model" id="webPresetApply">应用</button>
+        </div>
         <div class="set-row">
           <span class="mp-k">浏览器模式</span>
           <span class="seg">
@@ -928,6 +936,49 @@ async function applyBrowserMode() {
   }
 }
 
+/* ---------- 网页模式预设 ---------- */
+
+let webPreset = null;
+
+async function loadWebPreset() {
+  try {
+    const r = await fetch("/api/config");
+    const cfg = await r.json();
+    if (!cfg.WEB_PRESET) return;
+    const wp = cfg.WEB_PRESET;
+    $("webPresetRow").hidden = false;
+    webPreset = wp.preset;
+    $("webPresetSel").value = wp.preset;
+  } catch (e) { /* 旧服务无此配置 */ }
+}
+
+async function applyWebPreset() {
+  const val = $("webPresetSel").value;
+  if (val === webPreset) return;
+  const btn = $("webPresetApply");
+  btn.disabled = true;
+  btn.textContent = "切换中…";
+  try {
+    const r = await fetch("/api/web-preset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preset: val }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
+    const data = await r.json();
+    webPreset = data.effective.preset;
+    loadConfig();
+    addLog(`网页模式预设已切换 → ${webPreset === "expert" ? "专家 + 深度思考" : "快速 + 深度思考 + 智能搜索"}`, "result");
+  } catch (e) {
+    alert("切换失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "应用";
+  }
+}
+
+$("webPresetApply").addEventListener("click", applyWebPreset);
+
 $("modelApply").addEventListener("click", async () => {
   $("modelApply").disabled = true;
   modelNote.textContent = "切换中…";
@@ -1376,6 +1427,7 @@ $("modalMask").addEventListener("click", (e) => {
   $("modeApply").addEventListener("click", applyMode);
   loadBrowserMode();
   $("browserApply").addEventListener("click", applyBrowserMode);
+  loadWebPreset();
   loadAuthors();
   loadProfileSources();
   loadStories();

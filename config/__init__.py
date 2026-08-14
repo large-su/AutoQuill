@@ -123,10 +123,13 @@ WEB_DRIVERS = {
     # 旧 OCR 参数（copy_icon 等）已随重写移除，并行参数为 DOM 版
     "DeepSeek": {
         "url": "https://chat.deepseek.com/",
-        # 模式开关（DOM 点击；缺省不点，保持网页上次状态）
-        "mode": "expert",          # "fast" = 快速模式 / "expert" = 专家模式
-        "deep_think": False,       # 深度思考（R1）
-        "smart_search": False,     # 智能搜索
+        # 模式预设（set_web_mode_preset 运行时改写；setup() 按目标先读后点）
+        #   fast   → mode=fast  深度思考开 智能搜索开（默认，用户习惯）
+        #   expert → mode=expert 深度思考开 智能搜索关
+        "preset": "fast",
+        "mode": "fast",            # "fast" = 快速模式 / "expert" = 专家模式
+        "deep_think": True,        # 深度思考（R1）
+        "smart_search": True,      # 智能搜索（仅快速模式存在）
         # 生成完成检测
         "poll_interval": 4,        # 轮询间隔（秒）
         "stable_count": 2,         # 文本长度连续 N 轮不变 → 完成
@@ -319,6 +322,31 @@ def set_runtime_mode(mode, persist=True):
     return {"mode": LLM_MODE}
 
 
+def set_web_mode_preset(preset, persist=True):
+    """切换 DeepSeek 网页版模式预设，把预设翻译成 WEB_DRIVERS 目标字段。
+
+    预设 → 目标字段（setup() 按目标先读后点，不破坏页面手动状态）：
+      "fast"   → mode="fast", deep_think=True, smart_search=True
+      "expert" → mode="expert", deep_think=True, smart_search=False
+    smart_search 只在快速模式存在，专家模式下自动忽略。
+    """
+    global WEB_DRIVERS
+    presets = {
+        "fast": {"mode": "fast", "deep_think": True, "smart_search": True},
+        "expert": {"mode": "expert", "deep_think": True,
+                   "smart_search": False},
+    }
+    if preset not in presets:
+        raise ValueError(f"未知网页模式预设：{preset}，可选：fast / expert")
+    cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
+    cfg.update(presets[preset])
+    cfg["preset"] = preset
+    if persist:
+        _save_webui_state(web_preset=preset)
+    return {"preset": preset, "config": {k: cfg[k] for k in
+            ("mode", "deep_think", "smart_search")}}
+
+
 def set_runtime_browser_headless(headless, persist=True):
     """运行时切换浏览器无头模式（调试 False=弹前台 / 工作 True=后台）。
 
@@ -364,6 +392,9 @@ def _apply_webui_model_override():
             set_runtime_browser_headless(headless, persist=False)
         if "author_profile" in data:
             set_runtime_author_profile(data["author_profile"], persist=False)
+        web_preset = data.get("web_preset")
+        if web_preset in ("fast", "expert"):
+            set_web_mode_preset(web_preset, persist=False)
     except Exception:
         pass  # 配置损坏/服务商被移除 → 保持默认
 

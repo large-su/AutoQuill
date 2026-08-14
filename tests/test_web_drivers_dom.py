@@ -124,6 +124,49 @@ class TestWebDriversDomSemantics(unittest.TestCase):
         self.assertIn("--probe", src)
         self.assertIn("__main__", src)
 
+    def test_deepseek_result_selector_prefers_main_content(self):
+        # 回归：深度思考开启时页面有思考容器排在正文前，querySelector
+        # 只取第一个匹配——首个候选必须是正文容器
+        # （ds-assistant-message-main-content），否则误读思考过程
+        # 造成「文本稳定」误判完成（2026-08-15 线上故障根因）
+        import web_drivers.deepseek as d
+        first = d._RESULT_SELECTORS[0]
+        self.assertIn("ds-assistant-message-main-content", first)
+        # 兜底候选保留旧版（无思考容器的 UI）
+        self.assertEqual(len(d._RESULT_SELECTORS), 4)
+
+    def test_deepseek_setup_target_state_driven(self):
+        # setup() 必须「先读后点」：按目标状态（mode/deep_think/
+        # smart_search）与当前不一致才点击，不得盲目点击破坏手动状态
+        src = self._src("web_drivers/deepseek.py")
+        self.assertIn("def setup(self)", src)
+        self.assertIn("_toggle_state", src)    # 读开关当前状态
+        self.assertIn("_set_toggle", src)      # 目标状态驱动
+        self.assertIn("_radio_group_selected", src)  # 读大模式
+        self.assertIn("--selected", src)       # 开关状态类名
+        self.assertIn("smart_search", src)
+
+    def test_config_web_preset_translation(self):
+        # 预设 → 目标字段翻译：fast = 快速+深思+搜索；expert = 专家+深思
+        from config import set_web_mode_preset, WEB_DRIVERS, WEB_DRIVER_NAME
+        old = dict(WEB_DRIVERS[WEB_DRIVER_NAME])
+        try:
+            set_web_mode_preset("fast", persist=False)
+            cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
+            self.assertEqual(cfg["mode"], "fast")
+            self.assertTrue(cfg["deep_think"])
+            self.assertTrue(cfg["smart_search"])
+            set_web_mode_preset("expert", persist=False)
+            cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
+            self.assertEqual(cfg["mode"], "expert")
+            self.assertTrue(cfg["deep_think"])
+            self.assertFalse(cfg["smart_search"])
+            with self.assertRaises(ValueError):
+                set_web_mode_preset("bogus", persist=False)
+        finally:
+            WEB_DRIVERS[WEB_DRIVER_NAME].clear()
+            WEB_DRIVERS[WEB_DRIVER_NAME].update(old)
+
 
 class TestLegacyIsolation(unittest.TestCase):
     """旧 OCR 驱动必须隔离在 legacy 包内，不影响主链路。"""
