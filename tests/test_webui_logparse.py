@@ -22,9 +22,22 @@ class TestParseLine(unittest.TestCase):
         self.assertEqual(p["num"], 3)
 
     def test_progress(self):
+        ev, p = log_capture.parse_line("故事生成中… 已生成 1234 字")
+        self.assertEqual(ev, "progress")
+        self.assertEqual(p["chars"], 1234)
+
+    def test_progress_legacy_format(self):
+        # 旧文案「生成中… 累计输出」仍被识别（兼容老版本日志/缓存）
         ev, p = log_capture.parse_line("生成中… 累计输出 1234 字符")
         self.assertEqual(ev, "progress")
         self.assertEqual(p["chars"], 1234)
+
+    def test_think_progress(self):
+        # 深度思考阶段：think 标记 + 思考字符数
+        ev, p = log_capture.parse_line("模型思考中… 已思考 5678 字符")
+        self.assertEqual(ev, "progress")
+        self.assertTrue(p.get("think"))
+        self.assertEqual(p["chars"], 5678)
 
     def test_task_progress_with_pct(self):
         ev, p = log_capture.parse_line("任务进度：已读取 5 篇样本 | 15%")
@@ -86,7 +99,7 @@ class TestCaptureDrain(unittest.TestCase):
         root.addHandler(handler)
         try:
             logging.getLogger("test.logparse").info("步骤 1：开始")
-            logging.getLogger("test.logparse").warning("生成中… 累计输出 500 字符")
+            logging.getLogger("test.logparse").warning("故事生成中… 已生成 500 字")
             lines = log_capture.drain(q)
             self.assertEqual(len(lines), 2)
             ev, _ = log_capture.parse_line(lines[0])

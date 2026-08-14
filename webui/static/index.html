@@ -1326,11 +1326,17 @@ function connectSSE() {
       return;
     }
     $("progressWrap").classList.add("show");
+    if (p.think) {
+      // 思考阶段：无字数目标，用不确定动画 + 思考字符数
+      $("progressFill").classList.add("indeterminate");
+      $("progressText").textContent = `模型思考中… 已思考 ${p.chars} 字符`;
+      return;
+    }
     genChars = p.chars;
     const pct = Math.min(100, Math.round((genChars / 8000) * 100));
     $("progressFill").classList.remove("indeterminate");
     $("progressFill").style.width = pct + "%";
-    $("progressText").textContent = `模型输出中… 已生成 ${genChars} 字（估算目标 8000）`;
+    $("progressText").textContent = `故事生成中… 已生成 ${genChars} 字（估算目标 8000）`;
     // 顺手从日志行里抓格式分
     const m = (p.text || "").match(/格式检测[：:]\s*(\d+)\s*\/\s*10/);
     if (m) formatScore = parseInt(m[1], 10);

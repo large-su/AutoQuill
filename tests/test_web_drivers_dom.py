@@ -99,12 +99,18 @@ class TestWebDriversDomSemantics(unittest.TestCase):
         import web_drivers.deepseek as d
         import webui.log_capture as lc
         dsrc = self._src("web_drivers/deepseek.py")
-        self.assertIn("累计输出", dsrc)
-        self.assertIn("生成中", dsrc)
-        # log_capture 的进度正则能匹配该文案
+        self.assertIn("故事生成中", dsrc)   # 生成阶段心跳
+        self.assertIn("模型思考中", dsrc)   # 思考阶段心跳
+        self.assertIn("_think_len", dsrc)  # 思考容器长度
+        # 思考阶段正文选择器未命中时不得把思考文本计入正文长度
+        # （ds-markdown 兜底会误匹配思考容器，2026-08-15 实测）
+        self.assertIn('"ds-assistant-message-main-content" not in sel', dsrc)
+        # log_capture 的进度正则能匹配两阶段文案
         import re
         self.assertTrue(
-            re.search(lc._PROGRESS_RE, "生成中… 累计输出 1234 字符"))
+            re.search(lc._PROGRESS_RE, "故事生成中… 已生成 1234 字"))
+        self.assertTrue(
+            re.search(lc._THINK_PROGRESS_RE, "模型思考中… 已思考 1234 字符"))
 
     def test_deepseek_cancel_checkpoints_in_wait(self):
         # 生成中轮询必须带取消检查点（Web 控制台停止按钮）
@@ -145,6 +151,13 @@ class TestWebDriversDomSemantics(unittest.TestCase):
         self.assertIn("_radio_group_selected", src)  # 读大模式
         self.assertIn("--selected", src)       # 开关状态类名
         self.assertIn("smart_search", src)
+        # 回归：radiogroup 返回完整文本（含「模式」），配置是英文键
+        # （fast/expert），必须经 _MODE_TEXT 映射后才能比对/查找，
+        # 否则会去点「expert模式」这类不存在的文本（2026-08-15 故障）
+        import web_drivers.deepseek as d
+        self.assertEqual(d._MODE_TEXT["fast"], "快速模式")
+        self.assertEqual(d._MODE_TEXT["expert"], "专家模式")
+        self.assertNotIn("expert模式", src)
 
     def test_config_web_preset_translation(self):
         # 预设 → 目标字段翻译：fast = 快速+深思+搜索；expert = 专家+深思

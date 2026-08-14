@@ -26,7 +26,11 @@ _FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 # 里程碑/进度/结果解析（按出现顺序匹配，返回 (event_type, payload)）
 # 日志行带 "2026-08-11 12:00:00 [INFO] " 前缀，故不用 ^ 锚点
 _STAGE_RE = re.compile(r"步骤\s*(\d+)\s*[:：]")
-_PROGRESS_RE = re.compile(r"生成中…\s*累计输出\s*(\d+)\s*字符")
+# 生成阶段心跳（正文增长）；旧文案「生成中… 累计输出 N 字符」保留兼容
+_PROGRESS_RE = re.compile(r"故事生成中…\s*已生成\s*(\d+)\s*字")
+_LEGACY_PROGRESS_RE = re.compile(r"生成中…\s*累计输出\s*(\d+)\s*字符")
+# 思考阶段心跳（深度思考：正文为 0 时思考容器文本增长）
+_THINK_PROGRESS_RE = re.compile(r"模型思考中…\s*已思考\s*(\d+)\s*字符")
 # 任务阶段进度（文风提炼等无字符输出的任务）：文本 + 可选百分比；
 # pct 缺失表示不确定进度（LLM 剖析中）
 _TASK_PROGRESS_RE = re.compile(r"任务进度[：:]\s*(.+?)(?:\s*\|\s*(\d+)\s*%)?$")
@@ -98,6 +102,15 @@ def parse_line(line):
         return ("stage", {"num": int(m.group(1)), "text": text})
 
     m = _PROGRESS_RE.search(text)
+    if m:
+        return ("progress", {"chars": int(m.group(1)), "text": text})
+
+    m = _THINK_PROGRESS_RE.search(text)
+    if m:
+        return ("progress", {"think": True, "chars": int(m.group(1)),
+                             "text": text})
+
+    m = _LEGACY_PROGRESS_RE.search(text)
     if m:
         return ("progress", {"chars": int(m.group(1)), "text": text})
 

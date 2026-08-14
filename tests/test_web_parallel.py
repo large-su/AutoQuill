@@ -48,7 +48,7 @@ class TestParallelSourceOnly(unittest.TestCase):
         import webui.log_capture as lc
         import re
         self.assertTrue(
-            re.search(lc._PROGRESS_RE, "[Slot 1] 生成中… 累计输出 1234 字符"))
+            re.search(lc._PROGRESS_RE, "[Slot 1] 故事生成中… 已生成 1234 字"))
 
 
 # ============================================================

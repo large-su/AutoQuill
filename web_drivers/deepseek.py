@@ -59,6 +59,16 @@ _RESULT_SELECTORS = (
     "div[class*='assistant'] div[class*='markdown']",
 )
 
+# 深度思考容器（实测 2026-08-15：思考中文本持续增长；结束后容器保留，
+# 长度不再变化——阶段判定用「长度是否在增长」，不能用容器是否存在）
+_THINK_SELECTORS = (
+    "div[class*='ds-think-content']",
+    "div[class*='ds-think']",
+)
+
+# 配置键 → 页面模式 tab 的真实文本（实测：radio 的 innerText 含「模式」）
+_MODE_TEXT = {"fast": "快速模式", "expert": "专家模式", "image": "识图模式"}
+
 
 class DeepSeekDriver(WebLLMDriver):
     """DeepSeek 网页版（chat.deepseek.com）DOM 驱动。"""
@@ -91,15 +101,23 @@ class DeepSeekDriver(WebLLMDriver):
         target_search = bool(cfg.get("smart_search"))
 
         # 1. 大模式 tab（快速/专家/识图）
+        # 注意：radiogroup 返回的是完整文本（如「快速模式」），而配置是
+        # 英文键（fast/expert），必须经 _MODE_TEXT 映射后再比对/查找。
+        target_text = _MODE_TEXT.get(target_mode, f"{target_mode}模式")
         current = self._radio_group_selected()
-        if current and current != target_mode:
-            if not self._click_text(f"{target_mode}模式"):
-                log.warning("web_drivers: 未找到模式 tab「%s模式」，继续",
-                            target_mode)
+        if current == target_text:
+            log.info("web_drivers: 当前已是%s，不动", target_text)
+        elif current:
+            if not self._click_text(target_text):
+                log.warning("web_drivers: 未找到模式 tab「%s」，继续",
+                            target_text)
             else:
-                log.info("web_drivers: 已切换到%s模式（原：%s）",
-                         target_mode, current)
+                log.info("web_drivers: 已切换到%s（原：%s）",
+                         target_text, current)
                 self._page_instance().wait_for_timeout(1000)
+        else:
+            log.warning("web_drivers: 未检测到模式 tab（radiogroup 缺失），"
+                        "跳过模式切换，继续")
 
         # 2. 深度思考开关
         self._set_toggle("深度思考", target_think)
@@ -258,12 +276,15 @@ class DeepSeekDriver(WebLLMDriver):
 
         deadline = time.time() + max_wait
         last_len = 0
+        last_think = 0
         stable = 0
         stop_seen = False  # 停止按钮曾出现（生成中）→ 消失才算完成
+        body_started = False  # 正文已出现 → 之后只打生成心跳（两阶段）
         start = time.time()
         while time.time() < deadline:
             _check_cancel()
             cur_len = self._current_reply_len()
+            think_len = self._think_len()
             # 停止按钮只在生成中出现：探测到过且现在消失 → 完成。
             # 从未探测到（selector 改版等）→ 只用文本稳定判定，绝不误判完成。
             if self._stop_button_present():
@@ -272,11 +293,20 @@ class DeepSeekDriver(WebLLMDriver):
                 log.info("web_drivers: 停止按钮已消失，生成完成（%.1fs，%d 字符）",
                          time.time() - start, cur_len)
                 return True
+            # 双阶段心跳：正文增长→生成中；正文未出现且思考增长→思考中。
+            # 正文一旦出现（body_started）思考尾巴继续增长也不再打思考心跳，
+            # 保持「先思考后生成」的两阶段观感；无深度思考时 think_len 恒 0。
             if cur_len != last_len:
                 stable = 0
                 last_len = cur_len
                 if cur_len:
-                    log.info("生成中… 累计输出 %d 字符", cur_len)
+                    body_started = True
+                    log.info("故事生成中… 已生成 %d 字", cur_len)
+            elif not body_started and think_len != last_think:
+                stable = 0
+                last_think = think_len
+                if think_len:
+                    log.info("模型思考中… 已思考 %d 字符", think_len)
             else:
                 stable += 1
             if stable >= stable_count and cur_len:
@@ -304,9 +334,26 @@ class DeepSeekDriver(WebLLMDriver):
         return bool(self._probe_selectors(_STOP_SELECTORS, attr="tagName")[0])
 
     def _current_reply_len(self):
-        """当前最后一条回复的文本长度（进度心跳用）。"""
+        """当前正文长度（进度心跳用）。
+
+        思考阶段正文容器（ds-assistant-message-main-content）尚未出现，
+        ds-markdown 兜底选择器会误匹配到思考容器——主内容容器未命中
+        且存在思考容器时视为思考中，正文长度返回 0。
+        """
         sel, text = self._probe_selectors(_RESULT_SELECTORS, attr="innerText")
+        if sel and "ds-assistant-message-main-content" not in sel \
+                and self._think_exists():
+            return 0
         return len(text or "")
+
+    def _think_len(self):
+        """当前思考容器文本长度（思考阶段心跳用，0 表示无思考/已结束）。"""
+        sel, text = self._probe_selectors(_THINK_SELECTORS, attr="innerText")
+        return len(text or "")
+
+    def _think_exists(self):
+        """思考容器是否存在（深度思考开启时思考中/结束后均存在）。"""
+        return bool(self._probe_selectors(_THINK_SELECTORS, attr="tagName")[0])
 
     def _click_button_by_text(self, label):
         """按可见文本点击开关（模式开关用）。

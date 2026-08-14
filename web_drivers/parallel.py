@@ -48,7 +48,9 @@ class SlotState:
 
         # 轮询状态（每次派发后重置，外部管理，不依赖 driver 实例变量）
         self.last_len = 0
+        self.last_think = 0
         self.stable = 0
+        self.body_started = False  # 正文已出现 → 之后只打生成心跳
         self.stop_seen = False    # 停止按钮曾出现（生成中）→ 消失才算完成
         self.start_time = 0.0
 
@@ -182,8 +184,10 @@ class ParallelWebRunner:
             return False
         slot.status = SlotState.GENERATING
         slot.last_len = 0
+        slot.last_think = 0
         slot.stable = 0
         slot.stop_seen = False
+        slot.body_started = False
         slot.start_time = time.time()
         log.info("[Slot %d] → 派发任务 %d（%s）", slot.slot_id,
                  slot.task_idx, slot.task_title or "")
@@ -202,6 +206,9 @@ class ParallelWebRunner:
         cfg = drv.config
         _check_cancel()
         cur_len = drv._current_reply_len()
+        # 思考阶段心跳（与 deepseek.py:wait_complete 同构；无 _think_len
+        # 的驱动/假驱动兜底为 0，行为退化为纯正文心跳）
+        think_len = drv._think_len() if hasattr(drv, "_think_len") else 0
         if drv._stop_button_present():
             slot.stop_seen = True
         elif slot.stop_seen:
@@ -212,8 +219,15 @@ class ParallelWebRunner:
             slot.stable = 0
             slot.last_len = cur_len
             if cur_len:
-                log.info("[Slot %d] 生成中… 累计输出 %d 字符",
+                slot.body_started = True
+                log.info("[Slot %d] 故事生成中… 已生成 %d 字",
                          slot.slot_id, cur_len)
+        elif not slot.body_started and think_len != slot.last_think:
+            slot.stable = 0
+            slot.last_think = think_len
+            if think_len:
+                log.info("[Slot %d] 模型思考中… 已思考 %d 字符",
+                         slot.slot_id, think_len)
         else:
             slot.stable += 1
         if slot.stable >= cfg.get("stable_count", 2) and cur_len:
