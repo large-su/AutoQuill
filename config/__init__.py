@@ -6,7 +6,6 @@
 #   config/*.json                   运行时数据（服务商注册表、模型定价等）
 #   applications/zhihu_story/config.py  知乎应用层参数（re-export 兼容层）
 #   applications/zhihu_story/prompts.py 知乎故事提示词
-#   applications/image_gen/config.py    图像生成参数
 # ============================================================
 
 import random
@@ -143,82 +142,14 @@ WEB_DRIVERS = {
         "consecutive_fail_threshold": 2,     # 连续失败 N 次后重置该 slot 的会话
         "scan_interval": 2,                  # 主循环每轮扫描间隔（秒）
     },
-    "Aizex": {
-        "url": "https://leopard-x.memofun.net/",
-        "chat_placeholder": "有问题，尽管问",
-        "copy_icon": "images/aizex_copy_icon.png",
-        "completion_icon": "images/aizex_completion_icon.png",
-        # 模型选择（通过校准坐标打开菜单，OCR 定位模型名称）
-        "model": "GPT-5.5 Thinking Extended",
-        "model_menu": {
-            "_top_level": [
-                "Auto", "GPT-5.5 Thinking", "GPT-5.5 Thinking Extended",
-            ],
-            "Grok 系列": ["Grok 4.2 Expert", "Grok 4.2 Auto", "Grok 4.2 Fast"],
-            "Claude 系列": ["Claude Sonnet 4.6 Thinking", "Claude Opus 4.7 Thinking", "Claude Opus 4.6 Thinking"],
-            "Gemini 系列": [
-                "Gemini 3 Flash Thinking", "Gemini 3 Flash",
-                "Gemini 3.1 Pro", "Gemini 3.1 Pro [API]",
-            ],
-            "香蕉模型 [Nano Banana]": ["Nano Banana Pro", "Nano Banana 2"],
-            "DeepSeek 系列": [],
-        },
-        # 等待时间
-        "wait_load": 4.0,
-        "wait_after_paste": 0.5,
-        "wait_after_send": 1.5,
-        "wait_before_url_cache": 8,   # Aizex 响应慢
-        "wait_copy_click": 0.6,
-        "wait_scroll_end": 0.8,
-        # 生成完成检测（页面不自动滚动，需主动 PageDown）
-        "wait_first_reply": 6,        # 模型初始思考静默期
-        "poll_interval": 5,
-        "pagedown_per_cycle": 5,      # 每次OCR前按几次PageDown
-        "stable_count": 3,            # 连续3次PageDown后不变→完成
-        "max_wait": 360,
-        # 并行模式参数（1 = 走旧的串行逻辑；>1 启用并行）
-        # Aizex 没有已知并发限制，可按网络/机器性能调整
-        "parallel_tabs": 3,                   # 并行 tab 数（1-8）
-        "consecutive_fail_threshold": 2,      # 连续失败 N 次后重置该 slot 的会话
-        "scan_interval": 2,                   # 主循环每轮扫描间隔（秒）
-    },
 }
-
-# ============================================================
-# 全局键鼠参数
-# ============================================================
-
-PYAUTOGUI_PAUSE = 0.1
-MOUSE_MOVE_DURATION = (0.1, 0.25)
 
 # ============================================================
 # 各环节等待时间（秒）—— 通用操作
 # ============================================================
 
-# --- 通用操作 ---
-WAIT_HOTKEY = (0.05, 0.15)
-WAIT_PASTE = (0.1, 0.2)
-WAIT_PAGE_LOAD = (1.5, 2.2)
-WAIT_TAB_OPEN = (1.0, 1.5)
-
-# --- 步骤 1：选题 ---
-WAIT_RECOMMEND_PAGE = 2.0
-WAIT_QUESTION_ENTER = 0.7
-
-# --- 步骤 2：OCR 提取 ---
-WAIT_BEFORE_OCR = 0.3
-WAIT_EXPAND_CLICK = 0.5
-WAIT_PAGE_DOWN = 0.18
-WAIT_SCROLL_NEXT_ANSWER = 0.2
-
 # --- 轮次间 ---
 WAIT_BETWEEN_CYCLES = (1.5, 3)
-
-# ============================================================
-# OCR 参数
-# ============================================================
-
-OCR_MAX_SCROLLS = 10
 
 # ============================================================
 # 辅助函数
@@ -231,9 +162,6 @@ def random_delay(delay_range):
     delay = random.uniform(delay_range[0], delay_range[1])
     time.sleep(delay)
     return delay
-
-def random_mouse_duration():
-    return random.uniform(MOUSE_MOVE_DURATION[0], MOUSE_MOVE_DURATION[1])
 
 # ============================================================
 # 运行时模型切换（Web 控制台用）

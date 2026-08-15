@@ -5,8 +5,8 @@
 # create_driver() → 新实例（并行调度每 slot 一个，各自独立页面）
 # 新增 LLM 网站时在 _DRIVER_REGISTRY 注册即可。
 #
-# 注：旧 OCR/坐标驱动（Aizex 等）已迁至 web_drivers/legacy/，
-# 仅 --image-gen 的旧 Aizex 驱动使用，不再注册到此工厂。
+# 注：旧 OCR/坐标驱动（Aizex 等）已于 V4.0.4 整体归档（见 archive/），
+# 主链路仅剩 DOM 驱动。
 # ============================================================
 
 _driver_instance = None

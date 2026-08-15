@@ -181,22 +181,21 @@ class TestWebDriversDomSemantics(unittest.TestCase):
             WEB_DRIVERS[WEB_DRIVER_NAME].update(old)
 
 
-class TestLegacyIsolation(unittest.TestCase):
-    """旧 OCR 驱动必须隔离在 legacy 包内，不影响主链路。"""
+class TestLegacyFullyRemoved(unittest.TestCase):
+    """旧 OCR/Aizex/image-gen 已归档，不得残留在主链路或打包。"""
 
-    def test_legacy_exists_but_separate(self):
+    def test_legacy_dir_gone(self):
         import os
-        self.assertTrue(os.path.exists("web_drivers/legacy/aizex.py"))
-        # 新 base 不得 import legacy（旧驱动不污染主链路）
-        with open("web_drivers/base.py", encoding="utf-8") as f:
-            src = f.read()
-        self.assertNotIn("legacy", src)
+        self.assertFalse(os.path.exists("web_drivers/legacy/aizex.py"))
+        self.assertFalse(os.path.exists("web_drivers/legacy/__init__.py"))
+        self.assertFalse(os.path.exists("workflows/image_gen.py"))
+        self.assertFalse(os.path.exists("ocr_utils.py"))
 
-    def test_image_gen_still_uses_legacy_aizex(self):
-        # --image-gen 功能依赖旧 Aizex 驱动（保留引用）
-        with open("workflows/image_gen.py", encoding="utf-8") as f:
+    def test_main_chain_no_image_gen_entry(self):
+        # --image-gen CLI 入口已随功能一并移除
+        with open("main.py", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("web_drivers.legacy.aizex", src)
+        self.assertNotIn("--image-gen", src)
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 # applications/zhihu_story/extractors.py — 回答提取接缝
 #
 # 统一回答提取接口：任何提取器都返回 (title, answer, footer)
-# 三元组。UIA（无障碍树）与 OCR（视觉滚屏）两条通道各自
-# 适配为 AnswerExtractor，组合器负责主通道失败时的回退决策。
+# 三元组。DOM 通道（Playwright）为唯一提取器，供作者页批量
+# 采集复用。UIA/OCR 通道已于 V4.0.4 归档（见 archive/）。
 #
 # 架构位置：Layer 3 (Adapters) — 感知通道
 # ============================================================
@@ -24,50 +24,14 @@ class AnswerExtractor:
         raise NotImplementedError
 
 
-class UiaAnswerExtractor(AnswerExtractor):
-    """UIA 无障碍树通道：读取已渲染的首答（快、准、无滚屏）。
-
-    失败（异常 / 超时 / 正文过短）统一降级为 ('', '', None)，
-    具体原因写入日志，供组合器决定是否回退。
-    """
-
-    name = "UIA"
-
-    def __init__(self, min_length=500, wait_timeout=4.0, poll_interval=0.25):
-        self.min_length = min_length
-        self.wait_timeout = wait_timeout
-        self.poll_interval = poll_interval
-
-    def extract(self):
-        try:
-            from applications.zhihu_story.a11y_probe import (
-                extract_live_primary_answer,
-            )
-            title, answer, footer, reason = extract_live_primary_answer(
-                min_length=self.min_length,
-                wait_timeout=self.wait_timeout,
-                poll_interval=self.poll_interval,
-            )
-            if title and answer:
-                log.info(
-                    "  UIA 首答采集成功：%s 字符，赞同=%s",
-                    len(answer), footer.get("likes") if footer else None,
-                )
-                return title, answer, footer
-            log.info("  UIA 首答未采用：%s", reason)
-        except Exception as exc:
-            log.warning("  UIA 首答采集异常：%s", exc)
-        return "", "", None
-
-
 class PlaywrightAnswerExtractor(AnswerExtractor):
     """Playwright MCP 通道：读取当前标签页的首答全文。
 
-    通过 MCP 的 browser_evaluate 工具在当前激活的知乎回答页执行
-    JS，提取 (title, answer, footer)。与 UIA 通道同构，供作者页
+    在工具脚本注入的 evaluate 函数（浏览器上下文）中执行 JS，
+    提取 (title, answer, footer)。DOM 通道为唯一提取器，供作者页
     批量采集复用同一套编排逻辑。
 
-    footer 字段与 UIA 通道对齐：
+    footer 字段：
     {likes, comments, collects, hearts, publish_time, answer_url}
     """
 
@@ -89,7 +53,8 @@ class PlaywrightAnswerExtractor(AnswerExtractor):
             log.warning("  Playwright 通道未绑定 evaluate（跳过）")
             return "", "", None
         try:
-            result = self._evaluate(_EXTRACT_JS)
+            # 经类访问避免实例查找把普通函数绑定成方法（self 被预置为实参）
+            result = type(self)._evaluate(_EXTRACT_JS)
             title = (result.get("title") or "").strip()
             answer = (result.get("answer") or "").strip()
             if not (title and answer):
@@ -167,62 +132,3 @@ _EXTRACT_JS = r"""
 }
 """
 
-
-class OcrAnswerExtractor(AnswerExtractor):
-    """OCR 视觉通道：滚屏截图 + 文字识别提取首答。
-
-    保底通道，任何情况下都可用（代价是慢、依赖窗口焦点）。
-    """
-
-    name = "OCR"
-
-    def __init__(self, left_x, right_x, top_y, bottom_y,
-                 min_length=500, max_retries=3):
-        self.left_x = left_x
-        self.right_x = right_x
-        self.top_y = top_y
-        self.bottom_y = bottom_y
-        self.min_length = min_length
-        self.max_retries = max_retries
-
-    def extract(self):
-        from applications.zhihu_story.perception import extract_zhihu_question_and_answer
-        return extract_zhihu_question_and_answer(
-            self.left_x, self.right_x, self.top_y, self.bottom_y,
-            min_length=self.min_length,
-            max_retries=self.max_retries,
-        )
-
-
-class FallbackAnswerExtractor(AnswerExtractor):
-    """主通道优先、失败回退的组合提取器。
-
-    - primary 为 None 时直接走 fallback（纯 OCR 模式）
-    - require_likes=True 时，主通道结果缺赞同数也视为失败
-      （素材质量门槛：无互动数据的故事不值得生成）
-    """
-
-    name = "UIA→OCR"
-
-    def __init__(self, primary, fallback, require_likes=False):
-        self.primary = primary
-        self.fallback = fallback
-        self.require_likes = require_likes
-
-    def extract(self):
-        if self.primary is not None:
-            try:
-                title, answer, footer = self.primary.extract()
-            except Exception as exc:
-                log.warning("  %s 通道异常，转 %s 保底：%s",
-                            self.primary.name, self.fallback.name, exc)
-                return self.fallback.extract()
-            if title and answer:
-                likes_missing = (
-                    self.require_likes
-                    and (not footer or footer.get("likes") is None)
-                )
-                if not likes_missing:
-                    return title, answer, footer
-                log.info("  UIA 未读取到赞同数，转 OCR 保底")
-        return self.fallback.extract()

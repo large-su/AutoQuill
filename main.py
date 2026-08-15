@@ -4,39 +4,33 @@
 # 用法：
 #   python main.py                 批量模式（默认）：收集素材 → 生成 → 发布
 #   python main.py --single        传统模式：逐轮生成即发布
-#   python main.py --calibrate     校准坐标
-#   python main.py --test-ocr      测试 OCR（旧坐标时代调试，见 tools/debug_legacy.py）
-#   python main.py --debug-ocr-region  进入回答页并保存 OCR 区域标注图（同上）
-#   python main.py --probe-a11y [--url URL]  只读导出当前 Edge 的无障碍树（同上）
 #   python main.py --test-api      测试 API 连接
-#   python main.py --image-gen     图像生成模式（Aizex 绘图）
 #
 # 架构分层：
 #   applications/zhihu_story/ → 应用层（采集 browser_adapter/extractors、
-#                               文风蒸馏 author_profiler、感知 perception）
+#                               文风蒸馏 author_profiler）
 #   workflows/                → 工作流编排（知乎批量）
 #   core/                     → 核心领域（story_workspace 素材暂存、
 #                               story_text 正文渲染）
-#   tools/                    → 开发期工具（debug_legacy 等，不在运行时路径上）
-#   web_drivers/              → LLM 网站驱动（DeepSeek、Aizex 等）
+#   tools/                    → 开发期工具（不在运行时路径上）
+#   web_drivers/              → LLM 网站驱动（DeepSeek DOM 驱动）
 #
 # 基础模块：
 #   main.py              → 入口（DPI、日志、CLI 分发）
-#   desktop_utils.py     → 桌面操作（浏览器、窗口、坐标、进度面板）
-#   ocr_utils.py         → 视觉感知（OCR 识别、文字定位、图标匹配）
+#   desktop_utils.py     → 窗口焦点、截图、终端进度面板
 #   llm_api.py           → LLM API 调用（流式/非流式 + 作者风格双层注入）
 #   llm_token_tracker.py → API 模式 Token 用量追踪
 #   config/              → 配置包（__init__ 框架配置 + story 业务参数 + JSON 运行时数据）
 #
 # 知识系统：
 #   kb_manager.py    → 知识库管理（配方积累、参考文章）
-#   archive/         → 归档模块（meta_learner 元学习，P5 移入）
+#   archive/         → 归档模块（OCR/UIA 旧通道、meta_learner、image_gen 等）
 #   rich_progress.py  → Rich 终端进度面板
 # ============================================================
 
 import ctypes
 
-# DPI 感知（Windows 高分屏适配，必须在 pyautogui 之前设置）
+# DPI 感知（Windows 高分屏适配）
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -45,7 +39,6 @@ except Exception:
     except Exception:
         pass
 
-import pyautogui
 import sys
 import os
 import time
@@ -64,7 +57,6 @@ ensure_provider_file()
 migrate_legacy_data()
 
 from config import (
-    PYAUTOGUI_PAUSE,
     LLM_MODE,
     LLM_API_KEY,
     WEB_DRIVER_NAME,
@@ -83,9 +75,6 @@ from config.story import (
 # ============================================================
 # 基础设置
 # ============================================================
-
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = PYAUTOGUI_PAUSE
 
 os.makedirs(_data_path("logs"), exist_ok=True)
 
@@ -228,48 +217,6 @@ def ask_batch_params():
 # 测试 OCR
 # ============================================================
 
-# ============================================================
-# 图像生成模式
-# ============================================================
-
-def _run_image_gen():
-    """--image-gen 入口：开浏览器 → Aizex 绘图 → 下载"""
-    import os as _os
-
-    print("  🎨 图像生成模式")
-
-    from applications.image_gen.config import IMAGE_OUTPUT_DIR, SAMPLE_IMAGE_PROMPT
-    from workflows.image_gen import ImageGenWorkflow
-    workflow = ImageGenWorkflow()
-
-    count = _ask_int("要生成几张图片？", 1)
-    prompt_text = SAMPLE_IMAGE_PROMPT  # 测试阶段直接用示例提示词
-    print(f"  使用示例提示词（{len(prompt_text)} 字符）")
-
-    # ================================================================
-    # 开浏览器 → Aizex 绘图 → 下载
-    # ================================================================
-    from desktop_utils import ensure_edge
-    if not ensure_edge():
-        print("  ❌ 无法启动 Edge 浏览器，请手动打开后重试。")
-        return
-
-    save_dir = _data_path(IMAGE_OUTPUT_DIR)
-
-    for j in range(count):
-        print(f"\n  ── 生成图片 {j+1}/{count} ──")
-        try:
-            filepath = workflow._generate_and_download(prompt_text, save_dir)
-            print(f"  ✓ 已保存：{filepath}")
-        except Exception as e:
-            log.error(f"  图像生成失败：{e}")
-            from desktop_utils import take_screenshot
-            take_screenshot("image_gen_error")
-            print(f"  ✗ 失败：{e}")
-
-    print(f"\n  ✅ 图像生成完成（{count} 张）")
-
-
 def _run_resume(argv):
     """--resume <story_id>：从已有工作区恢复生成。"""
     from core.story_workspace import StoryWorkspace
@@ -385,7 +332,6 @@ def main():
     ║  无参数      批量模式（默认）                ║
     ║  --single    传统模式（逐轮生成即发布）      ║
     ║  --test-api  测试 API 连接                   ║
-    ║  --image-gen 图像生成模式                    ║
     ║  --headless  浏览器无头运行（工作模式）       ║
     ║  --web       本地 Web 控制台（127.0.0.1）    ║
     ║                                              ║
@@ -394,8 +340,6 @@ def main():
     ╚══════════════════════════════════════════════╝
     """)
 
-    screen_w, screen_h = pyautogui.size()
-    print(f"  屏幕：{screen_w}x{screen_h}")
     print(f"  选题：{QUESTION_SELECT_MODE} | LLM：{LLM_MODE} | "
           f"故事筛选：{filter_str}")
 
@@ -420,9 +364,6 @@ def main():
     if '--test-api' in sys.argv:
         from llm_api import test_api_connection
         test_api_connection()
-        return
-    if '--image-gen' in sys.argv:
-        _run_image_gen()
         return
     if '--resume' in sys.argv:
         _run_resume(sys.argv)
@@ -458,9 +399,6 @@ def main():
     print(f"  素材模式："
           f"{mat_mode_names.get(STORY_MATERIAL_MODE, STORY_MATERIAL_MODE)}")
 
-    print("  加载 OCR...")
-    from ocr_utils import _get_engine
-    _get_engine()
     print("  ✓ 就绪\n")
 
     # 创建工作流实例

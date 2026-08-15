@@ -938,24 +938,6 @@ class ZhihuBrowser:
         self._safe_evaluate(f"() => window.scrollBy(0, {int(pixels)})")
         self.page.wait_for_timeout(1200)
 
-    def page_screenshot_text(self):
-        """对当前页面截图并 OCR 为文本（DOM 提取失败时的兜底）。"""
-        try:
-            import io
-            import numpy as np
-            from PIL import Image
-            from ocr_utils import _get_engine, _merge_to_lines
-            buf = io.BytesIO(self.page.screenshot())
-            result, _ = _get_engine()(np.array(Image.open(buf)))
-            if not result:
-                return ""
-            result.sort(key=lambda item: (
-                sum(p[1] for p in item[0]) / 4,
-                sum(p[0] for p in item[0]) / 4))
-            return "\n".join(_merge_to_lines(result))
-        except Exception:
-            return ""
-
     # ----------------------------------------------------------
     # 底层工具（供发布环节等扩展使用）
     # ----------------------------------------------------------
