@@ -1,4 +1,4 @@
-# AutoQuill v4.2.0
+# AutoQuill v4.2.1
 
 > 一键安装的**知乎故事创作助手**：自动选题 → 模仿指定作者的文风生成故事 → 发布到知乎草稿。
 > 全程自动化，无需命令行，无需安装 Python。
@@ -59,7 +59,7 @@ AutoQuill 是运行在你电脑本地的自动化写作工具。它像人一样�
 
 ## 安装
 
-1. 从发布页下载 `AutoQuill-Setup-4.2.0.exe`
+1. 从发布页下载 `AutoQuill-Setup-4.2.1.exe`
 2. 双击运行安装包
    - 若出现 Windows SmartScreen 提示，点「更多信息」→「仍要运行」即可（软件未做代码签名，属正常提示）
 3. 选择语言与安装位置（默认装在当前用户目录，无需管理员权限）
@@ -216,6 +216,7 @@ A：控制台日志框实时显示；完整日志在 `%APPDATA%\AutoQuill\logs\`
 
 | 版本 | 主要变更 |
 |---|---|
+| **v4.2.1** | 选题+提取并行化：全自动选题一次打开前 5 个候选问题并行提取（页面加载在浏览器进程并行），取点赞最高的合格者进入生成，失败原因不再串行重试；批量素材采集同样并行化（每次同时打开 N 个问题页提取）；正式版启动不再弹黑色控制台窗口（windowed 模式，启动器输出重定向到 `logs/launcher.log`，失败弹消息框提示） |
 | **v4.2.0** | 浏览器基础设施下沉：新建 `web_drivers/browser_pool.py` 统一承载共享浏览器单例（工厂由应用层注册）、用户取消钩子、有界页面交互 safe_evaluate（原 base/browser_adapter 两处实现合并）；DeepSeek 登录判定与登录引导（web_llm_logged_in / login_deepseek_web_flow）从 browser_adapter 搬至 web_drivers/deepseek；web_drivers/workflows 不再反向引用 applications，CLI 入口补组合根注册工厂 |
 | **v4.1.9** | 安全加固：Web 控制台加 Host/Origin 白名单（拦 DNS rebinding 与跨站盲打）、采集模式 URL 域名白名单（仅 zhihu.com）、API Key 检查统一为公共函数并 4 处复用；全库体检修正收尾（死代码清理、长文流水线归档、重复收敛） |
 | **v4.1.8** | 修复引导弹窗无法配置 API Key（新装电脑报「选不了 API 模式、输不进去 key」）：真实浏览器实测确认——API 卡片控件（select/输入框/保存按钮）只在卡片带 .sel 时显示，而 .sel 仅当「已配置 API」才赋予，全新安装（未配 key）时控件永远隐藏、点击卡片也不切换，形成死锁；且 2.5s 状态轮询会重置卡片选中。修复：点击卡片即切换选中（用户点选优先，轮询不再覆盖）+ 卡片改 div（消除 label 把点击转发给隐藏下拉框的劫持）；默认推荐逻辑不变（未配置时默认 Web） |

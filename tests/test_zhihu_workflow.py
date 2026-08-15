@@ -113,9 +113,10 @@ class TestMaterialLikesGate(unittest.TestCase):
         self.assertIn("_material_likes_pass", src)
         self.assertIn("MATERIAL_MIN_LIKES", src)
         self.assertIn("重新选题", src)
-        # DOM 成功路径在 return 之前判定；降级路径有明确提示
-        self.assertLess(src.index("_material_likes_pass"),
-                        src.index("return title, answer, footer, final_url"))
+        # 串行路径：DOM 成功 return 之前判定（并行分支的门槛判定在
+        # _extract_auto_parallel 内，由 TestParallelExtract 覆盖）
+        last_return = src.rfind("return title, answer, footer, final_url")
+        self.assertLess(src.index("_material_likes_pass"), last_return)
 
     def test_batch_collection_applies_gate(self):
         # batch 路径（collect_materials_batch）必须走同一 helper
@@ -135,6 +136,96 @@ class TestMaterialLikesGate(unittest.TestCase):
         # 计数在 DOM 重试循环内累加，重试耗尽后随错误信息抛出
         self.assertLess(src.index("gate_reject_count += 1"),
                         src.index("raise RuntimeError"))
+
+
+class TestParallelExtract(unittest.TestCase):
+    """V4.2.1 并行选题+提取：一批候选并行打开提取，取最优合格者。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from workflows.zhihu import ZhihuWorkflow
+        cls.wf = ZhihuWorkflow()
+
+    def test_config_constant_exists(self):
+        from config.story import PARALLEL_EXTRACT_LIMIT
+        self.assertGreaterEqual(PARALLEL_EXTRACT_LIMIT, 2)
+        # __all__ 导出（config 包 re-export 依赖）
+        from config.story import __all__
+        self.assertIn("PARALLEL_EXTRACT_LIMIT", __all__)
+
+    def test_select_batch_opens_no_pages(self):
+        # 批量选题只扫描评分，不打开任何问题页（打开留给并行提取）
+        src = inspect.getsource(self.wf._select_batch)
+        self.assertIn("candidates[:count]", src)
+        self.assertIn('q["href"] not in avoid', src)
+        self.assertIn("MAX_SELECT_SCREENS", src)
+        self.assertIn("RuntimeError", src)
+        self.assertNotIn("open_question", src)
+        self.assertNotIn("open_new_page", src)
+        self.assertNotIn("_pick_best(", src)  # 不调用 _pick_best（注释提及不算）
+
+    def test_select_batch_filters_and_ranks(self):
+        # 与 _select_auto 同源：规则筛选 + 评分排序 + 飙升优先
+        src = inspect.getsource(self.wf._select_batch)
+        self.assertIn("_apply_story_filter", src)
+        self.assertIn("_dom_score", src)
+        self.assertIn("is_hot", src)
+        self.assertIn("scroll_feed", src)  # 候选不足滚动扩池
+
+    def test_extract_batch_parallel_uses_shared_context(self):
+        # 并行提取：共享 context 多 page + 先全部 goto 再逐个提取
+        src = inspect.getsource(self.wf._extract_batch_parallel)
+        self.assertIn("browser.context.new_page", src)
+        self.assertIn('wait_until="domcontentloaded"', src)
+        self.assertIn("browser.switch_page(p)", src)
+        self.assertIn("browser.check_answerable()", src)
+        self.assertIn("browser.get_primary_answer", src)
+        self.assertIn("p.close()", src)
+        # 结束后切回主 page，不改变调用方状态
+        self.assertIn("browser.switch_page(main_page)", src)
+
+    def test_extract_batch_parallel_isolates_failures(self):
+        # 单页失败只记录原因，不阻塞其他候选
+        src = inspect.getsource(self.wf._extract_batch_parallel)
+        self.assertIn("can_answer", src)
+        self.assertIn("results.append", src)
+        self.assertIn("打开失败", src)
+
+    def test_extract_auto_parallel_picks_best_likes(self):
+        src = inspect.getsource(self.wf._extract_auto_parallel)
+        self.assertIn("_select_batch", src)
+        self.assertIn("PARALLEL_EXTRACT_LIMIT", src)
+        self.assertIn("attempted.update", src)
+        self.assertIn("_material_likes_pass", src)
+        self.assertIn("MIN_ANSWER_LENGTH", src)
+        # 合格候选取点赞最高者
+        self.assertIn("reverse=True", src)
+        self.assertIn('key=lambda r: (r.get("footer") or {}).get("likes")',
+                      src)
+        # 整批全败返回 None（调用方整批重选）
+        self.assertIn("return None, gate_reject_count", src)
+        self.assertIn("normalize_question_url", src)
+
+    def test_extract_content_parallel_branch_keeps_serial_path(self):
+        # auto 模式走并行批；manual/custom/fast_mode 保留原串行路径
+        src = inspect.getsource(self.wf.extract_content)
+        self.assertIn("parallel_enabled", src)
+        self.assertIn('QUESTION_SELECT_MODE == "auto"', src)
+        self.assertIn("_extract_auto_parallel(browser, attempted)", src)
+        self.assertIn("MAX_TOPIC_RETRY", src)
+        self.assertIn("self.select_topic(avoid=attempted)", src)
+        self.assertIn("browser.check_answerable()", src)
+        self.assertIn("browser.get_primary_answer", src)
+
+    def test_batch_collection_uses_parallel_extract(self):
+        # 批量采集：标记全部候选后并行提取，判定与串行版一致
+        src = inspect.getsource(self.wf.collect_materials_batch)
+        self.assertIn("self._extract_batch_parallel(browser, to_enter)", src)
+        self.assertIn('visited_titles.add(q["title"])', src)
+        self.assertIn("total_attempts += len(to_enter)", src)
+        self.assertIn("materials.append", src)
+        self.assertIn("MIN_ANSWER_LENGTH", src)
+        self.assertIn("点赞门槛未过", src)
 
 
 class TestZhihuWorkflowSemantics(unittest.TestCase):
@@ -376,9 +467,13 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
         self.assertNotIn("page.reload", src)
 
     def test_collect_uses_tabs_not_middle_click(self):
+        # 批量采集并行化后：新开 tab 的职责在 _extract_batch_parallel
+        # （共享 context 多 page），collect 只调度并行提取 + JS 滚动
+        par = self._src("_extract_batch_parallel")
+        self.assertIn("context.new_page", par)  # 新开 tab（共享 context）
+        self.assertIn("switch_page", par)
         src = self._src("collect_materials_batch")
-        self.assertIn("open_new_page", src)    # 新开 tab
-        self.assertIn("switch_page", src)
+        self.assertIn("_extract_batch_parallel", src)
         self.assertIn("scroll_feed", src)      # JS 滚动
         self.assertNotIn("pagedown", src.lower())
         self.assertNotIn("hotkey", src.lower())

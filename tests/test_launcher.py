@@ -4,6 +4,7 @@
 
 import ctypes
 import os
+import sys
 import unittest
 from ctypes import wintypes
 from unittest import mock
@@ -217,6 +218,75 @@ class TestLogDiag(unittest.TestCase):
         with mock.patch("tools.launcher.data_root",
                         side_effect=Exception("boom")):
             _log_diag("不会抛出")  # 无异常即通过
+
+
+class TestNoConsoleWindow(unittest.TestCase):
+    """V4.2.1 正式版无黑框：windowed 打包 + 冻结态 stdout 重定向。"""
+
+    def test_spec_is_windowed(self):
+        with open("build/AutoQuill.spec", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("console=False", src)
+        self.assertNotIn("console=True", src)
+
+    def test_launcher_redirects_frozen_stdio(self):
+        with open("tools/launcher.py", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _redirect_frozen_stdio", src)
+        # windowed 模式下 stdout 可能为 None：重定向到 launcher.log
+        self.assertIn("launcher.log", src)
+        self.assertIn("sys.stdout = stream", src)
+        self.assertIn("sys.stderr = stream", src)
+
+    def test_redirect_called_first_in_main(self):
+        # 必须先于任何 print/输出处理——windowed 下 stdout 可能为 None
+        import inspect
+        from tools.launcher import main
+        src = inspect.getsource(main)
+        self.assertLess(src.index("_redirect_frozen_stdio()"),
+                        src.index("reconfigure"))
+
+    def test_redirect_noop_in_source_mode(self):
+        # 源码态不重定向（保留调试终端），且不抛异常
+        from tools.launcher import _redirect_frozen_stdio
+        with mock.patch("tools.launcher.data_root") as dr:
+            _redirect_frozen_stdio()
+            dr.assert_not_called()
+
+    def test_redirect_frozen_writes_file(self):
+        # 冻结态（模拟 sys.frozen）：stdout 指向 logs/launcher.log
+        import tempfile
+        from pathlib import Path
+        from tools.launcher import _redirect_frozen_stdio
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("tools.launcher.data_root",
+                            return_value=Path(tmp)), \
+                 mock.patch("sys.frozen", True, create=True):
+                old_out, old_err = sys.stdout, sys.stderr
+                try:
+                    _redirect_frozen_stdio()
+                    self.assertIsNot(sys.stdout, old_out)
+                    self.assertIsNot(sys.stderr, old_err)
+                    print("frozen-stdio-test")
+                    sys.stdout.flush()
+                    log_path = Path(tmp) / "logs" / "launcher.log"
+                    self.assertTrue(log_path.exists())
+                    self.assertIn("frozen-stdio-test",
+                                  log_path.read_text(encoding="utf-8"))
+                finally:
+                    sys.stdout.close()
+                    sys.stderr.close()
+                    sys.stdout, sys.stderr = old_out, old_err
+
+    def test_service_failure_shows_messagebox_when_frozen(self):
+        # 打包态服务启动失败：走 Windows 消息框而不是 print+input
+        import inspect
+        from tools.launcher import main
+        src = inspect.getsource(main)
+        self.assertIn("_message_box", src)
+        self.assertIn("服务启动失败", src)
+        # 源码态仍保留控制台提示路径
+        self.assertIn("_pause()", src)
 
 
 class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):

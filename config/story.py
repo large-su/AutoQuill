@@ -27,7 +27,7 @@ __all__ = [
     "ZHIHU_RECOMMEND_URL", "ZHIHU_INVITED_URL",
     # 自动选题与提取
     "MIN_ANSWER_LENGTH", "MAX_ANSWER_RETRIES", "MAX_TOPIC_RETRY",
-    "ENABLE_DOM_ANSWER_EXTRACTION",
+    "ENABLE_DOM_ANSWER_EXTRACTION", "PARALLEL_EXTRACT_LIMIT",
     "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES", "MATERIAL_UNKNOWN_LIKES_POLICY",
     "AUTHOR_PROFILE",
     # 批量模式
@@ -87,6 +87,11 @@ STORY_INCLUDE_KEYWORDS = [
 # 推荐页首屏常只有 5-10 张卡片且多数是非故事话题，滚动可加载更多；
 # 仍无命中则选题报错（不静默选非故事话题）。
 MAX_SELECT_SCREENS = 3
+
+# 全自动选题的并行提取候选数：一批同时打开 N 个问题页并行提取，
+# 取点赞最高的合格者进入生成（失败原因不阻塞其他候选，整批全败才重选）。
+# 页面加载在浏览器进程并行，单个问题页的等待不再串行累加。
+PARALLEL_EXTRACT_LIMIT = 5
 
 # 格式不合规时是否自动重试（False = 直接跳过，不浪费 token）
 ENABLE_FORMAT_RETRY = False

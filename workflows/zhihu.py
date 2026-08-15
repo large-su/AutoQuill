@@ -239,6 +239,67 @@ class ZhihuWorkflow(WorkflowBase):
         browser.open_question(best["href"])
         return best["href"]
 
+    def _select_batch(self, browser, avoid=None, count=5):
+        """批量选题：扫描候选池 → 规则筛选 → 评分排序 → 取前 count 个。
+
+        与 _select_auto 同源（DOM 扫描 + 规则筛选 + 评分），但不打开
+        任何页面——供并行提取一次取多个候选。候选不足时滚动扩池重扫
+        （MAX_SELECT_SCREENS 屏上限）；仍无命中明确报错——绝不静默
+        选非故事话题。avoid：已尝试问题 href 集合，选优与扩池排除。
+        """
+        from config.story import ENABLE_STORY_FILTER, MAX_SELECT_SCREENS
+        avoid = avoid or set()
+
+        all_qs, hot_qs, normal_qs = self._scan_recommend(
+            browser, self._source_url())
+        if not all_qs:
+            raise RuntimeError(
+                "候选页 DOM 解析为空（登录态/网络/页面结构，可重试）")
+
+        def _rank(qs):
+            kept = self._apply_story_filter(qs) if ENABLE_STORY_FILTER else qs
+            kept.sort(key=lambda q: q["score"], reverse=True)
+            return kept
+
+        # 飙升组在前（与 _pick_best 的「飙升优先」语义一致）
+        candidates = [q for q in _rank(hot_qs) + _rank(normal_qs)
+                      if q["href"] not in avoid]
+        seen = {q["href"] for q in all_qs}
+
+        screen = 0
+        while (len(candidates) < count and ENABLE_STORY_FILTER
+               and screen < MAX_SELECT_SCREENS):
+            screen += 1
+            log.warning(f"  候选不足 {count} 个，滚动第 {screen}/"
+                        f"{MAX_SELECT_SCREENS} 屏找故事类问题")
+            browser.scroll_feed()
+            fresh = [q for q in browser.get_recommend_questions(max_cards=60)
+                     if q.get("href") not in seen
+                     and q.get("href") not in avoid]
+            if not fresh:
+                continue
+            seen.update(q["href"] for q in fresh)
+            for q in fresh:
+                q["score"] = self._dom_score(q)
+            fresh_hot = [q for q in fresh if q.get("is_hot")]
+            fresh_normal = [q for q in fresh if not q.get("is_hot")]
+            have = {q["href"] for q in candidates}
+            for q in _rank(fresh_hot) + _rank(fresh_normal):
+                if q["href"] not in have:
+                    candidates.append(q)
+
+        if not candidates:
+            tried = (f"，已尝试 {len(avoid)} 个候选均不满足要求"
+                     if avoid else "")
+            raise RuntimeError(
+                "推荐页扫描多屏均未发现故事类问题（关键词白名单无"
+                f"命中{tried}）。可重试（推荐页内容会刷新），或把 "
+                "QUESTION_SELECT_MODE 改为 manual 手动选题。")
+
+        log.info(f"  批量选题：{len(candidates)} 个候选，"
+                 f"取前 {min(count, len(candidates))} 个并行提取")
+        return candidates[:count]
+
     def _select_custom(self, browser):
         """自选问题模式：跳过选题环节，直接进入给定问题的提取。
 
@@ -360,6 +421,115 @@ class ZhihuWorkflow(WorkflowBase):
     # 步骤2：提取回答（DOM 通道，无屏幕降级）
     # ============================================================
 
+    def _extract_batch_parallel(self, browser, questions):
+        """并行打开并提取多个问题的首答（共享 context 多 page）。
+
+        所有 goto 先发出再等待——页面加载在浏览器进程并行，Playwright
+        sync API 单线程即可完成（规避线程亲和问题，与 web_drivers/
+        parallel.py 同原则）。每页独立检测与提取，失败原因单独记录、
+        不阻塞其他页。结束后把操作页切回主 page，不改变调用方状态。
+
+        返回 [{q, can_answer, reason, title, answer, footer}]。
+        """
+        from applications.zhihu_story.browser_adapter import _NAV_TIMEOUT
+        main_page = browser.page
+        pages = []
+        try:
+            for q in questions:
+                try:
+                    p = browser.context.new_page()
+                    p.goto(q["href"], wait_until="domcontentloaded",
+                           timeout=_NAV_TIMEOUT)
+                    pages.append((q, p))
+                except Exception as exc:
+                    log.warning(f"  打开失败：{q['title'][:30]}...（{exc}）")
+
+            results = []
+            for q, p in pages:
+                browser.switch_page(p)
+                try:
+                    can_answer, reason = browser.check_answerable()
+                    if not can_answer:
+                        log.info(f"  ⏭ {q['title'][:30]}...：{reason}")
+                        results.append({"q": q, "can_answer": False,
+                                        "reason": reason})
+                        continue
+                    data = browser.get_primary_answer(min_length=1)
+                    answer = (data or {}).get("answer") or ""
+                    if not answer.strip():
+                        log.warning(f"  ✗ {q['title'][:30]}...：提取失败")
+                        results.append({"q": q, "can_answer": True,
+                                        "reason": "提取失败（容器/超时）"})
+                        continue
+                    log.info(f"  ✓ {q['title'][:30]}...：{len(answer)}字")
+                    results.append({"q": q, "can_answer": True, "reason": "",
+                                    "title": (data.get("title") or "").strip(),
+                                    "answer": answer,
+                                    "footer": data.get("footer") or {}})
+                except Exception as exc:
+                    log.warning(f"  ✗ {q['title'][:30]}...：{exc}")
+                    results.append({"q": q, "can_answer": False,
+                                    "reason": f"提取异常：{exc}"})
+                finally:
+                    try:
+                        p.close()
+                    except Exception:
+                        pass
+            return results
+        finally:
+            browser.switch_page(main_page)
+
+    def _extract_auto_parallel(self, browser, attempted):
+        """全自动选题并行提取一批候选，取点赞最高的合格者。
+
+        一批 PARALLEL_EXTRACT_LIMIT 个候选并行提取；过短/不可回答/
+        低赞各自记录，不阻塞其他候选。返回 (title, answer, footer,
+        final_url, gate_reject_count)；整批全败返回 None（调用方整批
+        重选，attempted 已累计排除）。
+        """
+        from config.story import (
+            MIN_ANSWER_LENGTH, MATERIAL_MIN_LIKES, PARALLEL_EXTRACT_LIMIT)
+        from applications.zhihu_story.browser_adapter import (
+            normalize_question_url)
+
+        candidates = self._select_batch(browser, avoid=attempted,
+                                        count=PARALLEL_EXTRACT_LIMIT)
+        attempted.update(q["href"] for q in candidates)
+        results = self._extract_batch_parallel(browser, candidates)
+
+        gate_reject_count = 0
+        good = []
+        for r in results:
+            answer = r.get("answer") or ""
+            if not (r["can_answer"] and len(answer) >= MIN_ANSWER_LENGTH):
+                continue
+            footer = r.get("footer") or {}
+            pass_likes, like_reason = self._material_likes_pass(
+                footer.get("likes"), MATERIAL_MIN_LIKES)
+            if not pass_likes:
+                gate_reject_count += 1
+                log.warning(f"  ✗ {r['q']['title'][:30]}...："
+                            f"点赞门槛未过（{like_reason}）")
+                continue
+            good.append(r)
+        if not good:
+            log.warning("  本批候选均不合格（过短/不可回答/低赞），"
+                        "整批重新选题")
+            return None, gate_reject_count
+
+        good.sort(key=lambda r: (r.get("footer") or {}).get("likes") or 0,
+                  reverse=True)
+        best = good[0]
+        footer = best.get("footer") or {}
+        final_url = (normalize_question_url(best["q"]["href"])
+                     or best["q"]["href"])
+        log.info(f"提取成功（并行批 {len(good)} 个合格取最优）！"
+                 f"标题：{best['title'][:50]}... | "
+                 f"回答：{len(best['answer'])}字符 | "
+                 f"赞={footer.get('likes')}")
+        return (best["title"], best["answer"], footer, final_url,
+                gate_reject_count)
+
     def extract_content(self, fast_mode=False):
         """DOM 提取知乎问题标题和首答。
 
@@ -374,6 +544,7 @@ class ZhihuWorkflow(WorkflowBase):
             MIN_ANSWER_LENGTH,
             ENABLE_DOM_ANSWER_EXTRACTION,
             MAX_TOPIC_RETRY,
+            QUESTION_SELECT_MODE, QUESTION_SOURCE,
         )
         from applications.zhihu_story.browser_adapter import (
             normalize_question_url)
@@ -387,7 +558,25 @@ class ZhihuWorkflow(WorkflowBase):
         attempted = set()       # 已尝试问题 href（重选时避开，
                                 # 防候选池不变时反复选同一题）
 
+        # 全自动选题：一批并行提取候选，取点赞最高的合格者——串行试错
+        # 改为整批并行，失败原因不阻塞其他候选（manual/custom/fast_mode
+        # 走下方原串行路径，行为不变）
+        parallel_enabled = (not fast_mode
+                            and QUESTION_SELECT_MODE == "auto"
+                            and QUESTION_SOURCE != "custom")
+
         for attempt in range(MAX_TOPIC_RETRY + 1):
+            if parallel_enabled:
+                if attempt > 0:
+                    log.warning(f"  本批候选均不合格，重新批量选题"
+                                f"（第 {attempt}/{MAX_TOPIC_RETRY} 批）")
+                result = self._extract_auto_parallel(browser, attempted)
+                if result is not None:
+                    title, answer, footer, final_url, rejects = result
+                    gate_reject_count += rejects
+                    return title, answer, footer, final_url
+                continue
+
             if attempt > 0:
                 log.warning(f"  首答过短或不可回答，重新选题"
                             f"（第 {attempt}/{MAX_TOPIC_RETRY} 次）")
@@ -533,7 +722,6 @@ class ZhihuWorkflow(WorkflowBase):
 
         browser = self._browser()
         self._require_login(browser)
-        main_page = browser.page
 
         materials = []
         visited_titles = set()
@@ -621,7 +809,17 @@ class ZhihuWorkflow(WorkflowBase):
                     hot = " [飙升]" if q.get("is_hot") else ""
                     log.info(f"    {i+1}. {q['title'][:40]}...{hot}")
 
-                for i, q in enumerate(to_enter):
+                for q in to_enter:
+                    visited_titles.add(q["title"])
+                total_attempts += len(to_enter)
+
+                if ENABLE_DOM_ANSWER_EXTRACTION:
+                    # 并行提取本屏候选：所有页面加载在浏览器进程并行，
+                    # 逐个等待不再串行累加（失败原因不阻塞其他候选）
+                    results = self._extract_batch_parallel(browser, to_enter)
+                else:
+                    results = []
+                for r in results:
                     if len(materials) >= target:
                         break
                     if total_attempts >= MAX_TOTAL_ATTEMPTS:
@@ -629,70 +827,41 @@ class ZhihuWorkflow(WorkflowBase):
                                     f"{MAX_TOTAL_ATTEMPTS}，停止采集")
                         break
 
-                    visited_titles.add(q["title"])
-                    total_attempts += 1
-                    log.info(f"\n  进入 {i+1}/{pick}："
-                             f"{q['title'][:40]}...")
+                    q = r["q"]
+                    answer = r.get("answer") or ""
+                    title = r.get("title") or ""
+                    if not (r["can_answer"] and title
+                            and len(answer) >= MIN_ANSWER_LENGTH):
+                        log.warning(f"    ✗ DOM 提取失败或过短"
+                                    f"（{len(answer)}字）")
+                        continue
 
-                    page_tab = None
-                    try:
-                        # 新开 tab 提取（替代 中键+ctrl+Tab）
-                        page_tab = browser.open_new_page(q["href"])
-                        browser.switch_page(page_tab)
-                        page_tab.wait_for_timeout(2500)
+                    footer = r.get("footer") or {}
+                    likes = footer.get("likes")
+                    pass_likes, like_reason = self._material_likes_pass(
+                        likes, MATERIAL_MIN_LIKES)
+                    if not pass_likes:
+                        log.info(f"    ✗ 点赞门槛未过：{like_reason}"
+                                 f"，跳过素材")
+                        continue
 
-                        can_answer, reason = browser.check_answerable()
-                        if not can_answer:
-                            log.info(f"  ⏭ {reason}")
-                            continue
-
-                        title, answer, footer = None, None, None
-                        if ENABLE_DOM_ANSWER_EXTRACTION:
-                            data = browser.get_primary_answer(min_length=1)
-                            if data and data.get("answer"):
-                                title = data.get("title")
-                                answer = data.get("answer")
-                                footer = data.get("footer") or {}
-
-                        if not (title and answer
-                                and len(answer) >= MIN_ANSWER_LENGTH):
-                            log.warning(f"    ✗ DOM 提取失败或过短"
-                                        f"（{len(answer or '')}字）")
-                            continue
-
-                        likes = (footer or {}).get("likes")
-                        pass_likes, like_reason = self._material_likes_pass(
-                            likes, MATERIAL_MIN_LIKES)
-                        if not pass_likes:
-                            log.info(f"    ✗ 点赞门槛未过：{like_reason}"
-                                     f"，跳过素材")
-                            continue
-
-                        materials.append({
-                            "title": title,
-                            "answer": answer,
-                            "url": q["href"],
-                            "index": len(materials) + 1,
-                            "footer": footer or {},
-                        })
-                        footer_tag = ""
-                        if footer:
-                            footer_tag = (
-                                f"｜赞{footer.get('likes', 0)} "
-                                f"评{footer.get('comments', 0)} "
-                                f"藏{footer.get('collects', 0)} "
-                                f"喜{footer.get('hearts', 0)}"
-                            )
-                        log.info(f"    ✓ 素材 {len(materials)}/{target}"
-                                 f"（{len(answer)}字{footer_tag}）")
-
-                    except Exception as e:
-                        log.error(f"    ✗ 出错：{e}")
-
-                    finally:
-                        if page_tab is not None:
-                            browser.close_page(page_tab)
-                            browser.switch_page(main_page)
+                    materials.append({
+                        "title": title,
+                        "answer": answer,
+                        "url": q["href"],
+                        "index": len(materials) + 1,
+                        "footer": footer or {},
+                    })
+                    footer_tag = ""
+                    if footer:
+                        footer_tag = (
+                            f"｜赞{footer.get('likes', 0)} "
+                            f"评{footer.get('comments', 0)} "
+                            f"藏{footer.get('collects', 0)} "
+                            f"喜{footer.get('hearts', 0)}"
+                        )
+                    log.info(f"    ✓ 素材 {len(materials)}/{target}"
+                             f"（{len(answer)}字{footer_tag}）")
 
                 # 本屏提取完毕，翻到下一屏
                 if len(materials) < target and total_attempts < MAX_TOTAL_ATTEMPTS:

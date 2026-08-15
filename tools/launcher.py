@@ -204,14 +204,6 @@ def _read_log(path):
     return data.decode("utf-8", errors="replace")
 
 
-def _print_tail(path, lines=30):
-    text = _read_log(path).splitlines()
-    if not text:
-        print("（无日志内容）")
-        return
-    print("\n".join(text[-lines:]))
-
-
 def _pause():
     try:
         input("\n按回车退出…")
@@ -369,7 +361,44 @@ def _set_title(title):
             pass
 
 
+def _redirect_frozen_stdio():
+    """打包态（windowed 无控制台）把 stdout/stderr 重定向到
+    DATA_ROOT/logs/launcher.log：启动器输出留档可查，且避免 print
+    因 stdout 为 None（windowed 模式下 PyInstaller 置空）崩溃。
+    源码态不重定向——保留调试终端。"""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        log_root = data_root() / "logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        stream = open(log_root / "launcher.log", "a",
+                      encoding="utf-8", buffering=1)
+        sys.stdout = stream
+        sys.stderr = stream
+        if sys.stdin is None:
+            sys.stdin = open(os.devnull, "r", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _message_box(title, text):
+    """打包态无控制台时用 Windows 消息框提示（源码态回退 print）。"""
+    if getattr(sys, "frozen", False):
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            ctypes.windll.user32.MessageBoxW(
+                None, text, title, 0x10)  # MB_ICONERROR
+            return
+        except Exception:
+            pass
+    print(f"{title}\n{text}")
+
+
 def main():
+    # 必须先于任何 print：windowed 模式下 sys.stdout 可能为 None
+    _redirect_frozen_stdio()
     if sys.stdout and not sys.stdout.isatty():
         sys.stdout.reconfigure(line_buffering=True)  # 管道/重定向时也让输出即时可见
 
@@ -437,9 +466,17 @@ def main():
         time.sleep(0.5)
 
     if not ready:
-        print("服务启动失败，最近日志：")
-        _print_tail(data_root() / "logs" / "webui.log")
-        _pause()
+        tail = _read_log(data_root() / "logs" / "webui.log")
+        if getattr(sys, "frozen", False):
+            # 打包态无控制台：直接弹框，避免用户只见闪退不知原因
+            _message_box("AutoQuill 服务启动失败",
+                         "服务未在等待窗口内就绪，最近日志：\n\n"
+                         + tail[-1500:] + "\n\n完整日志："
+                         + str(data_root() / "logs" / "webui.log"))
+        else:
+            print("服务启动失败，最近日志：")
+            print(tail[-1000:] or "（无日志内容）")
+            _pause()
         return 1
 
     print(f"服务已就绪：{BASE_URL}")
