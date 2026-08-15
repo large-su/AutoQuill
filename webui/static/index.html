@@ -932,6 +932,7 @@ setInterval(pollTaskProgress, 3000);
 /* ---------- 日志 ---------- */
 
 async function loadLogHistory() {
+  if (window.__logCleared) return;  // 用户已手动清空：不回放历史，只显示清空后的新日志
   try {
     const r = await fetch("/api/logs/latest?lines=150");
     const d = await r.json();
@@ -961,6 +962,7 @@ function addLog(text, cls) {
 function clearLog() {
   const box = $("logBox");
   box.innerHTML = '<div class="placeholder">日志已清空。点击「运行」开始，日志将实时显示在这里。</div>';
+  window.__logCleared = true;  // 本次会话内不再回放历史日志，新日志从头开始
 }
 
 function copyLog() {
@@ -2193,7 +2195,7 @@ $("modalMask").addEventListener("click", (e) => {
   loadAuthors();
   loadProfileSources();
   loadStories();
-  loadLogHistory();  // 页面加载即回放最近日志（运行后实时流继续追加）
+  loadLogHistory().then(() => { window.__logHistoryLoaded = true; });  // 页面加载即回放最近日志；标记防首次运行重复回放
   fillSetupProviders();
   loadSetupStatus();  // 首启引导（未配置时弹出遮罩）
   try {
