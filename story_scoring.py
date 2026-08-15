@@ -25,22 +25,10 @@ def _resolve_kb_config():
     返回: (api_key: str, base_url: str, model: str, extra_body: dict)
     """
     from config import LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
-    try:
-        from config import KB_LLM_API_KEY as _kb_key
-    except ImportError:
-        _kb_key = LLM_API_KEY
-    try:
-        from config import KB_LLM_BASE_URL as _kb_url
-    except ImportError:
-        _kb_url = LLM_API_BASE_URL
-    try:
-        from config import KB_LLM_MODEL as _model
-    except ImportError:
-        _model = LLM_API_MODEL
-    try:
-        from config import KB_LLM_EXTRA_BODY as _extra_body
-    except ImportError:
-        _extra_body = {}
+    from config import KB_LLM_API_KEY as _kb_key
+    from config import KB_LLM_BASE_URL as _kb_url
+    from config import KB_LLM_MODEL as _model
+    from config import KB_LLM_EXTRA_BODY as _extra_body
     return (
         (_kb_key or LLM_API_KEY),
         (_kb_url or LLM_API_BASE_URL),
@@ -86,11 +74,7 @@ def score_stories(stories_data):
     # 构建评分 prompt
     from applications.zhihu_story.prompts import SCORE_PROMPT
     prompt = SCORE_PROMPT
-    try:
-        from config.story import SCORE_STORY_HEAD_CHARS, SCORE_STORY_TAIL_CHARS
-    except ImportError:
-        SCORE_STORY_HEAD_CHARS = 1000
-        SCORE_STORY_TAIL_CHARS = 500
+    from config.story import SCORE_STORY_HEAD_CHARS, SCORE_STORY_TAIL_CHARS
 
     def _build_score_preview(story):
         """评分只看开头+结尾，降低 prompt 体积。"""

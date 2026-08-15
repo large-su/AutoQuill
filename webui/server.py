@@ -696,11 +696,8 @@ _web_llm_cache_lock = threading.Lock()
 
 
 def _setup_version():
-    try:
-        from core.version import VERSION
-        return VERSION
-    except ImportError:
-        return "0.0.0"
+    from core.version import VERSION
+    return VERSION
 
 
 def _web_llm_logged_in_cached():

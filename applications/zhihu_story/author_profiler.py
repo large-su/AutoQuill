@@ -505,18 +505,9 @@ def _call_profile_llm_once(prompt, max_tokens):
 def _resolve_profile_llm_config():
     """剖析用 LLM 配置：KB 专属配置优先，回退根 config（与 kb_manager 同语义）。"""
     from config import LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
-    try:
-        from config import KB_LLM_API_KEY as _kb_key
-    except ImportError:
-        _kb_key = None
-    try:
-        from config import KB_LLM_BASE_URL as _kb_url
-    except ImportError:
-        _kb_url = None
-    try:
-        from config import KB_LLM_MODEL as _kb_model
-    except ImportError:
-        _kb_model = None
+    from config import KB_LLM_API_KEY as _kb_key
+    from config import KB_LLM_BASE_URL as _kb_url
+    from config import KB_LLM_MODEL as _kb_model
     return (_kb_key or LLM_API_KEY, _kb_url or LLM_API_BASE_URL,
             _kb_model or LLM_API_MODEL)
 

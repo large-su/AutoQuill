@@ -51,17 +51,11 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
         LLM_API_BASE_URL = base_url
     if model is not None:
         LLM_API_MODEL = model
-    try:
-        from config import (
-            LLM_API_CONNECT_TIMEOUT, LLM_API_STREAM_READ_TIMEOUT,
-            LLM_API_STREAM_FIRST_TOKEN_TIMEOUT,
-            LLM_API_STREAM_IDLE_TIMEOUT,
-        )
-    except ImportError:
-        LLM_API_CONNECT_TIMEOUT = 20
-        LLM_API_STREAM_READ_TIMEOUT = LLM_API_TIMEOUT
-        LLM_API_STREAM_FIRST_TOKEN_TIMEOUT = 45
-        LLM_API_STREAM_IDLE_TIMEOUT = 60
+    from config import (
+        LLM_API_CONNECT_TIMEOUT, LLM_API_STREAM_READ_TIMEOUT,
+        LLM_API_STREAM_FIRST_TOKEN_TIMEOUT,
+        LLM_API_STREAM_IDLE_TIMEOUT,
+    )
 
     if not LLM_API_KEY:
         return "", 0.0, "API Key 未配置"

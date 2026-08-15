@@ -95,22 +95,10 @@ def _call_llm(prompt, max_tokens=2000, temperature=0.3, timeout=120):
     from config import LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
 
     # ★ KB 专属配置优先，缺失时回退到故事生成配置
-    try:
-        from config import KB_LLM_API_KEY as _kb_key
-    except ImportError:
-        _kb_key = LLM_API_KEY
-    try:
-        from config import KB_LLM_BASE_URL as _kb_url
-    except ImportError:
-        _kb_url = LLM_API_BASE_URL
-    try:
-        from config import KB_LLM_MODEL as _kb_model
-    except ImportError:
-        _kb_model = LLM_API_MODEL
-    try:
-        from config import KB_LLM_EXTRA_BODY as _kb_extra_body
-    except ImportError:
-        _kb_extra_body = {}
+    from config import KB_LLM_API_KEY as _kb_key
+    from config import KB_LLM_BASE_URL as _kb_url
+    from config import KB_LLM_MODEL as _kb_model
+    from config import KB_LLM_EXTRA_BODY as _kb_extra_body
 
     api_key = _kb_key or LLM_API_KEY
     base_url = _kb_url or LLM_API_BASE_URL
@@ -299,10 +287,7 @@ def extract_single_recipe(title, answer, timeout=90):
         log.error(f"[async] RECIPE_EXTRACT_PROMPT 导入失败：{e}")
         return None
 
-    try:
-        from config.story import RECIPE_VERBOSE_MODE
-    except ImportError:
-        RECIPE_VERBOSE_MODE = False
+    from config.story import RECIPE_VERBOSE_MODE
 
     # 单篇提炼需要足够的输出 token：8 个字段 × ~100 汉字 × ~2 token/字 ≈ 1600
     # 之前的 250 严重不足，导致 JSON 被截断，解析全部失败
@@ -377,10 +362,7 @@ def extract_recipes(articles, batch_size=5):
             prompt += "\n\n"
 
         # verbose 模式下配方字段长 3 倍左右，需要更大的 max_tokens
-        try:
-            from config.story import RECIPE_VERBOSE_MODE
-        except ImportError:
-            RECIPE_VERBOSE_MODE = False
+        from config.story import RECIPE_VERBOSE_MODE
         # 与 extract_single_recipe 对齐：非 verbose 1000 / verbose 2400。
         # 曾用 250/900，8 字段 JSON 被截断导致解析全部失败
         per_recipe_tokens = 2400 if RECIPE_VERBOSE_MODE else 1000

@@ -23,20 +23,8 @@ __all__ = [
     # reader_score
     "READER_SCORE_W_LIKES", "READER_SCORE_W_COMMENTS", "READER_SCORE_W_COLLECTS",
     "READER_SCORE_W_HEARTS", "READER_SCORE_REF_AGE_DAYS", "READER_SCORE_DECAY_EXPONENT",
-    # URL 与等待时间
+    # URL
     "ZHIHU_RECOMMEND_URL", "ZHIHU_INVITED_URL",
-    "WAIT_ZHIHU_PAGE_LOAD", "WAIT_WRITE_ANSWER_CLICK", "WAIT_EDITOR_CLICK",
-    "WAIT_AFTER_PASTE", "WAIT_CONFIRM_CLICK", "WAIT_DRAFT_SAVE",
-    "WAIT_FOCUS_SETTLE", "WAIT_AFTER_HOME", "WAIT_ANSWER_LOAD_TRIGGER",
-    "WAIT_NEXT_SCREEN", "WAIT_CLOSE_TAB", "WAIT_IMPORT_MENU_SETTLE",
-    "WAIT_IMPORT_DOC_PANEL", "WAIT_UPLOAD_DIALOG_OPEN", "WAIT_FILE_PATH_PASTE",
-    "WAIT_FILE_CONFIRM", "WAIT_DOC_IMPORT_DONE", "WAIT_FALLBACK_CLOSE_DIALOG",
-    # 发布阶段 OCR 点击重试
-    "OCR_CLICK_WRITE_ANSWER_RETRIES", "OCR_CLICK_WRITE_ANSWER_WAIT",
-    "WAIT_WRITE_ANSWER_RETRY_HOME", "OCR_CLICK_IMPORT_RETRIES",
-    "OCR_CLICK_IMPORT_WAIT", "OCR_CLICK_MORE_RETRIES", "OCR_CLICK_MORE_WAIT",
-    "OCR_CLICK_IMPORT_DOC_RETRIES", "OCR_CLICK_IMPORT_DOC_WAIT",
-    "OCR_CLICK_UPLOAD_RETRIES", "OCR_CLICK_UPLOAD_WAIT",
     # 自动选题与提取
     "MIN_ANSWER_LENGTH", "MAX_ANSWER_RETRIES", "MAX_TOPIC_RETRY",
     "ENABLE_DOM_ANSWER_EXTRACTION",
@@ -139,43 +127,6 @@ READER_SCORE_DECAY_EXPONENT = 0.5
 ZHIHU_RECOMMEND_URL = "https://www.zhihu.com/creator/featured-question/recommend"
 ZHIHU_INVITED_URL = "https://www.zhihu.com/creator/featured-question/invited"
 
-# ============================================================
-# 知乎专用等待时间（秒）
-# ============================================================
-
-WAIT_ZHIHU_PAGE_LOAD = 2.0        # 打开知乎问题页后的等待时间；页面慢、写回答按钮常找不到时调大
-WAIT_WRITE_ANSWER_CLICK = 0.5     # 点击「写回答」后等待编辑器/工具栏出现的时间
-WAIT_EDITOR_CLICK = 0.3           # 降级为直接粘贴时，点击编辑区后的稳定等待
-WAIT_AFTER_PASTE = 1.0            # 降级为直接粘贴后，等待内容进入编辑器的时间
-WAIT_CONFIRM_CLICK = 0.3          # 预留确认点击后的短等待；当前主发布链路较少使用
-WAIT_DRAFT_SAVE = 1.5             # 内容导入/粘贴完成后，等待知乎自动保存草稿的时间
-
-# 前台自动化细分等待：优先调这些，避免改代码里的 sleep
-WAIT_FOCUS_SETTLE = 0.2           # 切回/聚焦 Edge 窗口后的稳定等待
-WAIT_AFTER_HOME = 0.4             # 按 Ctrl+Home 回到页面顶部后的等待
-WAIT_ANSWER_LOAD_TRIGGER = 0.8    # 进入问题页后触发回答加载（如 PageDown）后的等待
-WAIT_NEXT_SCREEN = 0.5            # 采集阶段翻到下一屏推荐问题后的等待
-WAIT_CLOSE_TAB = 0.3              # 采集完成后关闭当前问题页标签的等待
-WAIT_IMPORT_MENU_SETTLE = 0.5     # 点击「导入」或「更多」后，等待菜单展开稳定
-WAIT_IMPORT_DOC_PANEL = 0.7       # 点击「导入文档」后，等待上传面板出现
-WAIT_UPLOAD_DIALOG_OPEN = 0.5     # 点击上传区域后，等待系统文件选择框打开
-WAIT_FILE_PATH_PASTE = 0.3        # 文件选择框里粘贴 md 文件路径后的等待
-WAIT_FILE_CONFIRM = 0.25          # 文件选择框中确认/回车前后的短等待
-WAIT_DOC_IMPORT_DONE = 1.0        # 选择 md 文件后，等待知乎把文档内容导入编辑器
-WAIT_FALLBACK_CLOSE_DIALOG = 0.3  # 找不到上传区域时，按 Esc 关闭弹窗后的等待
-
-# 发布阶段 OCR 点击重试参数。调这里可以控制「写回答/导入/上传」等按钮定位耗时。
-OCR_CLICK_WRITE_ANSWER_RETRIES = 3  # OCR 查找「写回答」按钮的最大尝试次数
-OCR_CLICK_WRITE_ANSWER_WAIT = 0.2   # 每次没找到「写回答」后，下一次 OCR 前的等待
-WAIT_WRITE_ANSWER_RETRY_HOME = 0.2  # 首轮找不到「写回答」时，回到顶部后再次重试前的等待
-OCR_CLICK_IMPORT_RETRIES = 3        # OCR 查找工具栏「导入」按钮的最大尝试次数
-OCR_CLICK_IMPORT_WAIT = 0.2         # 每次没找到「导入」后，下一次 OCR 前的等待
-OCR_CLICK_MORE_RETRIES = 2          # 找不到「导入」时，OCR 查找「更多」按钮的最大尝试次数
-OCR_CLICK_MORE_WAIT = 0.2           # 每次没找到「更多」后，下一次 OCR 前的等待
-OCR_CLICK_IMPORT_DOC_RETRIES = 3    # OCR 查找「导入文档」入口的最大尝试次数
-OCR_CLICK_IMPORT_DOC_WAIT = 0.2     # 每次没找到「导入文档」后，下一次 OCR 前的等待
-OCR_CLICK_UPLOAD_RETRIES = 2        # OCR 查找上传区域文案的最大尝试次数
-OCR_CLICK_UPLOAD_WAIT = 0.2         # 每次没找到上传区域后，下一次 OCR 前的等待
 
 # ============================================================
 # 自动选题参数
@@ -193,11 +144,6 @@ MAX_TOPIC_RETRY = 5
 # DOM 通道（browser_adapter）：唯一提取通道。UIA/OCR 屏幕降级已随
 # V4.0.2 移除——纯 DOM 可无头运行，不再需要坐标校准。
 ENABLE_DOM_ANSWER_EXTRACTION = True
-
-# --- 已移除的 UIA/OCR 屏幕通道参数（保留定义兼容旧 import，勿再使用）---
-ENABLE_UIA_ANSWER_EXTRACTION = False
-UIA_ANSWER_WAIT_TIMEOUT = 4.0
-UIA_ANSWER_POLL_INTERVAL = 0.25
 
 # 素材赞同数门槛：通过门槛的回答才进入生成池，并触发配方提炼
 ENABLE_MATERIAL_LIKES_GATE = True       # True=启用赞同数过滤；False=所有合格回答都进入生成池

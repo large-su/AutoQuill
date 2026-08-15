@@ -65,10 +65,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     """
     from applications.zhihu_story.prompts import STORY_SYSTEM_PROMPT
 
-    try:
-        from config.story import STORY_MATERIAL_MODE
-    except ImportError:
-        STORY_MATERIAL_MODE = "reference"
+    from config.story import STORY_MATERIAL_MODE
 
     # 预先格式化 meta 节（占位符注入 + 追加节 两种路径共用）
     _meta_text_for_placeholder = ""  # 填进 {meta_knowledge} 占位符的完整文本

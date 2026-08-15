@@ -127,20 +127,13 @@ def ask_batch_params():
         rounds: [{"round": 1, "gen_count": 20, "pub_count": 12}, ...]
     """
     print("\n  ── 本次批量任务参数 ──")
-    try:
-        from config.story import (
-            BATCH_AUTO_GENERATE_COUNT,
-            BATCH_GENERATE_REDUNDANCY_RATIO,
-            BATCH_GENERATE_MIN_EXTRA,
-            BATCH_ROUND_SPLIT_ENABLE,
-            BATCH_MAX_PUBLISH_PER_ROUND,
-        )
-    except ImportError:
-        BATCH_AUTO_GENERATE_COUNT = False
-        BATCH_GENERATE_REDUNDANCY_RATIO = 0.0
-        BATCH_GENERATE_MIN_EXTRA = 0
-        BATCH_ROUND_SPLIT_ENABLE = False
-        BATCH_MAX_PUBLISH_PER_ROUND = 0
+    from config.story import (
+        BATCH_AUTO_GENERATE_COUNT,
+        BATCH_GENERATE_REDUNDANCY_RATIO,
+        BATCH_GENERATE_MIN_EXTRA,
+        BATCH_ROUND_SPLIT_ENABLE,
+        BATCH_MAX_PUBLISH_PER_ROUND,
+    )
 
     def _auto_gen_count(n):
         import math

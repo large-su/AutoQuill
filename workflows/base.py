@@ -201,10 +201,7 @@ class WorkflowBase:
 
         if not is_valid:
             # ★ 检查是否启用格式重试
-            try:
-                from config.story import ENABLE_FORMAT_RETRY
-            except ImportError:
-                ENABLE_FORMAT_RETRY = True
+            from config.story import ENABLE_FORMAT_RETRY
 
             if not ENABLE_FORMAT_RETRY:
                 log.warning(f"格式不合规（{fmt_score}/10），"
@@ -356,10 +353,7 @@ class WorkflowBase:
             return 0
 
         # 段落分布分析
-        try:
-            from config.story import ENABLE_PARAGRAPH_ANALYSIS
-        except ImportError:
-            ENABLE_PARAGRAPH_ANALYSIS = False
+        from config.story import ENABLE_PARAGRAPH_ANALYSIS
         if ENABLE_PARAGRAPH_ANALYSIS:
             try:
                 from core.story_text import plot_paragraph_distribution
@@ -391,10 +385,7 @@ class WorkflowBase:
         retried_ok = 0
         if non_compliant:
             # ★ 检查是否启用格式重试
-            try:
-                from config.story import ENABLE_FORMAT_RETRY
-            except ImportError:
-                ENABLE_FORMAT_RETRY = True
+            from config.story import ENABLE_FORMAT_RETRY
 
             if not ENABLE_FORMAT_RETRY:
                 log.info(f"  ENABLE_FORMAT_RETRY=False，"
@@ -532,11 +523,8 @@ class WorkflowBase:
     @staticmethod
     def _get_gen_concurrency():
         """读取故事并行生成的并发数配置。"""
-        try:
-            from config.story import STORY_GENERATE_CONCURRENCY
-            return STORY_GENERATE_CONCURRENCY
-        except ImportError:
-            return 5
+        from config.story import STORY_GENERATE_CONCURRENCY
+        return STORY_GENERATE_CONCURRENCY
 
     def _batch_generate_api(self, materials, print_progress_fn,
                             reset_progress_fn):
@@ -547,16 +535,11 @@ class WorkflowBase:
         from llm_api import generate_story_parallel
 
         base_workers = min(len(materials), self._get_gen_concurrency())
-        try:
-            from config.story import (
-                STORY_GENERATE_CONCURRENCY_AUTO,
-                STORY_GENERATE_CONCURRENCY_MIN,
-                STORY_GENERATE_CONCURRENCY_MAX,
-            )
-        except ImportError:
-            STORY_GENERATE_CONCURRENCY_AUTO = False
-            STORY_GENERATE_CONCURRENCY_MIN = base_workers
-            STORY_GENERATE_CONCURRENCY_MAX = base_workers
+        from config.story import (
+            STORY_GENERATE_CONCURRENCY_AUTO,
+            STORY_GENERATE_CONCURRENCY_MIN,
+            STORY_GENERATE_CONCURRENCY_MAX,
+        )
 
         if STORY_GENERATE_CONCURRENCY_AUTO:
             max_workers = min(
