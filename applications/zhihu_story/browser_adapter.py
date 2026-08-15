@@ -1027,6 +1027,60 @@ def close_shared_browser():
         _shared_browser = None
 
 
+_DEEPSEEK_COOKIE_DOMAINS = ("deepseek.com",)
+
+
+def _has_deepseek_cookies(context):
+    try:
+        cookies = context.cookies()
+    except Exception:
+        return False
+    return any(
+        c.get("domain") and any(
+            d in c["domain"] for d in _DEEPSEEK_COOKIE_DOMAINS)
+        and c.get("value")
+        for c in cookies
+    )
+
+
+def web_llm_logged_in():
+    """网页版 LLM（chat.deepseek.com）是否已登录：持久化 profile cookie 判断。
+
+    用独立无头实例检查，不碰共享浏览器（get_browser）——首启引导轮询
+    setup/status 时不会反复弹出可见 Edge，也不影响任务浏览器的无头模式。
+    返回 True/False；浏览器无法启动等异常返回 False（不阻塞引导）。"""
+    try:
+        with ZhihuBrowser(headless=True) as browser:
+            return _has_deepseek_cookies(browser.context)
+    except Exception:
+        return False
+
+
+def login_deepseek_web_flow(timeout=300):
+    """打开可见 Edge 到 chat.deepseek.com，等待用户登录网页版 LLM。
+
+    供首启引导（/api/setup/web-login）使用；登录后 cookie 写入持久化
+    profile，web_llm_logged_in() 即可判定。返回 (是否成功, 提示信息)。"""
+    try:
+        browser = get_browser()
+        if _has_deepseek_cookies(browser.context):
+            return True, "已登录 DeepSeek 网页版"
+        page = browser.context.new_page()
+        page.goto("https://chat.deepseek.com", wait_until="domcontentloaded")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(3)
+            if _has_deepseek_cookies(browser.context):
+                break
+        else:
+            page.close()
+            return False, f"超时（{timeout // 60} 分钟）未检测到登录"
+        page.close()
+        return True, "检测到登录成功"
+    except Exception as exc:
+        return False, f"登录引导失败：{exc}"
+
+
 def login_zhihu_flow(timeout=300):
     """打开可见 Edge 窗口引导用户手动登录知乎，检测到登录后保存登录态。
 

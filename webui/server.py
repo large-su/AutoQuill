@@ -422,7 +422,7 @@ def api_config():
                   "STORY_MATERIAL_MODE", "AUTHOR_PROFILE",
                   "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
                   "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES",
-                  "LONG_FORM_MODE", "KB_ENABLE"):
+                  "MAX_TOPIC_RETRY", "LONG_FORM_MODE", "KB_ENABLE"):
             cfg[k] = getattr(sconfig, k, None)
     except Exception as exc:
         cfg["_app_error"] = str(exc)
@@ -448,6 +448,39 @@ def api_config():
     except Exception as exc:
         cfg["_web_error"] = str(exc)
     return cfg
+
+
+# 允许前端通过「设置」面板修改的选题参数（其余 key 一律拒绝）
+_TUNABLE_KEYS = {
+    # key: (类型, 最小值, 最大值)
+    "MAX_TOPIC_RETRY": (int, 0, 10),
+    "MIN_ANSWER_LENGTH": (int, 100, 5000),
+    "MATERIAL_MIN_LIKES": (int, 0, 100000),
+}
+
+
+class _TunableSpec(BaseModel):
+    key: str
+    value: int
+
+
+@app.post("/api/config")
+def api_set_tunable(spec: _TunableSpec):
+    """运行时修改选题参数（MAX_TOPIC_RETRY / MIN_ANSWER_LENGTH /
+    MATERIAL_MIN_LIKES，整型并限幅），持久化到 webui_model.json
+    （story_tunables 字段），下次启动自动恢复。"""
+    from config import story
+    if spec.key not in _TUNABLE_KEYS:
+        raise HTTPException(400, f"不可修改的参数：{spec.key}")
+    typ, lo, hi = _TUNABLE_KEYS[spec.key]
+    val = typ(spec.value)
+    val = max(lo, min(hi, val))
+    setattr(story, spec.key, val)
+    from config import _save_webui_state
+    _save_webui_state(story_tunables={
+        k: getattr(story, k) for k in _TUNABLE_KEYS})
+    log.info("Web 控制台修改选题参数 %s → %s", spec.key, val)
+    return {"ok": True, "key": spec.key, "value": val}
 
 
 class _WebPresetSpec(BaseModel):
@@ -552,6 +585,12 @@ def api_set_browser(spec: _BrowserSpec):
 
 _login_thread = None
 _login_error = ""
+_login_kind = ""  # 当前登录引导的站点："zhihu" / "deepseek" / ""
+
+# web_llm_logged_in 检查要启动独立浏览器，约数秒；缓存避免首启轮询
+# 反复拉起 Edge（_WEB_LLM_CACHE_TTL 秒内复用结果）
+_WEB_LLM_CACHE_TTL = 15.0
+_web_llm_cache = {"ts": 0.0, "ok": False}
 
 
 def _setup_version():
@@ -562,9 +601,26 @@ def _setup_version():
         return "0.0.0"
 
 
+def _web_llm_logged_in_cached():
+    ts, ok = _web_llm_cache["ts"], _web_llm_cache["ok"]
+    if time.time() - ts < _WEB_LLM_CACHE_TTL:
+        return ok
+    try:
+        from applications.zhihu_story.browser_adapter import web_llm_logged_in
+        ok = web_llm_logged_in()
+    except Exception:
+        ok = False
+    _web_llm_cache.update(ts=time.time(), ok=ok)
+    return ok
+
+
 @app.get("/api/setup/status")
 def api_setup_status():
-    """引导状态：Edge / API Key / 知乎登录 三项就绪检查。"""
+    """引导状态：Edge / API Key / 知乎登录 / Web 登录 就绪检查。
+
+    setup_needed 语义（Web 为默认通道，但已配置任一通道即放行）：
+    Edge 可用 且 知乎已登录 且（API Key 已配置 或 DeepSeek 网页版已登录）。
+    """
     from applications.zhihu_story.browser_adapter import (
         EDGE_PATH, STORAGE_STATE_PATH)
     from config import LLM_MODEL_ID, LLM_PROVIDER, _load_provider_config
@@ -577,15 +633,19 @@ def api_setup_status():
         pass
     edge_ok = bool(EDGE_PATH)
     zhihu_logged_in = os.path.exists(STORAGE_STATE_PATH)
+    web_ok = _web_llm_logged_in_cached() if edge_ok else False
+    login_running = (_login_thread is not None and _login_thread.is_alive())
     return {
         "version": _setup_version(),
         "edge_ok": edge_ok,
         "llm_configured": llm_configured,
+        "web_llm_logged_in": web_ok,
         "zhihu_logged_in": zhihu_logged_in,
-        "login_running": (_login_thread is not None
-                          and _login_thread.is_alive()),
+        "login_running": login_running,
+        "login_kind": _login_kind if login_running else "",
         "login_error": _login_error,
-        "setup_needed": not (edge_ok and llm_configured and zhihu_logged_in),
+        "setup_needed": not (edge_ok and zhihu_logged_in
+                             and (llm_configured or web_ok)),
     }
 
 
@@ -654,11 +714,9 @@ def api_setup_test_api():
         return {"ok": False, "detail": str(exc)}
 
 
-@app.post("/api/setup/zhihu-login")
-def api_setup_zhihu_login():
-    """后台线程拉起可见 Edge 引导登录知乎；前端轮询 setup/status 收尾。"""
-    global _login_error
-    global _login_thread
+def _start_login_thread(kind, flow_call, log_name):
+    """通用登录引导：后台线程拉起可见 Edge；前端轮询 setup/status 收尾。"""
+    global _login_error, _login_thread, _login_kind
     if _login_thread is not None and _login_thread.is_alive():
         raise HTTPException(409, "登录引导已在运行，请在弹出的 Edge 窗口完成登录")
     from applications.zhihu_story.browser_adapter import EDGE_PATH
@@ -666,24 +724,40 @@ def api_setup_zhihu_login():
         raise HTTPException(400, "未找到 Microsoft Edge，请先安装 Edge 后重试")
 
     _login_error = ""
+    _login_kind = kind
 
     def _run():
         global _login_error
         try:
-            from applications.zhihu_story.browser_adapter import (
-                login_zhihu_flow)
-            ok, msg = login_zhihu_flow()
-            log.info("首启引导：知乎登录%s", "成功" if ok else f"失败：{msg}")
+            ok, msg = flow_call()
+            log.info("首启引导：%s%s", log_name, "成功" if ok else f"失败：{msg}")
             if not ok:
                 _login_error = msg
         except Exception as exc:
             _login_error = str(exc)
-            log.error("首启引导：知乎登录异常：%s", exc, exc_info=True)
+            log.error("首启引导：%s异常：%s", log_name, exc, exc_info=True)
 
     _login_thread = threading.Thread(target=_run, daemon=True)
     _login_thread.start()
+
+
+@app.post("/api/setup/zhihu-login")
+def api_setup_zhihu_login():
+    """后台线程拉起可见 Edge 引导登录知乎；前端轮询 setup/status 收尾。"""
+    from applications.zhihu_story.browser_adapter import login_zhihu_flow
+    _start_login_thread("zhihu", login_zhihu_flow, "知乎登录")
     return {"ok": True,
             "message": "请在弹出的 Edge 窗口中完成登录（扫码/短信），"
+                       "检测到登录后自动保存并关闭"}
+
+
+@app.post("/api/setup/web-login")
+def api_setup_web_login():
+    """后台线程拉起可见 Edge 引导登录 DeepSeek 网页版；轮询 status 收尾。"""
+    from applications.zhihu_story.browser_adapter import login_deepseek_web_flow
+    _start_login_thread("deepseek", login_deepseek_web_flow, "DeepSeek 网页版登录")
+    return {"ok": True,
+            "message": "请在弹出的 Edge 窗口中登录 DeepSeek 网页版，"
                        "检测到登录后自动保存并关闭"}
 
 

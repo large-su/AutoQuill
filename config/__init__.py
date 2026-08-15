@@ -16,9 +16,11 @@ import time
 # LLM 调用模式（框架级——决定走 API 还是浏览器）
 # ============================================================
 
-# "api" = API 直接调用（推荐，快速稳定）
-# "web" = 浏览器操作网页版（免费但慢）
-LLM_MODE = "api"
+# "api" = API 直接调用（付费，快）
+# "web" = 浏览器操作网页版（免费但慢）——默认通道：新用户零成本起步，
+# 首启引导让用户选择并配置对应信息；已配置 API 的老用户不受影响
+# （运行时状态 webui_model.json 覆盖此默认值）
+LLM_MODE = "web"
 
 # 浏览器是否无头运行（调试/工作模式）
 # False = 弹到前台（默认，调试可观察；同账号下可见生成过程）
@@ -396,6 +398,12 @@ def _apply_webui_model_override():
         web_preset = data.get("web_preset")
         if web_preset in ("fast", "expert"):
             set_web_mode_preset(web_preset, persist=False)
+        tunables = data.get("story_tunables")
+        if isinstance(tunables, dict):
+            from config import story as _story
+            for k, v in tunables.items():
+                if hasattr(_story, k) and isinstance(v, int):
+                    setattr(_story, k, v)
     except Exception:
         pass  # 配置损坏/服务商被移除 → 保持默认
 

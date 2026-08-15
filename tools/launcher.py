@@ -218,19 +218,51 @@ def _pause():
         pass
 
 
+def _apply_dark_titlebar(window):
+    """Windows 10/11：把标题栏染成与界面一致的深色（DWM 属性）。
+
+    WebView2 无 dark_title_bar 参数，深色标题栏需原生 API。
+    pywebview 窗口封装 WinForms 句柄；取句柄失败/非 Windows 时静默跳过
+    （页面本身已是深色，仅标题栏会白一点，不阻塞启动）。"""
+    try:
+        if os.name != "nt" or not window or not window.native:
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20（Win10 1809+，Win11 亦可用）
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        try:
+            handle = window.native.Handle
+        except AttributeError:
+            handle = ctypes.windll.user32.GetParent(window.native.get_handle())
+        if not handle:
+            return
+        value = wintypes.BOOL(True)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            handle, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            ctypes.byref(value), ctypes.sizeof(value))
+    except Exception:
+        pass  # 深色标题栏是增强项，失败不影响窗口使用
+
+
 def open_window():
     """打开控制台窗口：pywebview 独立窗口（WebView2 内核），失败回退系统浏览器。
 
+    窗口背景预置为深色（防启动白闪），Win10/11 下标题栏一并染深。
     阻塞直到窗口关闭；返回 True=独立窗口，False=回退浏览器（调用方需保持
     服务存活语义，等待服务进程退出）。"""
     try:
         import webview
 
-        webview.create_window(
+        window = webview.create_window(
             "AutoQuill", BASE_URL,
             width=1280, height=820, min_size=(960, 640),
+            background_color="#0b0e14",
         )
-        webview.start()
+        # start(func) 在窗口创建后、显示前调用回调 → 标题栏在用户看到前已染深
+        # （start 本身阻塞直到窗口关闭，样式调用不能放在其后面）
+        webview.start(lambda: _apply_dark_titlebar(window))
         return True
     except Exception:
         webbrowser.open(BASE_URL)

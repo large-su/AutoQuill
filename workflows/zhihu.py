@@ -11,8 +11,9 @@
 #                    服务端草稿 API 轮询（前端 toast 在程序化写入后
 #                    不可靠，以草稿内容为准——可验证）
 #
-# 降级通道（仅 DOM 主通道失败时启用）：
-#   - 提取：UIA/OCR 旧屏幕通道（_extract_answer_with_fallback）
+# 通道约束（V4.0.2 起纯 DOM，无屏幕降级）：
+#   - 提取：无降级 —— UIA/OCR 旧屏幕通道已移除；重试耗尽直接报错
+#     （错误信息含点赞门槛拒绝次数统计）
 #   - 发布：无 —— 导入文档上传（set_input_files）不可靠（上传 API 全
 #     200 但服务端草稿不更新），编辑器直接写入是唯一可验证通道
 #
@@ -292,55 +293,8 @@ class ZhihuWorkflow(WorkflowBase):
         return kept[0]
 
     # ============================================================
-    # 步骤2：提取回答（DOM 主通道 + UIA/OCR 降级）
+    # 步骤2：提取回答（DOM 通道，无屏幕降级）
     # ============================================================
-
-    def _extract_answer_with_fallback(self):
-        """降级通道：UIA 首答 → OCR 滚屏（DOM 主通道失败时启用）。
-
-        注意：此通道读取屏幕，需要 playwright Edge 窗口可见，
-        且必须完成坐标校准。未校准（V3.0 后默认如此）时降级
-        不可用，报诊断清晰的错误而不是裸 RuntimeError。
-        """
-        from config.story import (
-            ENABLE_UIA_ANSWER_EXTRACTION,
-            UIA_ANSWER_WAIT_TIMEOUT,
-            UIA_ANSWER_POLL_INTERVAL,
-            MIN_ANSWER_LENGTH,
-            MAX_ANSWER_RETRIES,
-            ENABLE_MATERIAL_LIKES_GATE,
-        )
-        from applications.zhihu_story.extractors import (
-            UiaAnswerExtractor,
-            OcrAnswerExtractor,
-            FallbackAnswerExtractor,
-        )
-        from desktop_utils import get_bounds, load_coords
-
-        if not load_coords():
-            raise RuntimeError(
-                "降级通道不可用：OCR 坐标未校准（需运行 --calibrate）。"
-                "DOM 主通道多次尝试未获合格首答（常见原因：首答过短、"
-                "点赞门槛拒绝），且无法降级 OCR。"
-                "请检查 DOM 提取失败原因后重试。")
-
-        primary = None
-        if ENABLE_UIA_ANSWER_EXTRACTION:
-            primary = UiaAnswerExtractor(
-                min_length=MIN_ANSWER_LENGTH,
-                wait_timeout=UIA_ANSWER_WAIT_TIMEOUT,
-                poll_interval=UIA_ANSWER_POLL_INTERVAL,
-            )
-        lx, rx, ty, by = get_bounds()
-        fallback = OcrAnswerExtractor(
-            lx, rx, ty, by,
-            min_length=MIN_ANSWER_LENGTH,
-            max_retries=MAX_ANSWER_RETRIES,
-        )
-        extractor = FallbackAnswerExtractor(
-            primary, fallback, require_likes=ENABLE_MATERIAL_LIKES_GATE
-        )
-        return extractor.extract()
 
     def extract_content(self, fast_mode=False):
         """DOM 提取知乎问题标题和首答。
@@ -348,13 +302,14 @@ class ZhihuWorkflow(WorkflowBase):
         主通道：check_answerable（DOM 检测「撤销删除」）+
         get_primary_answer（DOM 提取正文与互动数据）。
 
-        首答过短或问题不可回答时重新选题再试（MAX_TOPIC_RETRY 次），
-        而不是直接降级 OCR——本机 OCR 未校准，降级只在 DOM 多次尝试
-        全部失败后作为最后手段。
+        首答过短或问题不可回答时重新选题再试（MAX_TOPIC_RETRY 次）；
+        全部失败报错并给出失败原因统计（UIA/OCR 屏幕降级已移除——
+        纯 DOM 通道，可无头运行）。
         """
         from config.story import (
             MIN_ANSWER_LENGTH,
             ENABLE_DOM_ANSWER_EXTRACTION,
+            MAX_TOPIC_RETRY,
         )
         from applications.zhihu_story.browser_adapter import (
             normalize_question_url)
@@ -364,7 +319,6 @@ class ZhihuWorkflow(WorkflowBase):
         log.info("=" * 50)
 
         browser = self._browser()
-        MAX_TOPIC_RETRY = 3
         gate_reject_count = 0   # 点赞门槛拒绝计数（重试耗尽时提示）
 
         for attempt in range(MAX_TOPIC_RETRY + 1):
@@ -426,32 +380,24 @@ class ZhihuWorkflow(WorkflowBase):
                 log.warning(f"  首答过短（{len(answer)} 字 < "
                             f"{MIN_ANSWER_LENGTH}），尝试下一题")
             else:
-                break  # DOM 提取被显式关闭，走 OCR 降级
+                # DOM 提取被显式关闭：纯 DOM 通道无降级，直接失败
+                raise RuntimeError(
+                    "ENABLE_DOM_ANSWER_EXTRACTION 已关闭，但 UIA/OCR "
+                    "屏幕降级通道已移除——请重新开启 DOM 提取后重试")
 
-        # DOM 多次尝试全部失败，最后才降级 UIA/OCR 屏幕通道
+        # 全部重试耗尽：报错并给出门槛/质量失败统计（纯 DOM，无降级）
+        reasons = []
         if gate_reject_count:
-            log.warning(f"  DOM 通道多次尝试未获合格首答"
-                        f"（其中 {gate_reject_count} 次被点赞门槛拒绝），"
-                        f"降级 UIA/OCR 屏幕通道")
-        title, answer, footer = self._extract_answer_with_fallback()
-
-        if not title or not answer or len(answer) < MIN_ANSWER_LENGTH:
-            raise RuntimeError(
-                f"提取失败：标题={len(title or '')}字 "
-                f"回答={len(answer or '')}字")
-
-        log.info(f"提取成功！标题：{title[:50]}... | "
-                 f"回答：{len(answer)}字符")
-        from config.story import (
-            ENABLE_MATERIAL_LIKES_GATE, MATERIAL_MIN_LIKES)
-        if ENABLE_MATERIAL_LIKES_GATE:
-            likes = (footer or {}).get("likes")
-            log.warning(
-                f"  ⚠ 降级路径不强制点赞门槛（gate 已开："
-                f"要求 ≥{MATERIAL_MIN_LIKES}，实测赞={likes}）——"
-                f"如需严格执行请重新运行")
-        final_url = normalize_question_url(browser.page.url) or url
-        return title, answer, footer, final_url
+            reasons.append(f"{gate_reject_count} 次被点赞门槛拒绝")
+        log.error("  DOM 通道尝试 %d 次未获合格首答%s",
+                  MAX_TOPIC_RETRY + 1,
+                  f"（其中 {', '.join(reasons)}）" if reasons else "")
+        raise RuntimeError(
+            f"提取失败：重试 {MAX_TOPIC_RETRY + 1} 次仍无合格首答"
+            f"（首答过短或不可回答）"
+            + (f"，其中 {gate_reject_count} 次被点赞门槛拒绝" if gate_reject_count
+               else "")
+            + "。可调低 config 中的 MIN_ANSWER_LENGTH / MATERIAL_MIN_LIKES 后重试")
 
     # ============================================================
     # 步骤4：发布到知乎（DOM）

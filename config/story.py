@@ -40,8 +40,7 @@ __all__ = [
     "OCR_CLICK_IMPORT_DOC_RETRIES", "OCR_CLICK_IMPORT_DOC_WAIT",
     "OCR_CLICK_UPLOAD_RETRIES", "OCR_CLICK_UPLOAD_WAIT",
     # 自动选题与提取
-    "MIN_ANSWER_LENGTH", "MAX_ANSWER_RETRIES",
-    "ENABLE_UIA_ANSWER_EXTRACTION", "UIA_ANSWER_WAIT_TIMEOUT", "UIA_ANSWER_POLL_INTERVAL",
+    "MIN_ANSWER_LENGTH", "MAX_ANSWER_RETRIES", "MAX_TOPIC_RETRY",
     "ENABLE_DOM_ANSWER_EXTRACTION",
     "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES", "MATERIAL_UNKNOWN_LIKES_POLICY",
     "AUTHOR_PROFILE",
@@ -194,13 +193,20 @@ OCR_CLICK_UPLOAD_WAIT = 0.2         # 每次没找到上传区域后，下一次
 MIN_ANSWER_LENGTH = 500
 MAX_ANSWER_RETRIES = 3
 
-# 首答采集优先通过 Windows UI Automation 读取完整已渲染内容；失败时自动回退 OCR 滚屏。
-ENABLE_UIA_ANSWER_EXTRACTION = True
-UIA_ANSWER_WAIT_TIMEOUT = 4.0       # 等待首答 UIA 正文完整出现的最长时间
-UIA_ANSWER_POLL_INTERVAL = 0.25     # UIA 首答未就绪时的轮询间隔
+# 选题重试次数：首答过短 / 问题不可回答 / 未过点赞门槛时重新选题的次数。
+# 总尝试 = MAX_TOPIC_RETRY + 1（默认 5 次重试共 6 次尝试）。
+# 旧版硬编码 3（共 4 次尝试）——知乎推荐流低质题变多，提高重试后
+# 单轮成功概率显著上升；可配项，Web 控制台「设置」可调。
+MAX_TOPIC_RETRY = 5
 
-# DOM 通道（browser_adapter）：首选；关闭后走 UIA/OCR 旧通道
+# DOM 通道（browser_adapter）：唯一提取通道。UIA/OCR 屏幕降级已随
+# V4.0.2 移除——纯 DOM 可无头运行，不再需要坐标校准。
 ENABLE_DOM_ANSWER_EXTRACTION = True
+
+# --- 已移除的 UIA/OCR 屏幕通道参数（保留定义兼容旧 import，勿再使用）---
+ENABLE_UIA_ANSWER_EXTRACTION = False
+UIA_ANSWER_WAIT_TIMEOUT = 4.0
+UIA_ANSWER_POLL_INTERVAL = 0.25
 
 # 素材赞同数门槛：通过门槛的回答才进入生成池，并触发配方提炼
 ENABLE_MATERIAL_LIKES_GATE = True       # True=启用赞同数过滤；False=所有合格回答都进入生成池

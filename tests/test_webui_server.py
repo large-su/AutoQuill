@@ -5,6 +5,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -42,6 +43,45 @@ class TestServerAPI(unittest.TestCase):
         r = self.client.get("/api/stories")
         self.assertEqual(r.status_code, 200)
         self.assertIn("stories", r.json())
+
+    def test_config_tunable_roundtrip(self):
+        # 选题参数前端可配：写 → 读 → 恢复（禁落盘，避免污染真实配置）
+        from config import story
+        orig = story.MAX_TOPIC_RETRY
+        try:
+            with mock.patch("config._save_webui_state"):
+                r = self.client.post("/api/config", json={
+                    "key": "MAX_TOPIC_RETRY", "value": 7})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["value"], 7)
+            self.assertEqual(story.MAX_TOPIC_RETRY, 7)
+            cfg = self.client.get("/api/config").json()
+            self.assertEqual(cfg["MAX_TOPIC_RETRY"], 7)
+        finally:
+            story.MAX_TOPIC_RETRY = orig
+
+    def test_config_tunable_clamped(self):
+        # 超范围值被限幅（MAX_TOPIC_RETRY 上限 10）
+        from config import story
+        orig = story.MAX_TOPIC_RETRY
+        try:
+            with mock.patch("config._save_webui_state"):
+                r = self.client.post("/api/config", json={
+                    "key": "MAX_TOPIC_RETRY", "value": 99})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["value"], 10)
+        finally:
+            story.MAX_TOPIC_RETRY = orig
+
+    def test_config_tunable_unknown_key_rejected(self):
+        r = self.client.post("/api/config", json={
+            "key": "LLM_API_KEY", "value": 1})
+        self.assertEqual(r.status_code, 400)
+
+    def test_config_tunable_non_int_rejected(self):
+        r = self.client.post("/api/config", json={
+            "key": "MAX_TOPIC_RETRY", "value": "abc"})
+        self.assertEqual(r.status_code, 422)
 
     def test_status_idle(self):
         r = self.client.get("/api/status")
@@ -515,6 +555,9 @@ class TestSetupEndpoints(unittest.TestCase):
             providers = json.load(f)
         with open(self.dst, "w", encoding="utf-8") as f:
             json.dump(providers, f, ensure_ascii=False, indent=2)
+        # Web 登录检查缓存：测试内固定为未登录（免真实拉起 Edge），
+        # 需要登录语义的用例单独 patch
+        server._web_llm_cache.update(ts=time.time(), ok=False)
 
     @classmethod
     def tearDownClass(cls):
@@ -528,7 +571,9 @@ class TestSetupEndpoints(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         st = r.json()
         for k in ("version", "edge_ok", "llm_configured",
-                  "zhihu_logged_in", "setup_needed"):
+                  "web_llm_logged_in", "zhihu_logged_in",
+                  "login_running", "login_kind", "login_error",
+                  "setup_needed"):
             self.assertIn(k, st)
         self.assertEqual(st["version"], server._setup_version())
 
@@ -536,6 +581,33 @@ class TestSetupEndpoints(unittest.TestCase):
         # example 配置里的占位 key → 视为未配置
         r = self.client.get("/api/setup/status")
         self.assertFalse(r.json()["llm_configured"])
+
+    def test_setup_needed_relaxed_by_web_login(self):
+        # Edge + 知乎就绪的前提下：API 未配置但 Web 已登录 → 引导放行
+        import applications.zhihu_story.browser_adapter as ba
+        with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
+            with mock.patch.object(server.os.path, "exists",
+                                   return_value=True):
+                with mock.patch.object(
+                        server, "_web_llm_logged_in_cached",
+                        return_value=False):
+                    st = self.client.get("/api/setup/status").json()
+                    self.assertTrue(st["setup_needed"])
+                with mock.patch.object(
+                        server, "_web_llm_logged_in_cached",
+                        return_value=True):
+                    st = self.client.get("/api/setup/status").json()
+                    self.assertFalse(st["setup_needed"])
+
+    def test_web_login_cached_result_reused(self):
+        # TTL 内重复调用不重复拉起浏览器（web_llm_logged_in 只调一次）
+        server._web_llm_cache.update(ts=0.0, ok=False)
+        import applications.zhihu_story.browser_adapter as ba
+        with mock.patch.object(ba, "web_llm_logged_in",
+                               return_value=True) as m:
+            self.assertTrue(server._web_llm_logged_in_cached())
+            self.assertTrue(server._web_llm_logged_in_cached())
+            self.assertEqual(m.call_count, 1)
 
     def test_apikey_write_and_effect(self):
         import config
@@ -626,6 +698,49 @@ class TestSetupEndpoints(unittest.TestCase):
         try:
             with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
                 r = self.client.post("/api/setup/zhihu-login")
+            self.assertEqual(r.status_code, 409)
+        finally:
+            server._login_thread = orig
+
+    def test_web_login_missing_edge_400(self):
+        import applications.zhihu_story.browser_adapter as ba
+        with mock.patch.object(ba, "EDGE_PATH", None):
+            r = self.client.post("/api/setup/web-login")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Edge", r.json()["detail"])
+
+    def test_web_login_starts_thread(self):
+        import applications.zhihu_story.browser_adapter as ba
+        orig_thread = server._login_thread
+        orig_kind = server._login_kind
+        server._login_thread = None
+        server._login_kind = ""
+        try:
+            with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
+                with mock.patch.object(
+                        ba, "login_deepseek_web_flow",
+                        return_value=(True, "ok")) as m:
+                    r = self.client.post("/api/setup/web-login")
+                    self.assertEqual(r.status_code, 200)
+                    deadline = time.time() + 5
+                    while (server._login_thread
+                           and server._login_thread.is_alive()
+                           and time.time() < deadline):
+                        time.sleep(0.05)
+                    self.assertEqual(m.call_count, 1)
+        finally:
+            server._login_thread = orig_thread
+            server._login_kind = orig_kind
+
+    def test_web_login_duplicate_409(self):
+        import applications.zhihu_story.browser_adapter as ba
+        fake = mock.Mock()
+        fake.is_alive.return_value = True
+        orig = server._login_thread
+        server._login_thread = fake
+        try:
+            with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
+                r = self.client.post("/api/setup/web-login")
             self.assertEqual(r.status_code, 409)
         finally:
             server._login_thread = orig

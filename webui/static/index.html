@@ -43,7 +43,7 @@
     display: flex; align-items: center; gap: 14px;
     padding: 0 20px;
     border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, #10151f, #0d1119);
+    background: linear-gradient(180deg, #0b0e14, #0d1119);
     position: relative; z-index: 5;
   }
   .logo {
@@ -167,18 +167,39 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cfg-cell .v.on { color: var(--green); }
   .cfg-cell .v.off { color: var(--muted); font-weight: 400; }
-
-  /* 配置速览：设置行（标签 + 控件 + 应用按钮） */
-  .model-pick { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 12px; }
-  .set-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 9px; }
-  .set-row:last-child { margin-bottom: 0; }
-  .mp-k { flex: 0 0 100%; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
-  .model-pick select {
-    flex: 1; min-width: 0; padding: 6px 8px; border-radius: 7px;
+  /* 设置弹窗（通用设置 + 工作设置）：分组设置行 */
+  .settings-modal { width: min(640px, 100%); }
+  .settings-body {
+    flex: 1; overflow-y: auto; padding: 4px 20px 16px;
+    font-size: 13px; line-height: 1.6;
+  }
+  .st-group { padding: 14px 0 2px; border-bottom: 1px solid var(--border); }
+  .st-group:last-child { border-bottom: none; }
+  .st-title {
+    font-size: 11px; font-weight: 700; color: var(--muted);
+    letter-spacing: 2px; text-transform: uppercase; margin-bottom: 12px;
+  }
+  .st-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 12px; }
+  .st-row:last-child { margin-bottom: 4px; }
+  .st-k { flex: 0 0 96px; font-size: 12.5px; color: var(--muted); }
+  .st-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .st-ctl select, .st-ctl input[type="number"] {
+    padding: 6px 9px; border-radius: 7px;
     border: 1px solid var(--border); background: var(--panel-2);
     color: var(--text); font-size: 12.5px; font-family: inherit;
   }
-  .model-pick select:focus { outline: none; border-color: var(--accent); }
+  .st-ctl select:focus, .st-ctl input[type="number"]:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .st-ctl #providerSel, .st-ctl #modelSel { flex: 1 1 120px; min-width: 0; }
+  .st-d { flex: 0 0 100%; font-size: 11px; color: var(--muted); margin: -6px 0 0 106px; }
+  .tun-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; margin-bottom: 6px; }
+  .tun-row input[type="number"] { width: 92px; }
+  .tun-k { font-size: 12.5px; min-width: 80px; }
+  .tun-hint { font-size: 11px; color: var(--muted); }
+  .set-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 9px; }
+  .set-row:last-child { margin-bottom: 0; }
+  .mp-k { flex: 0 0 100%; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
   select { font-family: inherit; }
   input[type="text"], input[type="number"] { font-family: inherit; }
   .seg { display: inline-flex; border-radius: 8px; overflow: hidden;
@@ -194,15 +215,6 @@
     background: rgba(99,102,241,0.18); color: var(--text);
   }
   .seg-opt input { display: none; }
-  /* 采集行控件 */
-  .model-pick input[type="text"], .model-pick input[type="number"] {
-    padding: 6px 9px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    color: var(--text); font-size: 12.5px; font-family: inherit;
-  }
-  .model-pick input[type="text"] { flex: 1; min-width: 0; }
-  .model-pick input[type="text"]:focus, .model-pick input[type="number"]:focus,
-  .model-pick select:focus { outline: none; border-color: var(--accent); }
   .btn-model { flex: none; }
   .mp-note { font-size: 11px; color: var(--muted); line-height: 1.6; }
 
@@ -412,6 +424,30 @@
   }
   .setup-err { color: var(--red); font-size: 12px; }
   .setup-ok { color: var(--green); font-size: 12px; }
+  /* 生成方式选择卡片（引导第 2 步） */
+  .mode-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0 0 31px; }
+  @media (max-width: 760px) { .mode-pick { grid-template-columns: 1fr; } }
+  .mode-card {
+    display: block; padding: 11px 13px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    cursor: pointer; user-select: none;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .mode-card:hover { border-color: #3b4d74; }
+  .mode-card.sel { border-color: var(--accent); background: rgba(99,102,241,0.12); }
+  .mode-card .mc-t { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13.5px; }
+  .mode-card .mc-d { color: var(--muted); font-size: 11.5px; margin: 2px 0 8px; }
+  .mode-card .mc-ctl { display: none; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .mode-card.sel .mc-ctl { display: flex; }
+  .mode-card .mc-ctl input[type="password"], .mode-card .mc-ctl select {
+    padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    color: var(--text); font-size: 13px;
+  }
+  .mode-card .mc-ctl input[type="password"] { flex: 1; min-width: 180px; }
+  .mode-card .mc-msg { width: 100%; }
+  .mode-card.done { border-color: #24503f; }
+  .mode-card.done .mc-d { color: var(--green); }
   .setup-foot {
     padding: 14px 20px; border-top: 1px solid var(--border);
     display: flex; justify-content: flex-end; gap: 10px;
@@ -432,7 +468,7 @@
 <header>
   <div class="logo"><span class="feather">✒️</span>Auto<em>Quill</em></div>
   <div class="top-right">
-    <button class="btn ghost" id="btnSetup" title="首次使用引导（Edge / API Key / 知乎登录）" style="display:none">设置</button>
+    <button class="btn ghost" id="btnSetup" title="设置（生成方式 / 模型 / 浏览器 / 参数 / 首启引导）">设置</button>
     <button class="btn ghost" id="btnUpdate" title="检查 GitHub 是否有新版本">检查更新</button>
     <div id="statusPill" class="status-pill"><span class="dot"></span><span id="statusText">空闲</span></div>
   </div>
@@ -453,20 +489,33 @@
           <button class="btn primary" id="btnEdgeOk">我已安装 Edge，重新检测</button>
         </div>
       </div>
-      <div class="setup-step" id="stepKey">
-        <div class="s-title"><span class="s-badge">2</span>配置 API Key（故事生成使用）</div>
+      <div class="setup-step" id="stepMode">
+        <div class="s-title"><span class="s-badge">2</span>选择故事生成方式（可随时在控制台切换）</div>
         <div class="s-desc">
-          Key 仅保存在本机 <code>%APPDATA%\AutoQuill\config\llm_providers.json</code>，
-          不会上传。模型生成也支持免费的「Web 网页版」通道，可在控制台随时切换。
+          推荐选「Web 网页版」：免费，需要登录一次 DeepSeek；「API」更稳定快速，需付费 key。
+          已配置的方式会显示为完成状态。
         </div>
-        <div class="s-ctl">
-          <select id="setupProviderSel"></select>
-          <input type="password" id="setupApiKey" placeholder="粘贴 API Key（sk-…）" autocomplete="off">
-          <button class="btn primary" id="btnKeySave">保存并测试连接</button>
-        </div>
-        <div class="s-ctl" style="margin-top:6px">
-          <span class="setup-err" id="keyErr"></span>
-          <span class="setup-ok" id="keyOk"></span>
+        <div class="mode-pick">
+          <label class="mode-card" id="mcApi">
+            <div class="mc-t">🔑 API 直接调用</div>
+            <div class="mc-d">付费、响应快。DeepSeek 开放平台申请 API Key。</div>
+            <div class="mc-ctl">
+              <select id="setupProviderSel"></select>
+              <input type="password" id="setupApiKey" placeholder="粘贴 API Key（sk-…）" autocomplete="off">
+              <button class="btn primary" id="btnKeySave">保存并测试连接</button>
+              <span class="setup-err mc-msg" id="keyErr"></span>
+              <span class="setup-ok mc-msg" id="keyOk"></span>
+            </div>
+          </label>
+          <label class="mode-card" id="mcWeb">
+            <div class="mc-t">🌐 Web 网页版</div>
+            <div class="mc-d">免费。登录 chat.deepseek.com 后由浏览器自动操作。</div>
+            <div class="mc-ctl">
+              <button class="btn primary" id="btnWebLogin">打开 Edge 登录 DeepSeek</button>
+              <span class="setup-err mc-msg" id="webErr"></span>
+              <span class="setup-ok mc-msg" id="webOk"></span>
+            </div>
+          </label>
         </div>
       </div>
       <div class="setup-step" id="stepZhihu">
@@ -515,43 +564,7 @@
     <div class="card">
       <h2><span class="badge">⚙</span>配置速览</h2>
       <div class="cfg-grid" id="cfgGrid"><div class="empty-note">加载中…</div></div>
-      <div class="model-pick" id="modelPick" hidden>
-        <div class="set-row">
-          <span class="mp-k">故事模型（运行时切换，下次生成立即生效）</span>
-          <select id="providerSel"></select>
-          <select id="modelSel"></select>
-          <button class="btn primary btn-model" id="modelApply">应用</button>
-        </div>
-        <div class="set-row">
-          <span class="mp-k">生成通道</span>
-          <span class="seg">
-            <label class="seg-opt"><input type="radio" name="genMode" value="api">API（付费，快）</label>
-            <label class="seg-opt"><input type="radio" name="genMode" value="web">Web 网页版（免费）</label>
-          </span>
-          <button class="btn primary btn-model" id="modeApply">应用</button>
-        </div>
-        <div class="set-row" id="webPresetRow" hidden>
-          <span class="mp-k">网页模式预设（深度思考）</span>
-          <select id="webPresetSel">
-            <option value="fast">快速 + 深度思考 + 智能搜索</option>
-            <option value="expert">专家 + 深度思考</option>
-          </select>
-          <button class="btn primary btn-model" id="webPresetApply">应用</button>
-        </div>
-        <div class="set-row">
-          <span class="mp-k">浏览器模式</span>
-          <span class="seg">
-            <label class="seg-opt"><input type="radio" name="browserMode" value="false">前台（调试可观察）</label>
-            <label class="seg-opt"><input type="radio" name="browserMode" value="true">无头（不打扰工作）</label>
-          </span>
-          <button class="btn primary btn-model" id="browserApply">应用</button>
-        </div>
-        <div class="set-row">
-          <span class="mp-k">作者文风</span>
-          <select id="authorSel"><option value="">（加载中…）</option></select>
-          <button class="btn primary btn-model" id="authorApply" disabled>应用</button>
-        </div>
-      </div>
+      <div class="mp-note" style="margin-top:8px">详细设置（模型 / 生成方式 / 浏览器 / 参数）见右上角「设置」</div>
     </div>
 
     <div class="card">
@@ -673,6 +686,77 @@
   </div>
 </div>
 
+<!-- 设置弹窗（通用设置 + 工作设置） -->
+<div class="modal-mask" id="settingsMask">
+  <div class="modal settings-modal">
+    <div class="modal-head">
+      <span class="n">⚙ 设置</span>
+      <button class="close" id="settingsClose">关闭</button>
+    </div>
+    <div class="settings-body">
+      <div class="st-group">
+        <div class="st-title">通用设置</div>
+        <div class="st-row" id="modelRow" hidden>
+          <div class="st-k">故事模型</div>
+          <div class="st-ctl">
+            <select id="providerSel"></select>
+            <select id="modelSel"></select>
+            <button class="btn sm" id="modelApply">应用</button>
+          </div>
+          <div class="st-d" id="modelNote"></div>
+        </div>
+        <div class="st-row">
+          <div class="st-k">生成通道</div>
+          <div class="st-ctl">
+            <span class="seg">
+              <label class="seg-opt"><input type="radio" name="genMode" value="api">API（付费，快）</label>
+              <label class="seg-opt"><input type="radio" name="genMode" value="web">Web 网页版（免费）</label>
+            </span>
+            <button class="btn sm" id="modeApply">应用</button>
+          </div>
+          <div class="st-d">未配置的通道首次切换时会弹出引导完成配置</div>
+        </div>
+        <div class="st-row" id="webPresetRow" hidden>
+          <div class="st-k">网页预设</div>
+          <div class="st-ctl">
+            <select id="webPresetSel">
+              <option value="fast">快速 + 深度思考 + 智能搜索</option>
+              <option value="expert">专家 + 深度思考</option>
+            </select>
+            <button class="btn sm" id="webPresetApply">应用</button>
+          </div>
+          <div class="st-d">仅 Web 网页版通道生效</div>
+        </div>
+        <div class="st-row">
+          <div class="st-k">浏览器模式</div>
+          <div class="st-ctl">
+            <span class="seg">
+              <label class="seg-opt"><input type="radio" name="browserMode" value="false">前台（调试可观察）</label>
+              <label class="seg-opt"><input type="radio" name="browserMode" value="true">无头（不打扰工作）</label>
+            </span>
+            <button class="btn sm" id="browserApply">应用</button>
+          </div>
+        </div>
+      </div>
+      <div class="st-group">
+        <div class="st-title">工作设置</div>
+        <div class="st-row">
+          <div class="st-k">作者文风</div>
+          <div class="st-ctl">
+            <select id="authorSel"><option value="">（加载中…）</option></select>
+            <button class="btn sm" id="authorApply" disabled>应用</button>
+          </div>
+          <div class="st-d">生成故事时注入所选作者的文风</div>
+        </div>
+        <div class="st-row">
+          <div class="st-k">选题参数</div>
+          <div class="st-ctl" id="tunableBox"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 
@@ -690,6 +774,7 @@ const CFG_LABELS = {
   QUESTION_SELECT_MODE: "选题模式",
   STORY_MATERIAL_MODE: "素材模式", AUTHOR_PROFILE: "作者风格",
   ENABLE_FORMAT_RETRY: "格式重试", MIN_ANSWER_LENGTH: "最短回答",
+  MAX_TOPIC_RETRY: "选题重试",
   ENABLE_STORY_FILTER: "故事过滤", ENABLE_MATERIAL_LIKES_GATE: "点赞门槛",
   MATERIAL_MIN_LIKES: "最低点赞", LONG_FORM_MODE: "长文模式",
   KB_ENABLE: "知识库",
@@ -901,6 +986,58 @@ async function openStory(name) {
 
 /* ---------- 配置速览 ---------- */
 
+/* 选题参数：前端可修改（POST /api/config，持久化到 webui_model.json），在设置弹窗中编辑 */
+const TUNABLE_KEYS = new Set(["MAX_TOPIC_RETRY", "MIN_ANSWER_LENGTH", "MATERIAL_MIN_LIKES"]);
+const TUNABLE_HINTS = {
+  MAX_TOPIC_RETRY: "首答不合格时最多重试次数（默认 5）",
+  MIN_ANSWER_LENGTH: "首答最短字数，低于则重试（默认 500）",
+  MATERIAL_MIN_LIKES: "素材最低点赞门槛（默认 200）",
+};
+
+function initTunables() {
+  const box = $("tunableBox");
+  box.innerHTML = "";
+  TUNABLE_KEYS.forEach((k) => {
+    const row = document.createElement("div");
+    row.className = "tun-row";
+    row.innerHTML =
+      `<span class="tun-k">${esc(CFG_LABELS[k] || k)}</span>` +
+      `<input type="number" id="tun_${k}" min="0" title="修改后立即生效，下次启动保留">` +
+      `<button class="btn sm">保存</button>` +
+      `<span class="tun-hint">${esc(TUNABLE_HINTS[k] || "")}</span>`;
+    const input = row.querySelector("input");
+    const btn = row.querySelector("button");
+    btn.addEventListener("click", () => saveTunable(k, input, btn));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveTunable(k, input, btn);
+    });
+    box.appendChild(row);
+  });
+}
+
+async function saveTunable(key, input, btn) {
+  const val = parseInt(input.value, 10);
+  if (!Number.isInteger(val)) { alert("请输入整数"); return; }
+  btn.disabled = true;
+  btn.textContent = "保存中";
+  try {
+    const r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, value: val }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
+    const d = await r.json();
+    addLog(`选题参数 ${CFG_LABELS[key] || key} → ${d.value}`, "result");
+    loadConfig();
+  } catch (e) {
+    alert("保存失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存";
+  }
+}
+
 async function loadConfig() {
   try {
     const r = await fetch("/api/config");
@@ -908,7 +1045,7 @@ async function loadConfig() {
     const grid = $("cfgGrid");
     grid.innerHTML = "";
     Object.entries(CFG_LABELS).forEach(([k, label]) => {
-      if (!(k in cfg)) return;
+      if (!(k in cfg) || TUNABLE_KEYS.has(k)) return;  // 可调参数在设置弹窗中编辑
       const v = cfg[k];
       const cls = (typeof v === "boolean") ? (v ? "on" : "off") : "";
       const txt = (typeof v === "boolean") ? (v ? "开" : "关") : String(v);
@@ -916,6 +1053,12 @@ async function loadConfig() {
       cell.className = "cfg-cell";
       cell.innerHTML = `<div class="k">${esc(label)}</div><div class="v ${cls}">${esc(txt)}</div>`;
       grid.appendChild(cell);
+    });
+    // 同步设置弹窗中的可调参数当前值
+    TUNABLE_KEYS.forEach((k) => {
+      if (!(k in cfg)) return;
+      const input = $("tun_" + k);
+      if (input) input.value = cfg[k];
     });
   } catch (e) {
     $("cfgGrid").innerHTML = '<div class="empty-note">配置加载失败</div>';
@@ -938,7 +1081,8 @@ async function loadModels() {
     modelProviders = data.providers;
     modelCurrent = data.current;
     if (!modelProviders.length) return;
-    $("modelPick").hidden = false;
+    $("modelRow").hidden = false;
+    providerSel.innerHTML = "";  // 重复加载（如保存 key 后）时先清空再填充
     modelProviders.forEach((p) => {
       const opt = document.createElement("option");
       opt.value = p.name;
@@ -980,22 +1124,51 @@ async function loadMode() {
   } catch (e) { /* 旧服务无 /api/mode，保持默认 */ }
 }
 
+/* 生成通道状态（setup/status 查询结果缓存，首次切换引导用） */
+let setupCache = null;
+async function fetchSetupStatus() {
+  try {
+    const r = await fetch("/api/setup/status");
+    setupCache = await r.json();
+  } catch (e) { setupCache = null; }
+}
+
 async function applyMode() {
   const sel = document.querySelector('input[name="genMode"]:checked');
   if (!sel || sel.value === genMode) return;
+  const target = sel.value;
   const btn = $("modeApply");
   btn.disabled = true;
   btn.textContent = "切换中…";
   try {
+    if (!setupCache) await fetchSetupStatus();
+    // 首次切换：目标通道未配置 → 弹引导遮罩并高亮对应卡片
+    if (setupCache) {
+      const missing = target === "web" ? !setupCache.web_llm_logged_in
+                                       : !setupCache.llm_configured;
+      if (missing && !setupCache.login_running) {
+        await loadSetupStatus();
+        $("setupMask").classList.add("show");
+        if (target === "web") {
+          $("mcApi").classList.remove("sel");
+          $("mcWeb").classList.add("sel");
+        } else {
+          $("mcWeb").classList.remove("sel");
+          $("mcApi").classList.add("sel");
+        }
+        return;  // 配置完成后由引导流程切通道
+      }
+    }
     const r = await fetch("/api/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: sel.value }),
+      body: JSON.stringify({ mode: target }),
     });
     if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
     const data = await r.json();
     genMode = data.effective.mode;
     loadConfig();
+    hideSetupWizard();
     addLog(`生成通道已切换 → ${genMode === "web" ? "Web 网页版" : "API"}`, "result");
   } catch (e) {
     alert("切换失败：" + e.message);
@@ -1415,7 +1588,7 @@ libMask.addEventListener("click", (e) => {
 /* ---------- 首启引导（Edge → API Key → 知乎登录） ---------- */
 
 let setupNeeded = false;
-let zhLoginTimer = null;
+let setupTimer = null;
 
 async function fillSetupProviders() {
   try {
@@ -1432,17 +1605,65 @@ async function fillSetupProviders() {
   } catch (e) { /* 服务不可用时保持空 */ }
 }
 
+async function setModeChoice(mode) {
+  try {
+    const r = await fetch("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    genMode = data.effective.mode;
+    document.querySelectorAll('input[name="genMode"]').forEach((el) => {
+      el.checked = (el.value === genMode);
+    });
+    loadConfig();
+  } catch (e) { /* 旧服务无 /api/mode */ }
+}
+
+/* 卡片选中状态：默认选中已配置的一方；都未配置时默认 Web（免费）。 */
+function selectModeCard(st) {
+  const mcApi = $("mcApi"), mcWeb = $("mcWeb");
+  mcApi.classList.toggle("sel", !!st.llm_configured && !st.web_llm_logged_in);
+  mcWeb.classList.toggle("sel", !mcApi.classList.contains("sel"));
+}
+
+function renderModeCardState(st) {
+  const mcApi = $("mcApi"), mcWeb = $("mcWeb");
+  mcApi.classList.toggle("done", !!st.llm_configured);
+  mcApi.querySelector(".mc-d").textContent =
+    st.llm_configured ? "✓ 已配置 API Key，可随时切换使用。" :
+    "付费、响应快。DeepSeek 开放平台申请 API Key。";
+  mcWeb.classList.toggle("done", !!st.web_llm_logged_in);
+  mcWeb.querySelector(".mc-d").textContent =
+    st.web_llm_logged_in ? "✓ 已登录 DeepSeek 网页版，可直接使用。" :
+    "免费。登录 chat.deepseek.com 后由浏览器自动操作。";
+  if (st.login_running && st.login_kind === "deepseek") {
+    const b = $("btnWebLogin");
+    b.disabled = true;
+    b.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
+    $("webErr").textContent = "";
+  } else {
+    $("btnWebLogin").disabled = false;
+    $("btnWebLogin").textContent = "打开 Edge 登录 DeepSeek";
+  }
+  if (st.login_error && st.login_kind === "deepseek") {
+    $("webErr").textContent = "登录未完成：" + st.login_error;
+  }
+}
+
 async function loadSetupStatus() {
   try {
     const r = await fetch("/api/setup/status");
     const st = await r.json();
+    setupCache = st;
     if (st.version) $("setupVersion").textContent = "v" + st.version;
     setupNeeded = !!st.setup_needed;
-    $("btnSetup").style.display = st.setup_needed ? "" : "none";
     if (!st.setup_needed) { hideSetupWizard(); return; }
 
     const edge = $("stepEdge");
-    const key = $("stepKey");
+    const mode = $("stepMode");
     const zhihu = $("stepZhihu");
 
     if (st.edge_ok) {
@@ -1458,16 +1679,12 @@ async function loadSetupStatus() {
     }
     edge.style.display = "";
 
-    if (st.llm_configured) {
-      key.classList.add("done");
-      key.querySelector(".s-badge").textContent = "✓";
-      key.querySelector(".s-ctl").style.display = "none";
-    } else {
-      key.classList.remove("done");
-      key.querySelector(".s-badge").textContent = "2";
-      key.querySelector(".s-ctl").style.display = "";
-    }
-    key.style.display = "";
+    const modeDone = st.llm_configured || st.web_llm_logged_in;
+    mode.classList.toggle("done", modeDone);
+    mode.querySelector(".s-badge").textContent = modeDone ? "✓" : "2";
+    mode.style.display = "";
+    renderModeCardState(st);
+    selectModeCard(st);
 
     if (st.zhihu_logged_in) {
       zhihu.classList.add("done");
@@ -1480,16 +1697,22 @@ async function loadSetupStatus() {
       zhihu.querySelector(".s-ctl").style.display = "";
       $("stepZhihuDesc").innerHTML =
         "用于采集素材与发布草稿。点击后弹出 Edge 窗口，扫码或短信登录即可，检测到登录会自动保存。";
-      if (st.login_running) {
+      if (st.login_running && st.login_kind === "zhihu") {
         $("btnZhihuLogin").disabled = true;
         $("btnZhihuLogin").textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
+      } else {
+        $("btnZhihuLogin").disabled = false;
+        $("btnZhihuLogin").textContent = "打开 Edge 登录知乎";
       }
-      if (st.login_error) $("zhihuErr").textContent = "登录未完成：" + st.login_error;
+      if (st.login_error && st.login_kind === "zhihu") {
+        $("zhihuErr").textContent = "登录未完成：" + st.login_error;
+      }
     }
     zhihu.style.display = "";
 
     $("setupMask").classList.add("show");
-    const allDone = st.edge_ok && st.llm_configured && st.zhihu_logged_in;
+    const allDone = st.edge_ok && st.zhihu_logged_in
+      && (st.llm_configured || st.web_llm_logged_in);
     if (allDone) hideSetupWizard();
     return st;
   } catch (e) { /* 旧服务无 setup 端点 */ }
@@ -1497,24 +1720,47 @@ async function loadSetupStatus() {
 
 function hideSetupWizard() {
   $("setupMask").classList.remove("show");
-  if (zhLoginTimer) { clearInterval(zhLoginTimer); zhLoginTimer = null; }
+  if (setupTimer) { clearInterval(setupTimer); setupTimer = null; }
 }
 
 async function pollSetupStatus() {
   try {
     const st = await loadSetupStatus();
-    if (st && !st.login_running && !st.zhihu_logged_in) {
-      $("btnZhihuLogin").disabled = false;
-      $("btnZhihuLogin").textContent = "打开 Edge 登录知乎";
-    }
-    if (st && st.zhihu_logged_in) {
+    if (st && st.setup_needed) {
+      if (!st.login_running) {
+        $("btnZhihuLogin").disabled = false;
+        $("btnZhihuLogin").textContent = "打开 Edge 登录知乎";
+      }
+    } else if (st && !st.setup_needed) {
       hideSetupWizard();
     }
   } catch (e) { /* ignore */ }
 }
 
-$("btnSetup").addEventListener("click", loadSetupStatus);
+$("btnSetup").addEventListener("click", () => {
+  // 首次引导未完成 → 打开引导向导；已完成 → 打开设置弹窗
+  if (setupNeeded) { loadSetupStatus(); return; }
+  $("settingsMask").classList.add("show");
+  loadConfig(); loadMode(); loadBrowserMode(); loadWebPreset(); loadAuthors();
+});
+
+$("settingsClose").addEventListener("click", () => $("settingsMask").classList.remove("show"));
+$("settingsMask").addEventListener("click", (e) => {
+  if (e.target === $("settingsMask")) $("settingsMask").classList.remove("show");
+});
+
 $("btnSetupFinish").addEventListener("click", hideSetupWizard);
+
+$("mcApi").addEventListener("click", () => {
+  if (!$("setupApiKey").value && !$("mcApi").classList.contains("done")) {
+    $("setupApiKey").focus();
+  }
+});
+$("mcWeb").addEventListener("click", () => {
+  if (!$("mcWeb").classList.contains("done")) {
+    $("btnWebLogin").focus();
+  }
+});
 
 /* ---------- 检查更新 ---------- */
 
@@ -1574,6 +1820,7 @@ $("btnKeySave").addEventListener("click", async () => {
     if (td.ok) {
       $("keyOk").textContent = "已保存，连接测试成功：" + td.detail;
       $("setupApiKey").value = "";
+      await setModeChoice("api");
       loadSetupStatus();
       loadModels(); loadConfig();
     } else {
@@ -1588,6 +1835,25 @@ $("btnKeySave").addEventListener("click", async () => {
   }
 });
 
+$("btnWebLogin").addEventListener("click", async () => {
+  const btn = $("btnWebLogin");
+  btn.disabled = true;
+  btn.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
+  $("webErr").textContent = "";
+  $("webOk").textContent = "";
+  try {
+    const r = await fetch("/api/setup/web-login", { method: "POST" });
+    if (!r.ok) throw new Error((await r.json()).detail || "启动失败");
+    await setModeChoice("web");
+    if (setupTimer) clearInterval(setupTimer);
+    setupTimer = setInterval(pollSetupStatus, 2500);
+  } catch (e) {
+    $("webErr").textContent = e.message;
+    btn.disabled = false;
+    btn.textContent = "打开 Edge 登录 DeepSeek";
+  }
+});
+
 $("btnZhihuLogin").addEventListener("click", async () => {
   const btn = $("btnZhihuLogin");
   btn.disabled = true;
@@ -1597,8 +1863,8 @@ $("btnZhihuLogin").addEventListener("click", async () => {
   try {
     const r = await fetch("/api/setup/zhihu-login", { method: "POST" });
     if (!r.ok) throw new Error((await r.json()).detail || "启动失败");
-    if (zhLoginTimer) clearInterval(zhLoginTimer);
-    zhLoginTimer = setInterval(pollSetupStatus, 2500);
+    if (setupTimer) clearInterval(setupTimer);
+    setupTimer = setInterval(pollSetupStatus, 2500);
   } catch (e) {
     $("zhihuErr").textContent = e.message;
     btn.disabled = false;
@@ -1725,6 +1991,7 @@ $("modalMask").addEventListener("click", (e) => {
 });
 
 (async () => {
+  initTunables();
   loadConfig();
   loadModels();
   loadMode();

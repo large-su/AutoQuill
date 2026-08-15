@@ -371,10 +371,6 @@ def main():
         run_web()
         return
 
-    from desktop_utils import (
-        focus_edge, take_screenshot, calibrate_mode,
-    )
-
     select_str = "手动" if QUESTION_SELECT_MODE == "manual" else "自动"
     llm_str = "API 流式" if LLM_MODE == "api" else "浏览器"
     filter_str = "开" if ENABLE_STORY_FILTER else "关"
@@ -388,9 +384,6 @@ def main():
     ║                                              ║
     ║  无参数      批量模式（默认）                ║
     ║  --single    传统模式（逐轮生成即发布）      ║
-    ║  --calibrate 校准坐标                        ║
-    ║  --test-ocr  测试 OCR                        ║
-    ║  --debug-ocr-region  进入回答页并标注 OCR 区域║
     ║  --test-api  测试 API 连接                   ║
     ║  --image-gen 图像生成模式                    ║
     ║  --headless  浏览器无头运行（工作模式）       ║
@@ -424,23 +417,6 @@ def main():
     print()
 
     # CLI 命令分发
-    if '--calibrate' in sys.argv:
-        calibrate_mode()
-        return
-    if any(flag in sys.argv for flag in
-           ('--test-ocr', '--debug-ocr-region', '--probe-a11y')):
-        # OCR/UIA 时代调试命令已移入 tools/debug_legacy.py
-        from tools.debug_legacy import (
-            debug_ocr_region_mode, probe_a11y_mode, test_ocr_mode)
-        if '--test-ocr' in sys.argv:
-            test_ocr_mode()
-            return
-        if '--debug-ocr-region' in sys.argv:
-            debug_ocr_region_mode()
-            return
-        if '--probe-a11y' in sys.argv:
-            probe_a11y_mode(sys.argv)
-            return
     if '--test-api' in sys.argv:
         from llm_api import test_api_connection
         test_api_connection()

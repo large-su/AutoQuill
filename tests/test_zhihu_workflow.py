@@ -30,10 +30,20 @@ class TestZhihuWorkflowDomOnly(unittest.TestCase):
     def test_imports_browser_adapter_only(self):
         with open("workflows/zhihu.py", encoding="utf-8") as f:
             src = f.read()
-        # 允许 get_browser；桌面通道只允许出现在 UIA/OCR 降级函数里
+        # 允许 get_browser；workflow 不允许出现任何桌面/OCR 通道代码
         self.assertIn("get_browser", src)
-        main_part = src.split("def _extract_answer_with_fallback")[0]
-        self.assertNotIn("desktop_utils", main_part)
+        self.assertNotIn("desktop_utils", src)
+        self.assertNotIn("ocr_utils", src)
+
+    def test_no_uia_ocr_fallback(self):
+        # ★ V4.0.2：UIA/OCR 屏幕降级通道已移除，workflow 纯 DOM
+        with open("workflows/zhihu.py", encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("_extract_answer_with_fallback", src)
+        self.assertNotIn("UiaAnswerExtractor", src)
+        self.assertNotIn("OcrAnswerExtractor", src)
+        self.assertNotIn("FallbackAnswerExtractor", src)
+        self.assertNotIn("load_coords", src)
 
 
 class TestMaterialLikesGate(unittest.TestCase):
@@ -115,16 +125,16 @@ class TestMaterialLikesGate(unittest.TestCase):
         self.assertNotIn("ENABLE_MATERIAL_LIKES_GATE", src)  # 判定已收敛到 helper
 
     def test_degradation_log_counts_gate_rejects(self):
-        # ★ 诊断性回归：重试耗尽降级 UIA/OCR 时，日志必须带
+        # ★ 诊断性回归：重试耗尽报错时，错误信息必须带
         #   点赞门槛拒绝次数（「其中 N 次被点赞门槛拒绝」），
         #   否则用户无法区分「门槛卡死」与「答案质量问题」。
         src = inspect.getsource(self.wf.extract_content)
         self.assertIn("gate_reject_count = 0", src)
         self.assertIn("gate_reject_count += 1", src)
         self.assertIn("gate_reject_count} 次被点赞门槛拒绝", src)
-        # 计数在 DOM 重试循环内累加，先累计后降级
+        # 计数在 DOM 重试循环内累加，重试耗尽后随错误信息抛出
         self.assertLess(src.index("gate_reject_count += 1"),
-                        src.index("降级 UIA/OCR 屏幕通道"))
+                        src.index("raise RuntimeError"))
 
 
 class TestZhihuWorkflowSemantics(unittest.TestCase):
@@ -204,19 +214,27 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
         self.assertIn("get_primary_answer", src)   # DOM 提取首答
         self.assertIn("normalize_question_url", src)
 
-    def test_extract_has_fallback_but_dom_is_first(self):
+    def test_extract_no_fallback_after_retry_exhausted(self):
         src = self._src("extract_content")
-        # DOM 主通道在前，UIA/OCR 降级在后
-        self.assertLess(src.index("get_primary_answer"),
-                        src.index("_extract_answer_with_fallback"))
+        # DOM 主通道在前；重试耗尽直接报错（无任何降级）
+        self.assertIn("get_primary_answer", src)
+        self.assertNotIn("_extract_answer_with_fallback", src)
+        self.assertIn("raise RuntimeError", src)
 
     def test_extract_retopics_on_short_answer(self):
-        # 首答过短/不可回答时重新选题再试，而不是直接降级 OCR
-        # （本机 OCR 未校准，降级即崩溃）
+        # 首答过短/不可回答时重新选题再试（MAX_TOPIC_RETRY 次），
+        # 参数来自 config.story（前端可配）
         src = self._src("extract_content")
         self.assertIn("select_topic", src)
         self.assertIn("MAX_TOPIC_RETRY", src)
         self.assertIn("MIN_ANSWER_LENGTH", src)
+        # 从 config.story 读取（单一事实来源），不硬编码次数
+        self.assertIn("from config.story import", src)
+
+    def test_topic_retry_default_is_five(self):
+        # 用户需求：选题重试 3 → 5（总尝试 6 次）
+        from config import story
+        self.assertEqual(story.MAX_TOPIC_RETRY, 5)
 
     def test_extract_returns_final_url_for_publish(self):
         # ★ 回归：不可回答重选题后，必须返回最终实际提取问题的 URL。
