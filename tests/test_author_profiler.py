@@ -266,6 +266,110 @@ class TestProfileProgress(unittest.TestCase):
                          "样本不足不应进入剖析阶段")
 
 
+class TestProfileLlmDispatch(unittest.TestCase):
+    """_call_profile_llm 通道分发：API 流式 / Web 驱动（V4.1.2 新增）。"""
+
+    def test_api_streaming_uses_kb_config_and_temperature(self):
+        from applications.zhihu_story import author_profiler as ap
+        with mock.patch("config.KB_LLM_API_KEY", "kb-key", create=True), \
+             mock.patch("config.KB_LLM_BASE_URL", "kb-url", create=True), \
+             mock.patch("config.KB_LLM_MODEL", "kb-model", create=True):
+            captured = {}
+            def _fake(prompt, max_tokens, temperature, api_key, base_url,
+                      model, on_chunk, label):
+                captured.update(prompt=prompt, max_tokens=max_tokens,
+                                temperature=temperature, api_key=api_key,
+                                base_url=base_url, model=model, label=label)
+                return '{"style": "短句"}', 3.0, None
+            with mock.patch("llm_client._call_llm_streaming",
+                            side_effect=_fake):
+                reply = ap._call_profile_llm_api("剖析prompt", 20000)
+        self.assertEqual(reply, '{"style": "短句"}')
+        self.assertEqual(captured["temperature"], 0.3)
+        self.assertEqual(captured["max_tokens"], 20000)
+        self.assertEqual(captured["api_key"], "kb-key")
+        self.assertEqual(captured["base_url"], "kb-url")
+        self.assertEqual(captured["model"], "kb-model")
+
+    def test_api_streaming_falls_back_to_root_config(self):
+        from applications.zhihu_story import author_profiler as ap
+        with mock.patch("config.KB_LLM_API_KEY", None, create=True), \
+             mock.patch("config.KB_LLM_BASE_URL", None, create=True), \
+             mock.patch("config.KB_LLM_MODEL", None, create=True), \
+             mock.patch("config.LLM_API_KEY", "root-key"):
+            captured = {}
+            def _fake(prompt, max_tokens, temperature, api_key, base_url,
+                      model, on_chunk, label):
+                captured["api_key"] = api_key
+                return '{"style": "短句"}', 3.0, None
+            with mock.patch("llm_client._call_llm_streaming",
+                            side_effect=_fake):
+                ap._call_profile_llm_api("p", 20000)
+        self.assertEqual(captured["api_key"], "root-key")
+
+    def test_api_streaming_error_returns_none(self):
+        from applications.zhihu_story import author_profiler as ap
+        with mock.patch("llm_client._call_llm_streaming",
+                        return_value=("", 3.0, "超时：连接超时")):
+            self.assertIsNone(ap._call_profile_llm_api("p", 20000))
+
+    def test_web_channel_uses_driver_generate(self):
+        from applications.zhihu_story import author_profiler as ap
+        drv = mock.Mock()
+        drv.generate.return_value = '{"style": "短句"}'
+        with mock.patch("web_drivers.get_driver", return_value=drv):
+            reply = ap._call_profile_llm_web("剖析prompt")
+        self.assertEqual(reply, '{"style": "短句"}')
+        drv.generate.assert_called_once_with("剖析prompt")
+
+    def test_web_channel_driver_error_returns_none(self):
+        from applications.zhihu_story import author_profiler as ap
+        drv = mock.Mock()
+        drv.generate.side_effect = RuntimeError("浏览器崩溃")
+        with mock.patch("web_drivers.get_driver", return_value=drv):
+            self.assertIsNone(ap._call_profile_llm_web("p"))
+
+    def test_once_dispatches_by_llm_mode(self):
+        from applications.zhihu_story import author_profiler as ap
+        from config import LLM_MODE, set_runtime_mode
+        try:
+            set_runtime_mode("api", persist=False)
+            with mock.patch.object(ap, "_call_profile_llm_api",
+                                   return_value="api-reply") as api_m, \
+                 mock.patch.object(ap, "_call_profile_llm_web",
+                                   return_value="web-reply") as web_m:
+                self.assertEqual(ap._call_profile_llm_once("p", 100),
+                                 "api-reply")
+            api_m.assert_called_once()
+            web_m.assert_not_called()
+
+            set_runtime_mode("web", persist=False)
+            with mock.patch.object(ap, "_call_profile_llm_api",
+                                   return_value="api-reply") as api_m2, \
+                 mock.patch.object(ap, "_call_profile_llm_web",
+                                   return_value="web-reply") as web_m2:
+                self.assertEqual(ap._call_profile_llm_once("p", 100),
+                                 "web-reply")
+            api_m2.assert_not_called()
+            web_m2.assert_called_once()
+        finally:
+            set_runtime_mode(LLM_MODE, persist=False)
+
+    def test_retries_once_then_returns_none(self):
+        from applications.zhihu_story import author_profiler as ap
+        with mock.patch.object(ap, "_call_profile_llm_once",
+                               return_value="不是JSON") as once:
+            self.assertIsNone(ap._call_profile_llm("剖析prompt"))
+        self.assertEqual(once.call_count, 2)
+
+    def test_api_missing_key_returns_none(self):
+        from applications.zhihu_story import author_profiler as ap
+        # KB 专属 key 也可能已配置（原 kb_manager 语义），须一并置空
+        with mock.patch("config.KB_LLM_API_KEY", None, create=True), \
+             mock.patch("config.LLM_API_KEY", ""):
+            self.assertIsNone(ap._call_profile_llm_api("p", 20000))
+
+
 class TestSaveLoadProfile(unittest.TestCase):
     def test_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

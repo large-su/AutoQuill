@@ -471,20 +471,94 @@ def _parse_profile_json(text):
 
 
 def _call_profile_llm(prompt, max_tokens=20000):
-    """调用 LLM 剖析。复用 kb_manager._call_llm；JSON 解析失败重试一次。
+    """调用 LLM 剖析，按生成通道（LLM_MODE）分发；JSON 解析失败重试一次。
+
+    API 通道：流式调用（思维链/正文阶段持续打心跳日志，webui 前端
+    实时显示字符数，不再「卡住无反馈」）。
+    Web 通道：复用 DeepSeek 网页版驱动（wait_complete 自带双阶段心跳）。
 
     注意：DeepSeek v4 系列是推理模型，思维链（reasoning_content）会先
     消耗输出预算，故 max_tokens 需远大于产出文本量，否则 content 为空。
     """
-    from kb_manager import _call_llm
     for attempt in (1, 2):
-        reply = _call_llm(prompt, max_tokens=max_tokens, temperature=0.3)
+        reply = _call_profile_llm_once(prompt, max_tokens)
         profile = _parse_profile_json(reply)
         if profile:
             return profile
         log.warning("author_profiler: 第 %d 次剖析结果解析失败（重试）", attempt)
         time.sleep(2)
     return None
+
+
+def _call_profile_llm_once(prompt, max_tokens):
+    """单次剖析：API 通道流式 / Web 通道网页版驱动。返回原始文本或 None。"""
+    from config import LLM_MODE
+    if LLM_MODE == "web":
+        return _call_profile_llm_web(prompt)
+    return _call_profile_llm_api(prompt, max_tokens)
+
+
+def _resolve_profile_llm_config():
+    """剖析用 LLM 配置：KB 专属配置优先，回退根 config（与 kb_manager 同语义）。"""
+    from config import LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
+    try:
+        from config import KB_LLM_API_KEY as _kb_key
+    except ImportError:
+        _kb_key = None
+    try:
+        from config import KB_LLM_BASE_URL as _kb_url
+    except ImportError:
+        _kb_url = None
+    try:
+        from config import KB_LLM_MODEL as _kb_model
+    except ImportError:
+        _kb_model = None
+    return (_kb_key or LLM_API_KEY, _kb_url or LLM_API_BASE_URL,
+            _kb_model or LLM_API_MODEL)
+
+
+def _call_profile_llm_api(prompt, max_tokens):
+    """API 通道剖析（流式）：思维链心跳由 llm_client 统一输出，正文输出
+    按累计 2000 字符打心跳，前端进度条全程可见（不再静默数分钟）。"""
+    from llm_client import _call_llm_streaming
+    api_key, base_url, model = _resolve_profile_llm_config()
+    if not api_key or api_key == "密":
+        log.error("author_profiler: API Key 未配置（剖析依赖生成通道配置）")
+        return None
+
+    # ★ 展示累计总量而非窗口计数：窗口计数会反复显示 ~2000，观感卡住
+    heartbeat = {"n": 0, "total": 0}
+
+    def _on_chunk(c):
+        heartbeat["n"] += len(c)
+        heartbeat["total"] += len(c)
+        if heartbeat["n"] >= 2000:
+            log.info("模型思考中… 已思考 %d 字符", heartbeat["total"])
+            heartbeat["n"] = 0
+
+    full_content, _elapsed, error = _call_llm_streaming(
+        prompt, max_tokens=max_tokens, temperature=0.3,
+        api_key=api_key, base_url=base_url, model=model,
+        on_chunk=_on_chunk, label="剖析",
+    )
+    if error:
+        log.error("author_profiler: 剖析 API 调用失败：%s", error)
+        return None
+    return full_content
+
+
+def _call_profile_llm_web(prompt):
+    """Web 通道剖析：复用 DeepSeek 网页版驱动完整生成流程。
+
+    generate() 内部 wait_complete 自带双阶段心跳（思考/正文字符数），
+    webui 前端进度条自动激活，与故事生成观感一致。
+    """
+    from web_drivers import get_driver
+    try:
+        return get_driver().generate(prompt)
+    except Exception as exc:
+        log.error("author_profiler: 网页版剖析失败：%s", exc)
+        return None
 
 
 def _report(progress, text, pct=None):

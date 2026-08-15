@@ -21,7 +21,8 @@ log = logging.getLogger(__name__)
 
 
 def _call_llm_streaming(user_message, max_tokens, temperature=None,
-                         on_chunk=None, label="LLM"):
+                         on_chunk=None, label="LLM",
+                         api_key=None, base_url=None, model=None):
     """
     通用的流式 chat.completions 调用。
 
@@ -33,6 +34,8 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
                       若为 None：不打印不回调（静默累积）；
                       若为 sys.stdout.write：实时打印到终端。
         label:        日志标签
+        api_key/base_url/model: 显式覆盖（None → config 根配置）。
+                      供文风剖析等复用 KB 专属配置（kb_manager 语义）。
 
     返回：(full_content: str, elapsed: float, error: str or None)
     """
@@ -42,6 +45,12 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
         LLM_API_FREQUENCY_PENALTY, LLM_API_PRESENCE_PENALTY,
         LLM_API_EXTRA_BODY,
     )
+    if api_key is not None:
+        LLM_API_KEY = api_key
+    if base_url is not None:
+        LLM_API_BASE_URL = base_url
+    if model is not None:
+        LLM_API_MODEL = model
     try:
         from config import (
             LLM_API_CONNECT_TIMEOUT, LLM_API_STREAM_READ_TIMEOUT,
@@ -86,6 +95,10 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
         'last_content_at': None,
         'timeout_reason': None,
     }
+    # 思维链心跳：推理模型（deepseek-v4 等）先流 reasoning_content 再流
+    # content，思维链期间无 on_chunk 回调，前端进度条与 server watchdog
+    # 都依赖此心跳（否则长思维链被误判卡死）
+    _reasoning = {"n": 0, "total": 0}
 
     try:
         response = requests.post(
@@ -158,6 +171,12 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
                         log.info(f"  {label}：收到首个 token（等待 "
                                  f"{now - stream_started:.1f}s），开始输出")
                     stream_state['last_content_at'] = now
+                    _reasoning["n"] += len(delta["reasoning_content"])
+                    _reasoning["total"] += len(delta["reasoning_content"])
+                    if _reasoning["n"] >= 400:
+                        log.info(f"  {label}：模型思考中… "
+                                 f"已思考 {_reasoning['total']} 字符")
+                        _reasoning["n"] = 0
                     continue
                 content = delta.get("content", "")
                 if content:
