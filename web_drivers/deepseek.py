@@ -378,26 +378,6 @@ class DeepSeekDriver(WebLLMDriver):
         """思考容器是否存在（深度思考开启时思考中/结束后均存在）。"""
         return bool(self._probe_selectors(_THINK_SELECTORS, attr="tagName")[0])
 
-    def _click_button_by_text(self, label):
-        """按可见文本点击开关（模式开关用）。
-
-        DeepSeek 新版 UI 开关是 ds-toggle-button（div 元素带可见文本），
-        不是 <button> 标签——查找所有可见元素而非仅 button。
-        """
-        js = (
-            "async function() {"
-            "  const els = Array.from(document.querySelectorAll("
-            "      'button, [role=button], .ds-toggle-button'));"
-            "  const el = els.find(b => b.innerText.trim() === arguments[0]);"
-            "  if (el) { el.click(); return true; }"
-            "  return false;"
-            "}"
-        )
-        try:
-            return bool(self._safe_evaluate(js, label))
-        except Exception:
-            return False
-
 
 # ---------------- --probe CLI ----------------
 # 真实浏览器探测 chat.deepseek.com 的关键 selector，打印命中结果。

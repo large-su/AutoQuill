@@ -70,11 +70,6 @@ def data(*parts):
     return os.path.join(DATA_ROOT, *parts)
 
 
-def ensure_data_dirs():
-    for rel in ("data", "output", "logs", "config"):
-        os.makedirs(data(rel), exist_ok=True)
-
-
 def ensure_provider_file():
     """安装态首启：DATA_ROOT/config/llm_providers.json 缺失时从
     example 复制（含占位 key），保证服务可启动、引导页可填 key。

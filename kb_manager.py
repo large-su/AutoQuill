@@ -4,7 +4,6 @@
 # v2.1 更新：
 #   - 配方新增 perspective（叙事视角）和 tone（情感基调）维度
 #   - 配方选取从纯随机改为基于评分的加权随机
-#   - 新增评分回写功能（update_recipe_scores）
 #
 # 用法：
 #   python kb_manager.py --stats          查看知识库统计
@@ -15,8 +14,7 @@
 #   python kb_manager.py --rebuild        从原始素材重建知识库
 
 # 也可被主流程 import 调用：
-#   from kb_manager import extract_and_store, get_recipe, load_kb
-#   from kb_manager import classify_genre, update_recipe_scores
+#   from kb_manager import extract_and_store, load_kb
 # ============================================================
 
 import json
@@ -76,126 +74,12 @@ def save_kb(kb):
 # 配方选取（加权随机）
 # ============================================================
 
-def get_recipe(genre, kb=None):
-    """
-    从知识库中获取一个配方。
-
-    选取策略：epsilon-greedy 加权随机。
-    - 90% 概率按评分加权选取（exploitation）
-    - 10% 概率均匀随机选取（exploration，防止陷入局部最优）
-    - 有评分的配方：权重 = avg_score（分数越高越容易被选中）
-    - 无评分的配方：权重 = DEFAULT_WEIGHT（满分 60 的 ~47%，给新配方机会但不占优）
-    - 同时确保低分配方不被完全排除（设最低权重 10）
-
-    优先从指定题材中选取；题材为空时兜底到全库。
-    """
-    if kb is None:
-        kb = load_kb()
-
-    recipes = kb.get("recipes", [])
-    if not recipes:
-        return None
-
-    # 按优先级找候选池
-    genre_recipes = [r for r in recipes if r.get("genre") == genre]
-    if not genre_recipes:
-        genre_recipes = [r for r in recipes if r.get("genre") == "其他"]
-    if not genre_recipes:
-        genre_recipes = recipes  # 最终兜底：全库
-
-    # epsilon-greedy：10% 概率均匀随机探索
-    EPSILON = 0.1
-    if random.random() < EPSILON:
-        chosen = random.choice(genre_recipes)
-        chosen["times_used"] = chosen.get("times_used", 0) + 1
-        score_info = f"（评分 {chosen['avg_score']:.1f}，使用 {chosen['times_used']} 次）" if chosen.get("avg_score") else f"（未评分，使用 {chosen['times_used']} 次）"
-        log.info(f"  配方选取（探索）：[{chosen.get('genre')}] {chosen.get('hook', '')[:25]}... {score_info}")
-        return chosen
-
-    # 计算加权
-    DEFAULT_WEIGHT = 28
-    MIN_WEIGHT = 10
-
-    weights = []
-    for r in genre_recipes:
-        avg = r.get("avg_score")
-        if avg is not None and avg > 0:
-            weights.append(max(avg, MIN_WEIGHT))
-        else:
-            weights.append(DEFAULT_WEIGHT)
-
-    # 加权随机选取
-    chosen = random.choices(genre_recipes, weights=weights, k=1)[0]
-    chosen["times_used"] = chosen.get("times_used", 0) + 1
-
-    # 记录选取日志
-    score_info = f"（评分 {chosen['avg_score']:.1f}，使用 {chosen['times_used']} 次）" if chosen.get("avg_score") else f"（未评分，使用 {chosen['times_used']} 次）"
-    log.info(f"  配方选取：[{chosen.get('genre')}] {chosen.get('hook', '')[:25]}... {score_info}")
-
-    return chosen
-
 def get_all_genres(kb=None):
     """获取知识库中所有题材列表"""
     if kb is None:
         kb = load_kb()
     genres = set(r.get("genre", "未分类") for r in kb.get("recipes", []))
     return sorted(genres)
-
-# ============================================================
-# 评分回写
-# ============================================================
-
-def update_recipe_scores(score_map):
-    """
-    批量更新配方评分。
-
-    参数：
-        score_map: {recipe_id: score, ...}
-            例如 {"recipe_012": 42, "recipe_035": 28}
-
-    机制：
-    - 每个配方记录 score_history（历史得分列表）
-    - avg_score = 历史得分的加权平均（近期权重更高）
-    - score_count = 评分次数
-    """
-    if not score_map:
-        return
-
-    kb = load_kb()
-    updated = 0
-
-    for recipe in kb.get("recipes", []):
-        rid = recipe.get("id")
-        if rid in score_map:
-            score = score_map[rid]
-            if not isinstance(score, (int, float)) or score <= 0:
-                continue
-
-            # 追加到历史
-            history = recipe.get("score_history", [])
-            history.append(score)
-            recipe["score_history"] = history
-            recipe["score_count"] = len(history)
-
-            # 计算加权平均（近期权重更高）
-            # 权重：最近一次=1.0，倒数第二次=0.85，倒数第三次=0.72...
-            decay = 0.85
-            weighted_sum = 0
-            weight_sum = 0
-            for i, s in enumerate(reversed(history)):
-                w = decay ** i
-                weighted_sum += s * w
-                weight_sum += w
-            recipe["avg_score"] = round(weighted_sum / weight_sum, 1)
-
-            updated += 1
-            log.info(f"  评分回写：{rid} ← {score} 分（累计 {len(history)} 次，均分 {recipe['avg_score']}）")
-
-    if updated > 0:
-        save_kb(kb)
-        log.info(f"  ✓ 已更新 {updated} 个配方的评分")
-
-    return updated
 
 # ============================================================
 # 配方提炼（调用 LLM）
@@ -613,28 +497,6 @@ def extract_and_store(articles):
         log.info(f"    python kb_manager.py --compress")
 
     return new_recipes
-
-# ============================================================
-# 题材判断（独立功能）
-# ============================================================
-
-def classify_genre(question_title):
-    """用 LLM 判断问题所属的故事题材。"""
-    from applications.zhihu_story.prompts import GENRE_CLASSIFY_PROMPT
-
-    prompt = GENRE_CLASSIFY_PROMPT + f"\n\n问题标题：{question_title}\n\n请直接返回题材名称（2-6个字），不要其他文字。"
-
-    reply = _call_llm(prompt, max_tokens=20, temperature=0.1)
-
-    if reply:
-        genre = reply.strip().strip('"""' + "''。.，,")
-        if 2 <= len(genre) <= 10:
-            log.info(f"  题材判断：「{question_title[:30]}...」→ {genre}")
-            return genre
-
-    log.warning(f"  题材判断失败，使用'其他'")
-    return "其他"
-
 
 # ============================================================
 # 知识库压缩

@@ -978,10 +978,6 @@ class ZhihuBrowser:
                 raise ValueError(f"选择器 {selector!r} 未匹配到元素")
         return True
 
-    def get_text(self, selector, default=""):
-        els = self.page.query_selector_all(selector)
-        return "\n".join(e.text_content().strip() for e in els if e.text_content()) or default
-
 
 # ----------------------------------------------------------
 # 模块级浏览器单例：workflow 各阶段共享同一浏览器实例
