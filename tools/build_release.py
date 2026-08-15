@@ -37,6 +37,9 @@ _GATED_SUFFIXES = (".py", ".html", ".css", ".js", ".json", ".md", ".iss", ".isl"
 
 
 def version():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     sys.path.insert(0, str(ROOT))
     import core.version
     return core.version.VERSION
