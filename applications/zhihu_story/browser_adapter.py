@@ -1074,23 +1074,30 @@ def login_deepseek_web_flow(timeout=300):
     供首启引导（/api/setup/web-login）使用；登录后 cookie 写入持久化
     profile，web_llm_logged_in() 即可判定。返回 (是否成功, 提示信息)。
     登录完成判定 = cookie 存在 + 页面不在登录页（仅 cookie 会因残留
-    假阳性，导致引导秒过但实际未登录）。"""
+    假阳性，导致引导秒过但实际未登录）。
+    独立可见实例 + 全程持 _browser_lock：
+      - 共享浏览器（get_browser）归任务线程创建/使用，登录线程跨线程
+        复用会触发 Playwright「cannot switch to a different thread」
+        （线上：登录线程退出后再次点击登录即报错）
+      - 锁内独占持久化 profile，避免与其他浏览器实例并发互杀"""
     try:
-        browser = get_browser()
-        page = browser.context.new_page()
-        try:
-            page.goto("https://chat.deepseek.com",
-                      wait_until="domcontentloaded", timeout=30000)
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                time.sleep(3)
-                page.wait_for_timeout(500)  # 等 SPA 从登录页跳回主页
-                if (_has_deepseek_cookies(browser.context)
-                        and "sign_in" not in page.url):
-                    return True, "检测到登录成功"
-            return False, f"超时（{timeout // 60} 分钟）未检测到登录"
-        finally:
-            page.close()
+        with _browser_lock:
+            with ZhihuBrowser(headless=False) as browser:
+                page = browser.context.new_page()
+                try:
+                    page.goto("https://chat.deepseek.com",
+                              wait_until="domcontentloaded",
+                              timeout=30000)
+                    deadline = time.time() + timeout
+                    while time.time() < deadline:
+                        time.sleep(3)
+                        page.wait_for_timeout(500)  # 等 SPA 跳回主页
+                        if (_has_deepseek_cookies(browser.context)
+                                and "sign_in" not in page.url):
+                            return True, "检测到登录成功"
+                    return False, f"超时（{timeout // 60} 分钟）未检测到登录"
+                finally:
+                    page.close()
     except Exception as exc:
         return False, f"登录引导失败：{exc}"
 
@@ -1099,22 +1106,24 @@ def login_zhihu_flow(timeout=300):
     """打开可见 Edge 窗口引导用户手动登录知乎，检测到登录后保存登录态。
 
     供 CLI（--login）与 Web 首启引导（/api/setup/zhihu-login）共用。
-    返回 (是否成功, 提示信息)。"""
-    with ZhihuBrowser(headless=False) as browser:
-        if browser.is_logged_in():
-            browser.save_storage_state()
-            return True, "已登录，登录态已保存"
-        browser.page.goto("https://www.zhihu.com/signin",
-                          wait_until="domcontentloaded")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            time.sleep(3)
+    返回 (是否成功, 提示信息)。独立实例 + 持 _browser_lock（与
+    login_deepseek_web_flow 同理：不碰共享浏览器、独占 profile）。"""
+    with _browser_lock:
+        with ZhihuBrowser(headless=False) as browser:
             if browser.is_logged_in():
-                break
-        else:
-            return False, f"超时（{timeout // 60} 分钟）未检测到登录"
-        browser.save_storage_state()
-        return True, "检测到登录成功"
+                browser.save_storage_state()
+                return True, "已登录，登录态已保存"
+            browser.page.goto("https://www.zhihu.com/signin",
+                              wait_until="domcontentloaded")
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(3)
+                if browser.is_logged_in():
+                    break
+            else:
+                return False, f"超时（{timeout // 60} 分钟）未检测到登录"
+            browser.save_storage_state()
+            return True, "检测到登录成功"
 
 
 def main():

@@ -591,5 +591,32 @@ class TestGetBrowserConcurrency(unittest.TestCase):
             self.assertIs(self.mod.get_browser(), fresh)
 
 
+class TestLoginFlows(unittest.TestCase):
+    """登录引导流程用独立可见实例 + 全程持锁。
+
+    ★ 回归（V4.1.5 线上）：login 复用 get_browser 的共享浏览器——
+    登录线程创建后退出，用户再次点击登录时新线程复用该实例报
+    Playwright「cannot switch to a different thread (which happens
+    to have exited)」；且共享浏览器存活期间，登录态检查的独立实例
+    同 profile 并发互杀（Target page closed）。"""
+
+    def _src(self, fn_name):
+        import inspect
+        from applications.zhihu_story import browser_adapter as mod
+        return inspect.getsource(getattr(mod, fn_name))
+
+    def test_deepseek_login_uses_dedicated_visible_browser(self):
+        src = self._src("login_deepseek_web_flow")
+        self.assertIn("ZhihuBrowser(headless=False)", src)  # 可见实例
+        self.assertIn("_browser_lock", src)                 # 独占 profile
+        self.assertNotIn("get_browser(", src)               # 不碰共享实例
+
+    def test_zhihu_login_uses_dedicated_visible_browser(self):
+        src = self._src("login_zhihu_flow")
+        self.assertIn("ZhihuBrowser(headless=False)", src)
+        self.assertIn("_browser_lock", src)
+        self.assertNotIn("get_browser(", src)
+
+
 if __name__ == "__main__":
     unittest.main()
