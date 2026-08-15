@@ -182,6 +182,14 @@
   .st-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 12px; }
   .st-row:last-child { margin-bottom: 4px; }
   .st-k { flex: 0 0 96px; font-size: 12.5px; color: var(--muted); }
+  /* 设置操作结果状态条（修改即生效，无需应用按钮） */
+  .st-status {
+    display: none; margin: 12px 0 2px; padding: 6px 12px;
+    border-radius: 7px; font-size: 12px;
+  }
+  .st-status.show { display: block; }
+  .st-status.ok { color: var(--green); background: rgba(52,211,153,0.08); border: 1px solid #24503f; }
+  .st-status.err { color: #fca5a5; background: rgba(248,113,113,0.08); border: 1px solid #5f2e35; }
   .st-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 1; min-width: 0; }
   .st-ctl select, .st-ctl input[type="number"] {
     padding: 6px 9px; border-radius: 7px;
@@ -694,6 +702,7 @@
       <button class="close" id="settingsClose">关闭</button>
     </div>
     <div class="settings-body">
+      <div class="st-status" id="stStatus"></div>
       <div class="st-group">
         <div class="st-title">通用设置</div>
         <div class="st-row" id="modelRow" hidden>
@@ -701,9 +710,8 @@
           <div class="st-ctl">
             <select id="providerSel"></select>
             <select id="modelSel"></select>
-            <button class="btn sm" id="modelApply">应用</button>
           </div>
-          <div class="st-d" id="modelNote"></div>
+          <div class="st-d">修改后下次生成立即生效</div>
         </div>
         <div class="st-row">
           <div class="st-k">生成通道</div>
@@ -712,7 +720,6 @@
               <label class="seg-opt"><input type="radio" name="genMode" value="api">API（付费，快）</label>
               <label class="seg-opt"><input type="radio" name="genMode" value="web">Web 网页版（免费）</label>
             </span>
-            <button class="btn sm" id="modeApply">应用</button>
           </div>
           <div class="st-d">未配置的通道首次切换时会弹出引导完成配置</div>
         </div>
@@ -723,7 +730,6 @@
               <option value="fast">快速 + 深度思考 + 智能搜索</option>
               <option value="expert">专家 + 深度思考</option>
             </select>
-            <button class="btn sm" id="webPresetApply">应用</button>
           </div>
           <div class="st-d">仅 Web 网页版通道生效</div>
         </div>
@@ -734,8 +740,8 @@
               <label class="seg-opt"><input type="radio" name="browserMode" value="false">前台（调试可观察）</label>
               <label class="seg-opt"><input type="radio" name="browserMode" value="true">无头（不打扰工作）</label>
             </span>
-            <button class="btn sm" id="browserApply">应用</button>
           </div>
+          <div class="st-d">无头 = 后台运行不打扰工作</div>
         </div>
       </div>
       <div class="st-group">
@@ -744,9 +750,8 @@
           <div class="st-k">作者文风</div>
           <div class="st-ctl">
             <select id="authorSel"><option value="">（加载中…）</option></select>
-            <button class="btn sm" id="authorApply" disabled>应用</button>
           </div>
-          <div class="st-d">生成故事时注入所选作者的文风</div>
+          <div class="st-d">生成故事时注入所选文风（「通用」为内置规则，开箱可用）</div>
         </div>
         <div class="st-row">
           <div class="st-k">选题参数</div>
@@ -994,6 +999,16 @@ const TUNABLE_HINTS = {
   MATERIAL_MIN_LIKES: "素材最低点赞门槛（默认 200）",
 };
 
+/* 设置操作状态条（顶栏下方）：设置项修改即自动提交，成败在此反馈 */
+let _stStatusTimer = null;
+function showStStatus(text, kind) {
+  const el = $("stStatus");
+  el.textContent = text;
+  el.className = "st-status show " + (kind || "ok");
+  if (_stStatusTimer) clearTimeout(_stStatusTimer);
+  _stStatusTimer = setTimeout(() => el.classList.remove("show"), 4000);
+}
+
 function initTunables() {
   const box = $("tunableBox");
   box.innerHTML = "";
@@ -1002,24 +1017,22 @@ function initTunables() {
     row.className = "tun-row";
     row.innerHTML =
       `<span class="tun-k">${esc(CFG_LABELS[k] || k)}</span>` +
-      `<input type="number" id="tun_${k}" min="0" title="修改后立即生效，下次启动保留">` +
-      `<button class="btn sm">保存</button>` +
+      `<input type="number" id="tun_${k}" min="0" title="修改后自动保存，下次启动保留">` +
       `<span class="tun-hint">${esc(TUNABLE_HINTS[k] || "")}</span>`;
     const input = row.querySelector("input");
-    const btn = row.querySelector("button");
-    btn.addEventListener("click", () => saveTunable(k, input, btn));
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") saveTunable(k, input, btn);
+      if (e.key === "Enter") { saveTunable(k, input, null); input.blur(); }
     });
+    input.addEventListener("blur", () => saveTunable(k, input, null));
     box.appendChild(row);
   });
 }
 
-async function saveTunable(key, input, btn) {
+async function saveTunable(key, input) {
   const val = parseInt(input.value, 10);
-  if (!Number.isInteger(val)) { alert("请输入整数"); return; }
-  btn.disabled = true;
-  btn.textContent = "保存中";
+  if (!Number.isInteger(val)) { showStStatus("请输入整数", "err"); return; }
+  const prev = input.value;
+  input.disabled = true;
   try {
     const r = await fetch("/api/config", {
       method: "POST",
@@ -1029,12 +1042,13 @@ async function saveTunable(key, input, btn) {
     if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
     const d = await r.json();
     addLog(`选题参数 ${CFG_LABELS[key] || key} → ${d.value}`, "result");
+    showStStatus(`${CFG_LABELS[key] || key} → ${d.value}`, "ok");
     loadConfig();
   } catch (e) {
-    alert("保存失败：" + e.message);
+    input.value = prev;
+    showStStatus("保存失败：" + e.message, "err");
   } finally {
-    btn.disabled = false;
-    btn.textContent = "保存";
+    input.disabled = false;
   }
 }
 
@@ -1069,7 +1083,6 @@ async function loadConfig() {
 
 const providerSel = $("providerSel");
 const modelSel = $("modelSel");
-const modelNote = $("modelNote");
 let modelProviders = [];
 let modelCurrent = null;
 let modelDirty = false;
@@ -1107,11 +1120,98 @@ function renderModelOptions() {
   modelDirty = true;
 }
 
+/* 模型切换：修改即自动保存（切 provider 时自动选其默认模型一并提交） */
+let _modelSubmitTimer = null;
+async function applyModel() {
+  const r = await fetch("/api/model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: providerSel.value, model_id: modelSel.value }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.status);
+  modelCurrent = data.effective;
+  loadConfig();
+  addLog(`模型已切换 → ${data.effective.provider} / ${data.effective.api_model}`, "result");
+  showStStatus(`模型已切换 → ${data.effective.api_model}`, "ok");
+}
+
+function queueModelSubmit() {
+  if (_modelSubmitTimer) clearTimeout(_modelSubmitTimer);
+  _modelSubmitTimer = setTimeout(() => {
+    _modelSubmitTimer = null;
+    const cur = modelCurrent;
+    const same = cur && cur.provider === providerSel.value && cur.model_id === modelSel.value;
+    if (same) return;  // 选择未实际变化（如重载后重建选项）不提交
+    applyModel().catch((e) => {
+      showStStatus("模型切换失败：" + e.message, "err");
+    });
+  }, 300);
+}
+
 providerSel.addEventListener("change", () => {
   renderModelOptions();
-  modelNote.textContent = "";
+  queueModelSubmit();
 });
-modelSel.addEventListener("change", () => { modelNote.textContent = ""; });
+modelSel.addEventListener("change", () => { queueModelSubmit(); });
+
+let _modeSubmitBusy = false;
+async function applyMode() {
+  if (_modeSubmitBusy) return;
+  const sel = document.querySelector('input[name="genMode"]:checked');
+  if (!sel || sel.value === genMode) return;
+  const target = sel.value;
+  try {
+    if (!setupCache) await fetchSetupStatus();
+    // 首次切换：目标通道未配置 → 弹引导遮罩并高亮对应卡片
+    if (setupCache) {
+      const missing = target === "web" ? !setupCache.web_llm_logged_in
+                                       : !setupCache.llm_configured;
+      if (missing && !setupCache.login_running) {
+        await loadSetupStatus();
+        $("setupMask").classList.add("show");
+        if (target === "web") {
+          $("mcApi").classList.remove("sel");
+          $("mcWeb").classList.add("sel");
+        } else {
+          $("mcWeb").classList.remove("sel");
+          $("mcApi").classList.add("sel");
+        }
+        // 还原选择，待配置完成后由引导流程切换
+        document.querySelectorAll('input[name="genMode"]').forEach((el) => {
+          el.checked = (el.value === genMode);
+        });
+        return;
+      }
+    }
+    _modeSubmitBusy = true;
+    const r = await fetch("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: target }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
+    const data = await r.json();
+    genMode = data.effective.mode;
+    loadConfig();
+    hideSetupWizard();
+    addLog(`生成通道已切换 → ${genMode === "web" ? "Web 网页版" : "API"}`, "result");
+    showStStatus(`生成通道 → ${genMode === "web" ? "Web 网页版" : "API"}`, "ok");
+  } catch (e) {
+    // 还原选择并提示
+    document.querySelectorAll('input[name="genMode"]').forEach((el) => {
+      el.checked = (el.value === genMode);
+    });
+    showStStatus("切换失败：" + e.message, "err");
+  } finally {
+    _modeSubmitBusy = false;
+  }
+}
+
+/* 生成通道：单选 change 即自动切换 */
+document.querySelectorAll('input[name="genMode"]').forEach((el) => {
+  el.addEventListener("change", applyMode);
+});
 
 async function loadMode() {
   try {
@@ -1133,68 +1233,13 @@ async function fetchSetupStatus() {
   } catch (e) { setupCache = null; }
 }
 
-async function applyMode() {
-  const sel = document.querySelector('input[name="genMode"]:checked');
-  if (!sel || sel.value === genMode) return;
-  const target = sel.value;
-  const btn = $("modeApply");
-  btn.disabled = true;
-  btn.textContent = "切换中…";
-  try {
-    if (!setupCache) await fetchSetupStatus();
-    // 首次切换：目标通道未配置 → 弹引导遮罩并高亮对应卡片
-    if (setupCache) {
-      const missing = target === "web" ? !setupCache.web_llm_logged_in
-                                       : !setupCache.llm_configured;
-      if (missing && !setupCache.login_running) {
-        await loadSetupStatus();
-        $("setupMask").classList.add("show");
-        if (target === "web") {
-          $("mcApi").classList.remove("sel");
-          $("mcWeb").classList.add("sel");
-        } else {
-          $("mcWeb").classList.remove("sel");
-          $("mcApi").classList.add("sel");
-        }
-        return;  // 配置完成后由引导流程切通道
-      }
-    }
-    const r = await fetch("/api/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: target }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
-    const data = await r.json();
-    genMode = data.effective.mode;
-    loadConfig();
-    hideSetupWizard();
-    addLog(`生成通道已切换 → ${genMode === "web" ? "Web 网页版" : "API"}`, "result");
-  } catch (e) {
-    alert("切换失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "应用";
-  }
-}
 
-async function loadBrowserMode() {
-  try {
-    const r = await fetch("/api/browser");
-    const data = await r.json();
-    browserHeadless = data.headless;
-    document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
-      el.checked = (el.value === String(browserHeadless));
-    });
-  } catch (e) { /* 旧服务无 /api/browser，保持默认 */ }
-}
-
+let _browserSubmitBusy = false;
 async function applyBrowserMode() {
+  if (_browserSubmitBusy) return;
   const sel = document.querySelector('input[name="browserMode"]:checked');
   if (!sel || sel.value === String(browserHeadless)) return;
-  const btn = $("browserApply");
-  btn.disabled = true;
-  btn.textContent = "切换中…";
+  _browserSubmitBusy = true;
   try {
     const r = await fetch("/api/browser", {
       method: "POST",
@@ -1205,12 +1250,30 @@ async function applyBrowserMode() {
     const data = await r.json();
     browserHeadless = data.effective.headless;
     addLog(`浏览器模式已切换 → ${browserHeadless ? "无头（工作，下次任务生效）" : "前台（调试）"}`, "result");
+    showStStatus(`浏览器模式 → ${browserHeadless ? "无头" : "前台"}`, "ok");
   } catch (e) {
-    alert("切换失败：" + e.message);
+    document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
+      el.checked = (el.value === String(browserHeadless));
+    });
+    showStStatus("切换失败：" + e.message, "err");
   } finally {
-    btn.disabled = false;
-    btn.textContent = "应用";
+    _browserSubmitBusy = false;
   }
+}
+
+document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
+  el.addEventListener("change", applyBrowserMode);
+});
+
+async function loadBrowserMode() {
+  try {
+    const r = await fetch("/api/browser");
+    const data = await r.json();
+    browserHeadless = data.headless;
+    document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
+      el.checked = (el.value === String(browserHeadless));
+    });
+  } catch (e) { /* 旧服务无 /api/browser，保持默认 */ }
 }
 
 /* ---------- 网页模式预设 ---------- */
@@ -1232,9 +1295,6 @@ async function loadWebPreset() {
 async function applyWebPreset() {
   const val = $("webPresetSel").value;
   if (val === webPreset) return;
-  const btn = $("webPresetApply");
-  btn.disabled = true;
-  btn.textContent = "切换中…";
   try {
     const r = await fetch("/api/web-preset", {
       method: "POST",
@@ -1246,42 +1306,19 @@ async function applyWebPreset() {
     webPreset = data.effective.preset;
     loadConfig();
     addLog(`网页模式预设已切换 → ${webPreset === "expert" ? "专家 + 深度思考" : "快速 + 深度思考 + 智能搜索"}`, "result");
+    showStStatus(`网页预设 → ${webPreset === "expert" ? "专家" : "快速"}`, "ok");
   } catch (e) {
-    alert("切换失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "应用";
+    $("webPresetSel").value = webPreset;
+    showStStatus("切换失败：" + e.message, "err");
   }
 }
 
-$("webPresetApply").addEventListener("click", applyWebPreset);
+$("webPresetSel").addEventListener("change", applyWebPreset);
 
-$("modelApply").addEventListener("click", async () => {
-  $("modelApply").disabled = true;
-  modelNote.textContent = "切换中…";
-  try {
-    const r = await fetch("/api/model", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: providerSel.value, model_id: modelSel.value }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.status);
-    modelNote.textContent = `已生效 → ${data.effective.provider} / ${data.effective.api_model}`;
-    modelCurrent = data.effective;
-    loadConfig(); // 刷新配置速览里的提供商/模型
-    addLog(`模型已切换 → ${data.effective.provider} / ${data.effective.api_model}`, "result");
-  } catch (e) {
-    modelNote.textContent = "切换失败：" + e.message;
-  } finally {
-    $("modelApply").disabled = false;
-  }
-});
 
 /* ---------- 作者文风 ---------- */
 
 const authorSel = $("authorSel");
-const authorApply = $("authorApply");
 
 async function loadAuthors() {
   try {
@@ -1296,18 +1333,17 @@ async function loadAuthors() {
     });
     const cur = data.current || "";
     authorSel.value = (cur === "通用") ? "通用" : cur;
+    authorSel.dataset.current = authorSel.value;
     authorSel.disabled = false;
-    authorApply.disabled = false;
     // 提炼完成后自动把新文风加进下拉
     window._authorsCache = data.authors || [];
   } catch (e) { /* 旧服务无 /api/authors */ }
 }
 
-authorApply.addEventListener("click", async () => {
+async function applyAuthorProfile() {
   const name = authorSel.value;
-  const btn = authorApply;
-  btn.disabled = true;
-  btn.textContent = "切换中…";
+  const prev = authorSel.dataset.current || "";
+  if (name === prev) return;
   try {
     const r = await fetch("/api/author", {
       method: "POST",
@@ -1316,15 +1352,17 @@ authorApply.addEventListener("click", async () => {
     });
     if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
     const data = await r.json();
+    authorSel.dataset.current = data.effective.author_profile || "";
     addLog(`作者文风已切换 → ${data.effective.author_profile || "（不注入）"}`, "result");
+    showStStatus(`作者文风 → ${data.effective.author_profile || "不注入"}`, "ok");
     loadConfig();
   } catch (e) {
-    alert("文风切换失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "应用";
+    authorSel.value = prev;
+    showStStatus("文风切换失败：" + e.message, "err");
   }
-});
+}
+
+authorSel.addEventListener("change", applyAuthorProfile);
 
 /* ---------- 任务进度计时器（剖析中无百分比 → 显示已等待秒数） ---------- */
 
@@ -1995,9 +2033,7 @@ $("modalMask").addEventListener("click", (e) => {
   loadConfig();
   loadModels();
   loadMode();
-  $("modeApply").addEventListener("click", applyMode);
   loadBrowserMode();
-  $("browserApply").addEventListener("click", applyBrowserMode);
   loadWebPreset();
   loadAuthors();
   loadProfileSources();

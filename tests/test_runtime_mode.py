@@ -215,12 +215,31 @@ class TestRuntimeAuthorProfile(unittest.TestCase):
         self.assertEqual(data["author_profile"], "李四")
 
     def test_apply_override_restores_author(self):
+        # 签名文件存在的作者 → 重启后按原值恢复（不触发回退）
         import config
         from config import story
-        config.set_runtime_author_profile("王五", persist=True)
-        story.AUTHOR_PROFILE = ""  # 模拟重启后默认
+        tmp = tempfile.mkdtemp(prefix="authors_")
+        with open(os.path.join(tmp, "王五.json"), "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        orig = config._data_path
+        config._data_path = lambda *p: (
+            os.path.join(tmp, p[-1]) if p and "authors" in p else orig(*p))
+        try:
+            config.set_runtime_author_profile("王五", persist=True)
+            story.AUTHOR_PROFILE = ""  # 模拟重启后默认
+            config._apply_webui_model_override()
+            self.assertEqual(story.AUTHOR_PROFILE, "王五")
+        finally:
+            config._data_path = orig
+
+    def test_apply_override_falls_back_to_general(self):
+        # ★ 迁移安全：持久化作者签名不存在（换电脑/清数据）→ 回退「通用」
+        import config
+        from config import story
+        config.set_runtime_author_profile("不存在作者", persist=True)
+        story.AUTHOR_PROFILE = ""
         config._apply_webui_model_override()
-        self.assertEqual(story.AUTHOR_PROFILE, "王五")
+        self.assertEqual(story.AUTHOR_PROFILE, "通用")
 
     def test_apply_override_ignores_missing_field(self):
         # 旧版 webui_model.json 无 author_profile 字段 → 保持默认，不报错

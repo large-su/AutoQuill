@@ -36,9 +36,10 @@ config/1.txt
 # Playwright MCP 运行日志与页面快照（调试产物）
 .playwright-mcp/
 
-# 打包产物（一键启动器）
+# 打包产物（一键启动器 + 安装包）
 build/
 dist/
+release/
 AutoQuill.exe
 
 # 个人编辑器配置（含本机路径）

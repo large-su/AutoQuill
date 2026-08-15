@@ -668,10 +668,28 @@ def profile_general(min_likes=0, out_dir=None, authors=None, max_stories=30,
 
 
 def load_general_profile(out_dir=None):
-    """读取通用写作风格签名；不存在或解析失败返回 None。"""
-    return load_author_profile(
+    """读取通用写作风格签名；本地未提炼时回退内置通用规则。
+
+    优先读 data/authors/_general.json（提炼产物）；不存在或解析失败
+    时回退 config/builtin_general_profile.json（随安装包分发，保证
+    新环境开箱即有可用的通用文风）。仍失败返回 None。
+    """
+    profile = load_author_profile(
         GENERAL_PROFILE_FILE.rstrip(".json"), out_dir=out_dir,
         filename=GENERAL_PROFILE_FILE)
+    if profile:
+        return profile
+    try:
+        from core.paths import program as _program_path
+        path = _program_path("config", "builtin_general_profile.json")
+        with open(path, encoding="utf-8") as f:
+            profile = json.load(f)
+        if isinstance(profile, dict) and profile.get("signature"):
+            log.info("author_profiler: 使用内置通用写作规则（%s）", path)
+            return profile
+    except Exception as exc:
+        log.warning("author_profiler: 读取内置通用规则失败：%s", exc)
+    return None
 
 
 # ============================================================

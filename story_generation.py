@@ -176,7 +176,16 @@ def _load_author_profile_or_none(author):
     if not author:
         return None
     try:
-        from applications.zhihu_story.author_profiler import load_author_profile
+        from applications.zhihu_story.author_profiler import (
+            load_author_profile, load_general_profile)
+        if author == "通用":
+            # 通用文风走专用加载：本地提炼版优先，缺失回退内置规则
+            profile = load_general_profile()
+            if profile:
+                log.info("  [作者风格] 已加载「通用」写作规则")
+            else:
+                log.warning("  [作者风格] 通用写作规则不可用（内置文件缺失？）")
+            return profile
         profile = load_author_profile(author)
         if profile:
             log.info(f"  [作者风格] 已加载「{author}」技能签名")

@@ -394,7 +394,18 @@ def _apply_webui_model_override():
         if isinstance(headless, bool):
             set_runtime_browser_headless(headless, persist=False)
         if "author_profile" in data:
-            set_runtime_author_profile(data["author_profile"], persist=False)
+            name = data["author_profile"]
+            # 具体作者签名文件已不存在（如换了电脑/清了数据）→ 回退内置通用文风
+            if name and name != "通用":
+                safe = "".join(
+                    "_" if c in '\\/:*?"<>|' else c for c in name)
+                if not _os.path.exists(
+                        _data_path("data", "authors", f"{safe}.json")):
+                    import logging as _logging
+                    _logging.getLogger("config").warning(
+                        "文风「%s」签名不存在，回退为「通用」", name)
+                    name = "通用"
+            set_runtime_author_profile(name, persist=False)
         web_preset = data.get("web_preset")
         if web_preset in ("fast", "expert"):
             set_web_mode_preset(web_preset, persist=False)

@@ -819,14 +819,18 @@ class _AuthorSpec(BaseModel):
 def api_authors():
     """已提炼的文风签名列表（data/authors/*.json）+ 当前注入选择。"""
     from applications.zhihu_story.author_profiler import (
-        AUTHORS_DIR, GENERAL_PROFILE_FILE, load_author_profile)
+        AUTHORS_DIR, GENERAL_PROFILE_FILE, load_author_profile,
+        load_general_profile)
     from config.story import AUTHOR_PROFILE
     authors = []
+    has_general = False
     if os.path.isdir(AUTHORS_DIR):
         for f in sorted(os.listdir(AUTHORS_DIR)):
             if not f.endswith(".json"):
                 continue
             is_general = (f == GENERAL_PROFILE_FILE)
+            if is_general:
+                has_general = True
             name = "通用" if is_general else f[:-5]
             profile = load_author_profile(
                 name, filename=f) if is_general else load_author_profile(name)
@@ -838,6 +842,19 @@ def api_authors():
                 "general": is_general,
                 "profiled_at": profile.get("profiled_at", ""),
                 "stories_count": len(profile.get("source_stories") or []),
+                "style": (sig.get("style") or "")[:40],
+            })
+    if not has_general:
+        # 未提炼通用风格时也列出内置通用规则，保证下拉可选
+        builtin = load_general_profile()
+        if builtin:
+            sig = builtin.get("signature") or {}
+            authors.insert(0, {
+                "name": "通用",
+                "general": True,
+                "builtin": True,
+                "profiled_at": "",
+                "stories_count": 0,
                 "style": (sig.get("style") or "")[:40],
             })
     return {"authors": authors, "current": AUTHOR_PROFILE}

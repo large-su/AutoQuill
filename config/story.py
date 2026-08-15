@@ -214,8 +214,10 @@ MATERIAL_MIN_LIKES = 200                 # 最低赞同数；已识别赞同数�
 MATERIAL_UNKNOWN_LIKES_POLICY = "drop"  # 未识别到赞同数时：keep=保留，drop=跳过
 
 # 作者技能注入：生成故事时把该作者的蒸馏技能 profile 注入 prompt。
-# 置空字符串关闭注入；profile 文件位于 data/authors/{name}.json
-AUTHOR_PROFILE = "镜中花"
+# 置空字符串关闭注入；profile 文件位于 data/authors/{name}.json。
+# 默认「通用」：注入内置通用写作规则（config/builtin_general_profile.json，
+# 随安装包分发，新环境开箱可用；也可用「提炼通用文风」生成更定制化的版本）
+AUTHOR_PROFILE = "通用"
 
 # ============================================================
 # 批量模式默认值
