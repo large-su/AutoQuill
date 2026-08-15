@@ -54,6 +54,79 @@ class TestRuntimeModelSwitch(unittest.TestCase):
             config.set_runtime_model("不存在的服务商", "x", persist=False)
 
 
+class TestQuestionSourceSwitch(unittest.TestCase):
+    """选题来源（推荐话题/邀请回答/自选问题）运行时切换。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from config import story
+        cls._orig_source = story.QUESTION_SOURCE
+        cls._orig_url = story.CUSTOM_QUESTION_URL
+
+    @classmethod
+    def tearDownClass(cls):
+        from config import story
+        story.QUESTION_SOURCE = cls._orig_source
+        story.CUSTOM_QUESTION_URL = cls._orig_url
+
+    def test_switch_to_invited(self):
+        from config import story, set_runtime_question_source
+        eff = set_runtime_question_source("invited", persist=False)
+        self.assertEqual(eff["question_source"], "invited")
+        self.assertEqual(story.QUESTION_SOURCE, "invited")
+
+    def test_switch_to_custom(self):
+        from config import story, set_runtime_question_source
+        eff = set_runtime_question_source("custom", persist=False)
+        self.assertEqual(story.QUESTION_SOURCE, "custom")
+
+    def test_invalid_source_raises(self):
+        from config import story, set_runtime_question_source
+        with self.assertRaises(ValueError):
+            set_runtime_question_source("bogus", persist=False)
+        # 非法值不得污染当前状态
+        self.assertIn(story.QUESTION_SOURCE,
+                      ("recommend", "invited", "custom"))
+
+    def test_custom_url_switched_and_stripped(self):
+        from config import story, set_runtime_custom_question_url
+        eff = set_runtime_custom_question_url(
+            "  https://www.zhihu.com/question/12345  ", persist=False)
+        self.assertEqual(eff["custom_question_url"],
+                         "https://www.zhihu.com/question/12345")
+        self.assertEqual(story.CUSTOM_QUESTION_URL,
+                         "https://www.zhihu.com/question/12345")
+        eff = set_runtime_custom_question_url(None, persist=False)
+        self.assertEqual(story.CUSTOM_QUESTION_URL, "")
+
+    def test_persist_roundtrip_via_apply_override(self):
+        # 持久化 → 启动恢复：写 webui_model.json（临时文件）后重放
+        # _apply_webui_model_override 的恢复逻辑
+        import config
+        from config import story
+        orig_file = config._WEBUI_MODEL_FILE
+        import tempfile
+        import os
+        import json
+        tmp = tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", suffix=".json", delete=False)
+        tmp.close()
+        try:
+            config._WEBUI_MODEL_FILE = tmp.name
+            with open(tmp.name, "w", encoding="utf-8") as f:
+                json.dump({
+                    "question_source": "invited",
+                    "custom_question_url": "https://www.zhihu.com/question/999",
+                }, f, ensure_ascii=False)
+            config._apply_webui_model_override()
+            self.assertEqual(story.QUESTION_SOURCE, "invited")
+            self.assertEqual(story.CUSTOM_QUESTION_URL,
+                             "https://www.zhihu.com/question/999")
+        finally:
+            config._WEBUI_MODEL_FILE = orig_file
+            os.unlink(tmp.name)
+
+
 class TestHeartbeatAccumulation(unittest.TestCase):
     """llm_api 生成心跳：累计总量单调递增（而非每 400 字窗口归零）。"""
 

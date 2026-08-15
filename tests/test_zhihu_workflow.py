@@ -208,6 +208,49 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
             11000 * 3989)
         self.assertEqual(ZhihuWorkflow._dom_score({}), 0)
 
+    def test_select_topic_branches_three_sources(self):
+        # 选题来源三分支：custom → _select_custom；否则 auto/manual
+        src = self._src("select_topic")
+        self.assertIn('QUESTION_SOURCE == "custom"', src)
+        self.assertIn("_select_custom", src)
+        self.assertIn("_select_auto", src)
+        self.assertIn("_select_manual", src)
+
+    def test_select_custom_validates_url(self):
+        # 自选问题：跳过选题，URL 无效则明确报错（绝不静默回退选题）
+        src = self._src("_select_custom")
+        self.assertIn("normalize_question_url", src)
+        self.assertIn("RuntimeError", src)
+        self.assertIn("open_question", src)
+        self.assertNotIn("_scan_recommend", src)
+
+    def test_source_url_follows_question_source(self):
+        # 候选池 URL 跟随设置：invited → 邀请回答页，否则推荐页
+        src = self._src("_source_url")
+        self.assertIn("ZHIHU_INVITED_URL", src)
+        self.assertIn("ZHIHU_RECOMMEND_URL", src)
+        self.assertIn('QUESTION_SOURCE == "invited"', src)
+
+    def test_scan_recommend_accepts_source_url(self):
+        # 候选页扫描必须支持传入来源 URL（邀请回答页复用同一解析 JS）
+        src = self._src("_scan_recommend")
+        self.assertIn("url=None", src)
+        self.assertIn("open_recommend_page(url)", src)
+
+    def test_auto_manual_select_use_source_url(self):
+        # 自动/手动选题都从设置里的候选池扫描（默认推荐话题）
+        for method in ("_select_auto", "_select_manual"):
+            src = self._src(method)
+            self.assertIn("_source_url()", src)
+
+    def test_batch_follows_question_source(self):
+        # 批量采集跟随选题来源；custom（自选问题）仅单篇，回退推荐页
+        src = self._src("collect_materials_batch")
+        self.assertIn("QUESTION_SOURCE", src)
+        self.assertIn('QUESTION_SOURCE == "custom"', src)
+        self.assertIn("_source_url()", src)
+        self.assertIn("ZHIHU_RECOMMEND_URL", src)
+
     def test_extract_uses_check_answerable_and_dom_extract(self):
         src = self._src("extract_content")
         self.assertIn("check_answerable", src)     # DOM 检测「撤销删除」

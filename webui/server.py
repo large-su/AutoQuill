@@ -418,8 +418,9 @@ def api_config():
     cfg = {}
     try:
         from config import story as sconfig
-        for k in ("QUESTION_SELECT_MODE", "ENABLE_STORY_FILTER",
-                  "STORY_MATERIAL_MODE", "AUTHOR_PROFILE",
+        for k in ("QUESTION_SELECT_MODE", "QUESTION_SOURCE",
+                  "ENABLE_STORY_FILTER", "STORY_MATERIAL_MODE",
+                  "AUTHOR_PROFILE",
                   "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
                   "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES",
                   "MAX_TOPIC_RETRY", "LONG_FORM_MODE", "KB_ENABLE"):
@@ -496,6 +497,37 @@ def api_set_web_preset(spec: _WebPresetSpec):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     log.info("Web 控制台切换网页模式预设 → %s", eff["preset"])
+    return {"ok": True, "effective": eff}
+
+
+class _QuestionSourceSpec(BaseModel):
+    source: str   # recommend（推荐话题）/ invited（邀请回答）/ custom（自选问题）
+    custom_url: str = ""   # source=custom 时的具体问题链接
+
+
+@app.get("/api/question-source")
+def api_question_source():
+    """读取当前选题来源（推荐话题 / 邀请回答 / 自选问题）与自选链接。"""
+    from config import story
+    return {"source": story.QUESTION_SOURCE,
+            "custom_url": story.CUSTOM_QUESTION_URL}
+
+
+@app.post("/api/question-source")
+def api_set_question_source(spec: _QuestionSourceSpec):
+    """切换选题来源（立即生效，持久化到 webui_model.json）。
+
+    custom 模式需要同时带上具体问题链接（运行时还会再做一次校验）。"""
+    from config import set_runtime_question_source, \
+        set_runtime_custom_question_url
+    try:
+        eff = set_runtime_question_source(spec.source)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if spec.source == "custom":
+        url_eff = set_runtime_custom_question_url(spec.custom_url)
+        eff.update(url_eff)
+    log.info("Web 控制台切换选题来源 → %s", eff)
     return {"ok": True, "effective": eff}
 
 

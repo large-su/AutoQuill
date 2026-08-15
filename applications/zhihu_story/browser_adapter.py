@@ -447,7 +447,10 @@ class ZhihuBrowser:
     def open_recommend_page(self, url=None):
         """打开选题候选页：默认创作中心「推荐问题」（原 workflow 入口，
         候选池为「等你来答」的优质问题，对写作选题对口；首页推荐流
-        为全品类大杂烩，已弃用为默认）。"""
+        为全品类大杂烩，已弃用为默认）。
+
+        也可传创作中心「邀请回答」页 URL（选题来源 QUESTION_SOURCE
+        切换为 invited 时传入），两页同构（.ToolsQuestion 行卡片）。"""
         if url is None:
             from applications.zhihu_story.config import ZHIHU_RECOMMEND_URL
             url = ZHIHU_RECOMMEND_URL

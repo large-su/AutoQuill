@@ -83,6 +83,55 @@ class TestServerAPI(unittest.TestCase):
             "key": "MAX_TOPIC_RETRY", "value": "abc"})
         self.assertEqual(r.status_code, 422)
 
+    def test_question_source_get(self):
+        from config import story
+        r = self.client.get("/api/question-source")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertIn("source", data)
+        self.assertIn("custom_url", data)
+        self.assertEqual(data["source"], story.QUESTION_SOURCE)
+
+    def test_question_source_post_switch(self):
+        # 切选题来源（推荐话题→邀请回答）；mock 禁落盘防污染真实配置
+        from config import story
+        orig = story.QUESTION_SOURCE
+        try:
+            with mock.patch("config._save_webui_state"):
+                r = self.client.post("/api/question-source",
+                                     json={"source": "invited"})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["effective"]["question_source"],
+                             "invited")
+            self.assertEqual(story.QUESTION_SOURCE, "invited")
+            # 配置速览同步反映新来源
+            cfg = self.client.get("/api/config").json()
+            self.assertEqual(cfg["QUESTION_SOURCE"], "invited")
+        finally:
+            story.QUESTION_SOURCE = orig
+
+    def test_question_source_post_custom_with_url(self):
+        from config import story
+        orig_s, orig_u = story.QUESTION_SOURCE, story.CUSTOM_QUESTION_URL
+        try:
+            with mock.patch("config._save_webui_state"):
+                r = self.client.post("/api/question-source", json={
+                    "source": "custom",
+                    "custom_url": "https://www.zhihu.com/question/12345"})
+            self.assertEqual(r.status_code, 200)
+            eff = r.json()["effective"]
+            self.assertEqual(eff["question_source"], "custom")
+            self.assertEqual(eff["custom_question_url"],
+                             "https://www.zhihu.com/question/12345")
+        finally:
+            story.QUESTION_SOURCE = orig_s
+            story.CUSTOM_QUESTION_URL = orig_u
+
+    def test_question_source_invalid_400(self):
+        r = self.client.post("/api/question-source",
+                             json={"source": "bogus"})
+        self.assertEqual(r.status_code, 400)
+
     def test_status_idle(self):
         r = self.client.get("/api/status")
         self.assertEqual(r.status_code, 200)

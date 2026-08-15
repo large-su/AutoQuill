@@ -305,6 +305,33 @@ def set_runtime_author_profile(name, persist=True):
     return {"author_profile": story.AUTHOR_PROFILE}
 
 
+def set_runtime_question_source(source, persist=True):
+    """运行时切换选题来源：recommend（推荐话题）/ invited（邀请回答）
+    / custom（自选问题，配 CUSTOM_QUESTION_URL）。
+
+    重赋值 config.story.QUESTION_SOURCE——workflow 每次选题时函数内
+    重新读取，切换后下一任务立即生效；持久化到 webui_model.json。
+    """
+    from config import story
+    if source not in ("recommend", "invited", "custom"):
+        raise ValueError(
+            f"未知选题来源：{source}，可选：recommend / invited / custom")
+    story.QUESTION_SOURCE = source
+    if persist:
+        _save_webui_state(question_source=source)
+    return {"question_source": story.QUESTION_SOURCE}
+
+
+def set_runtime_custom_question_url(url, persist=True):
+    """运行时更新自选问题链接（custom 选题来源用）。"""
+    from config import story
+    story.CUSTOM_QUESTION_URL = (url or "").strip()
+    if persist:
+        _save_webui_state(
+            custom_question_url=story.CUSTOM_QUESTION_URL)
+    return {"custom_question_url": story.CUSTOM_QUESTION_URL}
+
+
 def _apply_webui_model_override():
     """启动时恢复 Web 控制台上次选择的模型与生成通道（若存在且仍有效）。"""
     try:
@@ -337,6 +364,12 @@ def _apply_webui_model_override():
         web_preset = data.get("web_preset")
         if web_preset in ("fast", "expert"):
             set_web_mode_preset(web_preset, persist=False)
+        question_source = data.get("question_source")
+        if question_source in ("recommend", "invited", "custom"):
+            set_runtime_question_source(question_source, persist=False)
+        if "custom_question_url" in data:
+            set_runtime_custom_question_url(
+                data["custom_question_url"], persist=False)
         tunables = data.get("story_tunables")
         if isinstance(tunables, dict):
             from config import story as _story

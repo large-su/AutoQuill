@@ -59,27 +59,40 @@ class ZhihuWorkflow(WorkflowBase):
     # ============================================================
 
     def select_topic(self):
-        from config.story import QUESTION_SELECT_MODE
+        from config.story import QUESTION_SELECT_MODE, QUESTION_SOURCE
+
+        browser = self._browser()
+        self._require_login(browser)
+
+        # 自选问题：跳过选题环节，直接进入给定问题的提取
+        if QUESTION_SOURCE == "custom":
+            return self._select_custom(browser)
 
         log.info("=" * 50)
         log.info(f"步骤 1：选题（{QUESTION_SELECT_MODE}，DOM 通道）")
         log.info("=" * 50)
 
-        browser = self._browser()
-        self._require_login(browser)
-
         if QUESTION_SELECT_MODE == "auto":
             return self._select_auto(browser)
         return self._select_manual(browser)
 
-    def _scan_recommend(self, browser, retries=2):
-        """DOM 扫描推荐页：卡片解析（含热度标签）→ 评分。
+    def _source_url(self):
+        """选题候选池 URL：跟随设置里的选题来源（默认推荐话题）。"""
+        from config.story import (QUESTION_SOURCE, ZHIHU_INVITED_URL,
+                                  ZHIHU_RECOMMEND_URL)
+        if QUESTION_SOURCE == "invited":
+            return ZHIHU_INVITED_URL
+        return ZHIHU_RECOMMEND_URL
 
+    def _scan_recommend(self, browser, url=None, retries=2):
+        """DOM 扫描候选页：卡片解析（含热度标签）→ 评分。
+
+        url 为选题候选池（推荐话题/邀请回答页，None 走默认推荐页）；
         返回 (all_qs, hot_qs, normal_qs)；重试仍失败返回 (None, None, None)。
-        推荐页偶尔风控/加载抖动导致卡片为空，重试可自愈。
+        候选页偶尔风控/加载抖动导致卡片为空，重试可自愈。
         """
         for attempt in range(retries + 1):
-            browser.open_recommend_page()
+            browser.open_recommend_page(url)
             all_qs = browser.get_recommend_questions(max_cards=40)
             if all_qs:
                 for q in all_qs:
@@ -117,10 +130,11 @@ class ZhihuWorkflow(WorkflowBase):
         from config.story import (
             ENABLE_STORY_FILTER, MAX_SELECT_SCREENS)
 
-        all_qs, hot_qs, normal_qs = self._scan_recommend(browser)
+        all_qs, hot_qs, normal_qs = self._scan_recommend(
+            browser, self._source_url())
         if not all_qs:
             raise RuntimeError(
-                "推荐页 DOM 解析为空（登录态/网络/页面结构，可重试）")
+                "候选页 DOM 解析为空（登录态/网络/页面结构，可重试）")
 
         log.info(f"  DOM 解析到 {len(all_qs)} 个问题"
                  f"（飙升 {len(hot_qs)} / 普通 {len(normal_qs)}）")
@@ -183,10 +197,11 @@ class ZhihuWorkflow(WorkflowBase):
 
     def _select_manual(self, browser):
         """手动选题：DOM 解析供参考，输入编号进入（无需鼠标）。"""
-        all_qs, hot_qs, normal_qs = self._scan_recommend(browser)
+        all_qs, hot_qs, normal_qs = self._scan_recommend(
+            browser, self._source_url())
         if not all_qs:
             raise RuntimeError(
-                "推荐页 DOM 解析为空（登录态/网络/页面结构，可重试）")
+                "候选页 DOM 解析为空（登录态/网络/页面结构，可重试）")
 
         # 规则筛选（替代 LLM 筛选）
         normal_filtered = self._apply_story_filter(normal_qs) or normal_qs
@@ -209,6 +224,29 @@ class ZhihuWorkflow(WorkflowBase):
         best = candidates[idx]
         browser.open_question(best["href"])
         return best["href"]
+
+    def _select_custom(self, browser):
+        """自选问题模式：跳过选题环节，直接进入给定问题的提取。
+
+        校验设置里的问题链接（normalize_question_url 可识别
+        /question/{id}）；无效则明确报错提醒，绝不静默回退选题。"""
+        from config.story import CUSTOM_QUESTION_URL
+        from applications.zhihu_story.browser_adapter import (
+            normalize_question_url)
+
+        log.info("=" * 50)
+        log.info("步骤 1：选题（自选问题，跳过选题）")
+        log.info("=" * 50)
+
+        url = normalize_question_url(CUSTOM_QUESTION_URL)
+        if not url:
+            raise RuntimeError(
+                "自选问题网址无效：请在设置「选题来源」→「自选问题」"
+                "中填入正确的知乎问题链接"
+                "（https://www.zhihu.com/question/…）")
+        log.info(f"  自选问题：{url}")
+        browser.open_question(url)
+        return url
 
     def _material_likes_pass(self, likes, min_likes):
         """点赞门槛判定（batch 与 single 共用）。返回 (通过?, 原因)。
@@ -488,11 +526,19 @@ class ZhihuWorkflow(WorkflowBase):
         while len(materials) < target and total_attempts < MAX_TOTAL_ATTEMPTS:
             refresh_count += 1
             log.info(f"\n{'='*40}")
-            log.info(f"  🔄 推荐页第 {refresh_count} 次加载"
+            log.info(f"  🔄 候选页第 {refresh_count} 次加载"
                      f"（已采集 {len(materials)}/{target}）")
             log.info(f"{'='*40}")
 
-            browser.open_recommend_page()
+            # 批量采集跟随选题来源（邀请回答/推荐话题）；
+            # 自选问题模式仅支持单篇，批量时回退推荐页
+            from config.story import QUESTION_SOURCE, ZHIHU_RECOMMEND_URL
+            source_url = (ZHIHU_RECOMMEND_URL
+                          if QUESTION_SOURCE == "custom"
+                          else self._source_url())
+            if QUESTION_SOURCE == "custom":
+                log.warning("  自选问题模式仅用于单篇，批量采集回退「推荐话题」")
+            browser.open_recommend_page(source_url)
 
             # ── 内层：逐屏滚动 ──
             for page_idx in range(SCROLLS_PER_REFRESH):

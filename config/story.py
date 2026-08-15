@@ -12,7 +12,8 @@
 
 __all__ = [
     # 模式设置
-    "QUESTION_SELECT_MODE", "ENABLE_STORY_FILTER",
+    "QUESTION_SELECT_MODE", "ENABLE_STORY_FILTER", "QUESTION_SOURCE",
+    "CUSTOM_QUESTION_URL",
     # 选题规则筛选
     "STORY_INCLUDE_KEYWORDS", "MAX_SELECT_SCREENS",
     # 格式与素材
@@ -26,7 +27,7 @@ __all__ = [
     "READER_SCORE_W_LIKES", "READER_SCORE_W_COMMENTS", "READER_SCORE_W_COLLECTS",
     "READER_SCORE_W_HEARTS", "READER_SCORE_REF_AGE_DAYS", "READER_SCORE_DECAY_EXPONENT",
     # URL 与等待时间
-    "ZHIHU_RECOMMEND_URL",
+    "ZHIHU_RECOMMEND_URL", "ZHIHU_INVITED_URL",
     "WAIT_ZHIHU_PAGE_LOAD", "WAIT_WRITE_ANSWER_CLICK", "WAIT_EDITOR_CLICK",
     "WAIT_AFTER_PASTE", "WAIT_CONFIRM_CLICK", "WAIT_DRAFT_SAVE",
     "WAIT_FOCUS_SETTLE", "WAIT_AFTER_HOME", "WAIT_ANSWER_LOAD_TRIGGER",
@@ -61,6 +62,13 @@ __all__ = [
 
 # 选题模式："manual" = 手动选题 / "auto" = 全自动评分选题
 QUESTION_SELECT_MODE = "auto"
+
+# 选题来源："recommend" = 创作中心推荐话题（默认）/ "invited" = 邀请回答
+#           / "custom" = 自选问题（CUSTOM_QUESTION_URL，跳过选题直接提取）
+QUESTION_SOURCE = "recommend"
+
+# 自选问题模式的问题链接（Web 控制台设置里填写，运行时校验）
+CUSTOM_QUESTION_URL = ""
 
 # 故事领域筛选开关（True = 用规则筛选非故事类问题）
 ENABLE_STORY_FILTER = True
@@ -147,6 +155,7 @@ READER_SCORE_DECAY_EXPONENT = 0.5
 # ============================================================
 
 ZHIHU_RECOMMEND_URL = "https://www.zhihu.com/creator/featured-question/recommend"
+ZHIHU_INVITED_URL = "https://www.zhihu.com/creator/featured-question/invited"
 
 # ============================================================
 # 知乎专用等待时间（秒）

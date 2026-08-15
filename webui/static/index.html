@@ -205,6 +205,8 @@
     letter-spacing: 2px; text-transform: uppercase; margin-bottom: 12px;
   }
   .st-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 12px; }
+  /* 行级 display 会覆盖 hidden 属性的 UA 样式（display:none），必须显式兜底 */
+  [hidden] { display: none !important; }
   .st-row:last-child { margin-bottom: 4px; }
   .st-k { flex: 0 0 96px; font-size: 12.5px; color: var(--muted); }
   /* 设置操作结果状态条（修改即生效，无需应用按钮） */
@@ -825,6 +827,26 @@
       <div class="st-group">
         <div class="st-title">工作设置</div>
         <div class="st-row">
+          <div class="st-k">选题来源</div>
+          <div class="st-ctl">
+            <select id="questionSourceSel">
+              <option value="recommend">推荐话题（创作中心）</option>
+              <option value="invited">邀请回答（创作中心）</option>
+              <option value="custom">自选问题</option>
+            </select>
+          </div>
+          <div class="st-d">选题环节从哪个问题池里选（默认推荐话题）</div>
+        </div>
+        <div class="st-row" id="customUrlRow" hidden>
+          <div class="st-k">问题链接</div>
+          <div class="st-ctl">
+            <input type="text" id="customUrlInput"
+                   placeholder="https://www.zhihu.com/question/xxxx"
+                   style="width:100%;box-sizing:border-box">
+          </div>
+          <div class="st-d">自选问题模式：直接回答该问题（跳过选题）</div>
+        </div>
+        <div class="st-row">
           <div class="st-k">作者文风</div>
           <div class="st-ctl">
             <select id="authorSel"><option value="">（加载中…）</option></select>
@@ -855,6 +877,7 @@ const STATE_TEXT = {
 const CFG_LABELS = {
   LLM_MODE: "LLM 模式", LLM_PROVIDER: "提供商", LLM_MODEL: "模型",
   QUESTION_SELECT_MODE: "选题模式",
+  QUESTION_SOURCE: "选题来源",
   STORY_MATERIAL_MODE: "素材模式", AUTHOR_PROFILE: "作者风格",
   ENABLE_FORMAT_RETRY: "格式重试", MIN_ANSWER_LENGTH: "最短回答",
   MAX_TOPIC_RETRY: "选题重试",
@@ -1179,9 +1202,10 @@ async function loadConfig() {
     grid.innerHTML = "";
     Object.entries(CFG_LABELS).forEach(([k, label]) => {
       if (!(k in cfg) || TUNABLE_KEYS.has(k)) return;  // 可调参数在设置弹窗中编辑
-      const v = cfg[k];
+      let v = cfg[k];
       const cls = (typeof v === "boolean") ? (v ? "on" : "off") : "";
-      const txt = (typeof v === "boolean") ? (v ? "开" : "关") : String(v);
+      let txt = (typeof v === "boolean") ? (v ? "开" : "关") : String(v);
+      if (k === "QUESTION_SOURCE") txt = ({recommend: "推荐话题", invited: "邀请回答", custom: "自选问题"})[v] || txt;
       const cell = document.createElement("div");
       cell.className = "cfg-cell";
       cell.innerHTML = `<div class="k">${esc(label)}</div><div class="v ${cls}">${esc(txt)}</div>`;
@@ -1433,6 +1457,66 @@ async function applyWebPreset() {
 }
 
 $("webPresetSel").addEventListener("change", applyWebPreset);
+
+
+/* ---------- 选题来源 ---------- */
+
+let questionSource = "recommend";
+
+const QUESTION_SOURCE_LABELS = {recommend: "推荐话题", invited: "邀请回答", custom: "自选问题"};
+
+async function loadQuestionSource() {
+  try {
+    const r = await fetch("/api/question-source");
+    const data = await r.json();
+    questionSource = data.source;
+    $("questionSourceSel").value = data.source;
+    $("customUrlInput").value = data.custom_url || "";
+    $("customUrlRow").hidden = (data.source !== "custom");
+  } catch (e) { /* 旧服务无此端点 */ }
+}
+
+async function applyQuestionSource() {
+  const val = $("questionSourceSel").value;
+  if (val === questionSource) return;
+  try {
+    const r = await fetch("/api/question-source", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: val, custom_url: $("customUrlInput").value.trim() }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
+    const data = await r.json();
+    questionSource = data.effective.question_source;
+    $("customUrlRow").hidden = (questionSource !== "custom");
+    loadConfig();
+    addLog(`选题来源已切换 → ${QUESTION_SOURCE_LABELS[questionSource]}`, "result");
+    showStStatus(`选题来源 → ${QUESTION_SOURCE_LABELS[questionSource]}`, "ok");
+  } catch (e) {
+    $("questionSourceSel").value = questionSource;
+    showStStatus("切换失败：" + e.message, "err");
+  }
+}
+
+async function saveCustomUrl() {
+  const url = $("customUrlInput").value.trim();
+  try {
+    const r = await fetch("/api/question-source", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "custom", custom_url: url }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
+    const data = await r.json();
+    $("customUrlInput").value = data.effective.custom_question_url || "";
+    showStStatus("自选问题链接已保存", "ok");
+  } catch (e) {
+    showStStatus("保存失败：" + e.message, "err");
+  }
+}
+
+$("questionSourceSel").addEventListener("change", applyQuestionSource);
+$("customUrlInput").addEventListener("change", saveCustomUrl);
 
 
 /* ---------- 作者文风 ---------- */
@@ -1934,7 +2018,8 @@ $("btnSetup").addEventListener("click", () => {
   // 首次引导未完成 → 打开引导向导；已完成 → 打开设置弹窗
   if (setupNeeded) { loadSetupStatus(); return; }
   $("settingsMask").classList.add("show");
-  loadConfig(); loadMode(); loadBrowserMode(); loadWebPreset(); loadAuthors();
+  loadConfig(); loadMode(); loadBrowserMode(); loadWebPreset();
+  loadAuthors(); loadQuestionSource();
 });
 
 $("settingsClose").addEventListener("click", () => $("settingsMask").classList.remove("show"));
