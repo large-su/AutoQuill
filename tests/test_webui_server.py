@@ -359,6 +359,94 @@ class TestServerAPI(unittest.TestCase):
             config.set_runtime_browser_headless(orig, persist=False)
 
 
+class TestLocalOnlyGuard(unittest.TestCase):
+    """本地单机守卫：Host 白名单 + Origin 同源校验（DNS rebinding / 跨站盲打）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(server.app)
+
+    def test_default_host_allowed(self):
+        # TestClient 默认 Host=testserver，白名单内放行
+        r = self.client.get("/api/config")
+        self.assertEqual(r.status_code, 200)
+
+    def test_evil_host_rejected(self):
+        # DNS rebinding：伪造 Host 头直连本机端口 → 403
+        r = self.client.get("/", headers={"Host": "evil.example.com"})
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("Host", r.json()["detail"])
+
+    def test_evil_host_rejected_on_api(self):
+        r = self.client.post("/api/run", headers={"Host": "evil.example.com"},
+                             json={"mode": "select"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_evil_origin_rejected(self):
+        # 跨站盲打：真实 Host + 攻击者 Origin → 403
+        r = self.client.get("/api/config",
+                            headers={"Origin": "http://evil.example.com"})
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("Origin", r.json()["detail"])
+
+    def test_evil_origin_rejected_on_post(self):
+        r = self.client.post("/api/run", headers={"Origin": "http://evil.example.com"},
+                             json={"mode": "select"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_same_origin_allowed(self):
+        # 同源 Origin（本机页面自身的 POST）放行
+        r = self.client.get("/api/config",
+                            headers={"Origin": f"http://127.0.0.1:{server.PORT}"})
+        self.assertEqual(r.status_code, 200)
+
+    def test_localhost_origin_allowed(self):
+        r = self.client.get("/api/config",
+                            headers={"Origin": f"http://localhost:{server.PORT}"})
+        self.assertEqual(r.status_code, 200)
+
+
+class TestCollectUrlGuard(unittest.TestCase):
+    """POST /api/run collect 模式 URL 域名白名单（知乎域）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(server.app)
+
+    def test_non_zhihu_domain_rejected(self):
+        r = self.client.post("/api/run", json={
+            "mode": "collect",
+            "url": "https://example.com/people/x/answers",
+            "count": 5,
+        })
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("知乎", r.json()["detail"])
+
+    def test_http_scheme_rejected(self):
+        r = self.client.post("/api/run", json={
+            "mode": "collect",
+            "url": "http://www.zhihu.com/people/x/answers",
+            "count": 5,
+        })
+        self.assertEqual(r.status_code, 400)
+
+    def test_zhihu_suffix_impostor_rejected(self):
+        # zhihu.com 前缀伪装（evilzhihu.com）不在白名单
+        r = self.client.post("/api/run", json={
+            "mode": "collect",
+            "url": "https://evilzhihu.com/people/x/answers",
+            "count": 5,
+        })
+        self.assertEqual(r.status_code, 400)
+
+    def test_zhihu_urls_accepted(self):
+        # 合法知乎 URL（含子域/查询串）通过白名单，不抛 400
+        for url in ("https://www.zhihu.com/people/x/answers",
+                    "https://zhihu.com/people/x/answers",
+                    "https://www.zhihu.com/people/x/answers?page=2"):
+            server._require_zhihu_url(url)
+
+
 class TestAuthorEndpoints(unittest.TestCase):
     """文风列表 / 切换 / 提炼任务分发。"""
 
@@ -927,9 +1015,13 @@ class TestSetupEndpoints(unittest.TestCase):
         fake.status_code = 200
         fake.json.return_value = {"choices": [
             {"message": {"content": "连接成功"}}]}
-        with mock.patch("webui.server.requests.post",
-                        return_value=fake) as m:
-            r = self.client.post("/api/setup/test-api")
+        # 连接测试前需通过 API Key 就绪校验（示例配置是占位 key，
+        # 这里按「已填有效 key」模拟 _load_provider_config 的返回值）
+        with mock.patch("config._load_provider_config",
+                        return_value={"apiKey": "sk-real-123"}):
+            with mock.patch("webui.server.requests.post",
+                            return_value=fake) as m:
+                r = self.client.post("/api/setup/test-api")
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["ok"])
         # 请求确实发往 baseUrl + 认证头

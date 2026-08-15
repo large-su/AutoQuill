@@ -23,7 +23,7 @@ from pathlib import Path
 
 import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from webui import log_capture
@@ -45,6 +45,37 @@ OVERALL_LIMIT = 900.0
 
 # run 线程最后一条日志的时间戳（CaptureHandler.emit 更新）
 _last_log_ts = [0.0]
+
+
+# ---------- LLM 通道可用性（任务前预检 / 切换 / 引导状态 / 测试连接共用） ----------
+
+def _llm_configured():
+    """当前服务商/模型的 API Key 是否就绪（非空、非占位符、非掩码）。"""
+    from config import LLM_MODEL_ID, LLM_PROVIDER, _load_provider_config
+    try:
+        key = (_load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
+               .get("apiKey") or "").strip()
+    except Exception:
+        return False
+    return bool(key) and key != "密" and not key.startswith("sk-your-")
+
+
+def _require_llm_ready(detail="API Key 未配置或仍是占位符"):
+    """API 通道硬校验：未就绪抛 400（切换通道 / 测试连接用）。"""
+    if not _llm_configured():
+        raise HTTPException(400, detail)
+    return True
+
+
+def _require_zhihu_url(url):
+    """采集 URL 域名白名单：仅接受 https 的 zhihu.com 及其子域。"""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (host == "zhihu.com"
+                                        or host.endswith(".zhihu.com")):
+        raise HTTPException(400, "采集地址仅支持知乎域名"
+                                "（https://*.zhihu.com/...）")
 
 
 class _TimedHandler(logging.Handler):
@@ -158,11 +189,7 @@ class TaskRunner:
                         guide="deepseek_login")
                     return
             else:
-                from config import (LLM_MODEL_ID, LLM_PROVIDER,
-                                    _load_provider_config)
-                key = (_load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
-                       .get("apiKey") or "").strip()
-                if not key or key.startswith("sk-your-"):
+                if not _llm_configured():
                     self._finish(
                         "error",
                         "API 模式需要先配置 API Key："
@@ -435,6 +462,25 @@ def _profile_summary(profile):
 runner = TaskRunner()
 app = FastAPI(title="AutoQuill Web 控制台")
 
+# 本地单机守卫：Host 白名单 + 同源 Origin 校验。
+# 拦 DNS rebinding（攻击者域名解析到 127.0.0.1 后，浏览器带着攻击者
+# Host 头直连本机端口）与跨站盲打；testserver 放行测试客户端。
+_ALLOWED_HOSTS = {f"{HOST}:{PORT}", f"localhost:{PORT}", "testserver"}
+_ALLOWED_ORIGINS = {f"http://{HOST}:{PORT}", f"http://localhost:{PORT}"}
+
+
+@app.middleware("http")
+async def _guard_localhost_only(request, call_next):
+    host = (request.headers.get("host") or "").lower()
+    if host not in _ALLOWED_HOSTS:
+        return JSONResponse({"detail": "非法 Host：仅允许本机访问"},
+                            status_code=403)
+    origin = request.headers.get("origin")
+    if origin and origin not in _ALLOWED_ORIGINS:
+        return JSONResponse({"detail": "非法 Origin：跨站请求被拒绝"},
+                            status_code=403)
+    return await call_next(request)
+
 
 # ============================================================
 # 页面与 API
@@ -645,16 +691,11 @@ def api_set_mode(spec: _ModeSpec):
                     "needs": "deepseek_login",
                 })
         else:
-            from config import (LLM_MODEL_ID, LLM_PROVIDER,
-                                _load_provider_config)
-            key = (_load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
-                   .get("apiKey") or "").strip()
-            if not key or key.startswith("sk-your-"):
-                raise HTTPException(400, {
-                    "detail": "尚未配置 API Key，无法切换。"
-                              "请在设置中填写有效的 API Key 后重试。",
-                    "needs": "api_key",
-                })
+            _require_llm_ready({
+                "detail": "尚未配置 API Key，无法切换。"
+                          "请在设置中填写有效的 API Key 后重试。",
+                "needs": "api_key",
+            })
         eff = set_runtime_mode(spec.mode)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -728,14 +769,7 @@ def api_setup_status():
     """
     from applications.zhihu_story.browser_adapter import (
         EDGE_PATH, STORAGE_STATE_PATH)
-    from config import LLM_MODEL_ID, LLM_PROVIDER, _load_provider_config
-    llm_configured = False
-    try:
-        key = (_load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
-               .get("apiKey") or "").strip()
-        llm_configured = bool(key) and not key.startswith("sk-your-")
-    except Exception:
-        pass
+    llm_configured = _llm_configured()
     edge_ok = bool(EDGE_PATH)
     zhihu_logged_in = os.path.exists(STORAGE_STATE_PATH)
     web_ok = _web_llm_logged_in_cached() if edge_ok else False
@@ -790,9 +824,8 @@ def api_setup_apikey(spec: _ApiKeySpec):
 @app.post("/api/setup/test-api")
 def api_setup_test_api():
     """实测当前配置的 API 连接（首启引导「测试连接」按钮）。"""
-    from config import LLM_API_BASE_URL, LLM_API_KEY
-    if not LLM_API_KEY or LLM_API_KEY.startswith("sk-your-"):
-        raise HTTPException(400, "API Key 未配置或仍是占位符")
+    _require_llm_ready("API Key 未配置或仍是占位符")
+    from config import LLM_API_BASE_URL
     if not LLM_API_BASE_URL:
         raise HTTPException(400, "缺少 baseUrl（服务商配置不完整）")
     from llm_client import call_llm_non_streaming
@@ -1068,6 +1101,8 @@ def api_profile_sources():
 
 @app.post("/api/run")
 def api_run(spec: _RunSpec):
+    if spec.mode == "collect":
+        _require_zhihu_url(spec.url)
     runner.start(spec)
     return {"ok": True}
 
