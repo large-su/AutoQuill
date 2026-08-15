@@ -602,15 +602,22 @@ class ZhihuBrowser:
     # ----------------------------------------------------------
 
     def get_author_answer_links(self, author_page_url):
-        """作者主页 → 全部答案链接：[{title, href, likes, comments}]"""
+        """作者主页 → 全部答案链接：[{title, href, likes, comments}]
+
+        列表轮询等待：渲染慢时（无头模式/慢网络）一次固定等待常
+        读空——V4.2.2 用户反馈无头采集 0 篇（「答案列表未出现」×5
+        后列表读尽，切前台同作者立即可采）。轮询直到链接非空。"""
         self.page.goto(author_page_url, wait_until="domcontentloaded",
                        timeout=_NAV_TIMEOUT)
-        try:
-            self.page.wait_for_selector(".List-item, .AnswerItem", timeout=8000)
-        except Exception:
-            log.warning("browser_adapter: 作者页答案列表未出现，继续")
-        time.sleep(0.5)
-        return self._safe_evaluate(_AUTHOR_LINKS_JS) or []
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            _check_cancel()
+            links = self._safe_evaluate(_AUTHOR_LINKS_JS) or []
+            if links:
+                return links
+            time.sleep(1)
+        log.warning("browser_adapter: 作者页答案列表 20s 内未出现，继续")
+        return []
 
     def get_author_answer(self, answer_url, author, min_length=100):
         """打开该作者某篇答案的独立回答页，提取回答全文。

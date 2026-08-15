@@ -210,6 +210,18 @@ class TestCollectFlow(CollectBase):
         self.assertGreaterEqual(browser.scrolls, 1, "必须触发滚动加载")
         self.assertEqual(len(self._records()), 3)
 
+    def test_scroll_load_more_polls_for_new_links(self):
+        # ★ 回归：滚动后固定 1.5s 等待在无头/慢渲染下常读不到新链接
+        #   ——V4.2.2 用户反馈无头采集 0 篇（切前台同作者立即可采）。
+        #   改为轮询直到新链接出现（10s deadline，0.8s 间隔）
+        import inspect
+        src = inspect.getsource(collector._scroll_load_more)
+        self.assertIn("deadline = time.time() + 10", src)
+        self.assertIn("while time.time() < deadline", src)
+        self.assertIn("time.sleep(0.8)", src)
+        self.assertIn("_AUTHOR_LINKS_JS", src)
+        self.assertNotIn("sleep(1.5)", src)   # 固定等待窗口已移除
+
     def test_collect_exhausted_stops(self):
         # 列表读尽且滚动无新增 → 停止，不挂死
         browser = FakeBrowser(

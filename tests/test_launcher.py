@@ -288,6 +288,41 @@ class TestNoConsoleWindow(unittest.TestCase):
         # 源码态仍保留控制台提示路径
         self.assertIn("_pause()", src)
 
+    def test_main_prewarms_webview_during_poll(self):
+        # 启动速度优化：服务就绪轮询期间并行预热 pywebview（WinForms
+        # 程序集加载 ~1s），open_window 的 import 命中缓存，不串行等待
+        import inspect
+        from tools.launcher import main
+        src = inspect.getsource(main)
+        self.assertIn("_prewarm_webview", src)
+        self.assertIn("threading.Thread(target=_prewarm_webview, daemon=True)",
+                      src)
+        self.assertIn("time.sleep(0.3)", src)   # 就绪感知间隔细化
+
+    def test_prewarm_webview_imports_winforms_silently(self):
+        # 预热目标：webview + winforms；任何失败都静默（不影响主流程）
+        import inspect
+        from tools.launcher import _prewarm_webview
+        src = inspect.getsource(_prewarm_webview)
+        self.assertIn("import webview.platforms.winforms", src)
+        self.assertIn("except Exception", src)
+
+    def test_open_window_logs_shown_timing(self):
+        # 启动耗时审计：窗口显示时写 launcher.log（open_window 起耗时）
+        import inspect
+        from tools.launcher import open_window
+        src = inspect.getsource(open_window)
+        self.assertIn("窗口已显示（open_window 起", src)
+        self.assertIn("events.shown", src)
+
+    def test_main_logs_startup_phase_timing(self):
+        # 启动耗时审计：launcher.log 记录启动起点与「服务就绪」耗时
+        import inspect
+        from tools.launcher import main
+        src = inspect.getsource(main)
+        self.assertIn("_log_diag(\"启动器开始启动\")", src)
+        self.assertIn("服务就绪（启动后", src)
+
 
 class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
     """真实 Win32 窗口端到端：真实形态 IntPtr → ToInt64 转换 → 深色生效。

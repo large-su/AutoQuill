@@ -259,6 +259,19 @@ class TestSemanticInterfaces(unittest.TestCase):
         self.assertNotIn("open_question", src)   # 不再经问题页幂等导航
         self.assertNotIn("normalize_question_url", src)
 
+    def test_get_author_answer_links_polls_until_nonempty(self):
+        # ★ 回归：无头模式/慢渲染下固定等待窗口常读空——V4.2.2 用户
+        #   反馈无头采集 0 篇（「答案列表未出现」×5 后列表读尽，切前台
+        #   同作者立即可采）。必须轮询直到链接非空，不再 wait_for_selector
+        src = self._src("get_author_answer_links")
+        self.assertIn("deadline = time.time() + 20", src)
+        self.assertIn("while time.time() < deadline", src)
+        self.assertIn("_AUTHOR_LINKS_JS", src)
+        self.assertIn("if links:", src)
+        self.assertIn("time.sleep(1)", src)
+        self.assertNotIn("wait_for_selector", src)   # 固定等待窗口（8s）
+        self.assertNotIn("wait_for_timeout", src)
+
     def test_wait_container_detect_scroll_return_loop(self):
         # 懒加载循环：检测 → 无则下滑触发渲染 → 等渲染完成（最多 ~2s）
         # → 滑回原位 → 再检测。回位是关键：一直下滑会触发无限加载更多

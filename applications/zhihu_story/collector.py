@@ -122,7 +122,9 @@ def _scroll_load_more(browser, url, done, seen):
 
     提取详情时会离开列表页（页面停在答案页），滚动前必须重新
     进入列表页。滚动到底触发无限滚动，最多滚 4 轮，无未采集
-    新链接即返回 []（调用方据此停止）。"""
+    新链接即返回 []（调用方据此停止）。滚动后轮询等待新链接
+    （固定 1.5s 在慢渲染/无头下常读不到——V4.2.2 用户反馈无头
+    采集 0 篇）。"""
     from applications.zhihu_story.browser_adapter import (
         _AUTHOR_LINKS_JS, _check_cancel)
     for _ in range(4):
@@ -132,11 +134,14 @@ def _scroll_load_more(browser, url, done, seen):
             browser.eval_js(_SCROLL_LOAD_JS)
         except Exception:
             pass
-        time.sleep(1.5)  # 等无限滚动渲染（FakeBrowser 测试同路径）
-        links = browser.eval_js(_AUTHOR_LINKS_JS) or []
-        if any(_norm_url(l.get("href")) not in done
-               and _norm_url(l.get("href")) not in seen for l in links):
-            return links
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _check_cancel()
+            links = browser.eval_js(_AUTHOR_LINKS_JS) or []
+            if any(_norm_url(l.get("href")) not in done
+                   and _norm_url(l.get("href")) not in seen for l in links):
+                return links
+            time.sleep(0.8)
     return []
 
 

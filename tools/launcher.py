@@ -344,6 +344,18 @@ def _window_icon():
     return None
 
 
+def _prewarm_webview():
+    """后台预热 pywebview 运行时（WinForms/.NET 程序集加载约 1s）。
+
+    在服务就绪轮询期间并行执行，open_window 的 import 命中模块缓存，
+    省去窗口打开前的串行等待。失败静默——不影响主流程。"""
+    try:
+        import webview  # noqa: F401
+        import webview.platforms.winforms  # noqa: F401
+    except Exception:
+        pass
+
+
 def open_window():
     """打开控制台窗口：pywebview 独立窗口（WebView2 内核），失败回退系统浏览器。
 
@@ -353,6 +365,7 @@ def open_window():
     try:
         import inspect
         import webview
+        t0 = time.time()
 
         window = webview.create_window(
             "AutoQuill", BASE_URL,
@@ -370,6 +383,15 @@ def open_window():
                     start_kwargs["icon"] = ico
             except (ValueError, TypeError):
                 pass  # 签名不可探测 → 用默认图标，不阻断启动
+        # 窗口显示时记录就位耗时（launcher.log 启动速度审计）
+        try:
+            def _on_shown():
+                _log_diag(
+                    f"窗口已显示（open_window 起 {time.time() - t0:.1f}s）")
+
+            window.events.shown += _on_shown
+        except Exception:
+            pass
         # start(func) 在窗口创建后、显示前调用回调 → 标题栏在用户看到前已染深
         # （start 本身阻塞直到窗口关闭，样式调用不能放在其后面）
         webview.start(lambda: _apply_dark_titlebar(window), **start_kwargs)
@@ -432,6 +454,9 @@ def main():
     _redirect_frozen_stdio()
     if sys.stdout and not sys.stdout.isatty():
         sys.stdout.reconfigure(line_buffering=True)  # 管道/重定向时也让输出即时可见
+    # 启动耗时审计（launcher.log 时间戳可还原各阶段耗时）
+    t_start = time.time()
+    _log_diag("启动器开始启动")
 
     # --service：打包态服务子进程入口（启动器拉起自身后进入服务本体）。
     # 先做数据目录 bootstrap，再走 main.py 主入口（与 --web 等价，
@@ -485,6 +510,9 @@ def main():
 
     print("正在启动服务…（首次约 3-5 秒）")
     proc = start_service(python_cmd, root)
+    # 服务就绪轮询期间并行预热 pywebview（WinForms/.NET 程序集加载
+    # 约 1s，串行等会拉长启动）——open_window 的 import 命中缓存
+    threading.Thread(target=_prewarm_webview, daemon=True).start()
 
     ready = False
     deadline = time.time() + READY_TIMEOUT
@@ -494,7 +522,7 @@ def main():
         if service_alive():
             ready = True
             break
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     if not ready:
         tail = _read_log(data_root() / "logs" / "webui.log")
@@ -510,6 +538,7 @@ def main():
             _pause()
         return 1
 
+    _log_diag(f"服务就绪（启动后 {time.time() - t_start:.1f}s）")
     print(f"服务已就绪：{BASE_URL}")
     print("正在打开 AutoQuill 窗口…")
     try:
