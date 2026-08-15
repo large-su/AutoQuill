@@ -115,9 +115,15 @@ def main():
     print(f"✓ 安装包：{exe}（{exe.stat().st_size / 1e6:.1f} MB）")
 
     print("\n--- SHA256 ---")
+    import re
     r = subprocess.run(["certutil", "-hashfile", str(exe), "SHA256"],
-                       capture_output=True, text=True)
-    digest = [l.strip() for l in r.stdout.splitlines() if len(l.strip()) == 64][0]
+                       capture_output=True)
+    text = r.stdout.decode("utf-8", errors="replace") + \
+        r.stdout.decode("gbk", errors="replace")
+    m = re.search(r"[0-9a-fA-F]{64}", text)
+    if not m:
+        sys.exit("✗ 无法从 certutil 输出提取 SHA256")
+    digest = m.group(0).lower()
     sha_file = exe.with_suffix(exe.suffix + ".sha256")
     sha_file.write_text(digest, encoding="utf-8")
     print(f"✓ {digest}")
