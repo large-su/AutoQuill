@@ -247,9 +247,14 @@ def _find_titlebar_handle(window):
     except Exception:
         pass
     if os.name == "nt":
-        # 兜底：按窗口标题找（防 native 结构变化导致取不到句柄）
+        # 兜底：按窗口标题找（防 native 结构变化导致取不到句柄）。
+        # 显式声明签名：默认 restype 按 32 位截断，64 位句柄会错位
         import ctypes
-        hwnd = ctypes.windll.user32.FindWindowW(None, "AutoQuill")
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.FindWindowW.restype = wintypes.HWND
+        hwnd = user32.FindWindowW(None, "AutoQuill")
         if hwnd:
             return hwnd
     return 0
@@ -272,14 +277,28 @@ def _apply_dark_titlebar(window):
             if not handle:
                 _log_diag("深色标题栏：未取得窗口句柄，跳过")
                 return
+            # pywebview WinForms 的 Handle 是 .NET IntPtr 对象（非 int），
+            # ctypes 直接传会 TypeError: wrong type（新电脑线上证据）→ 转 int
+            if not isinstance(handle, int):
+                try:
+                    handle = int(handle)
+                except Exception as exc:
+                    _log_diag(f"深色标题栏：句柄无法转 int：{exc}")
+                    return
+                if not handle:
+                    return
+            # 显式声明签名：句柄按 64 位传递，防默认 c_int 截断
+            dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            dwm.argtypes = [wintypes.HWND, wintypes.DWORD,
+                            wintypes.LPCVOID, wintypes.DWORD]
+            dwm.restype = ctypes.HRESULT
             # DWMWA_USE_IMMERSIVE_DARK_MODE：20（Win10 1809+ / Win11），
             # 19 为旧值（更早的 Win10 构建用 19）
             last_hr = 0
             for attr in (20, 19):
                 value = wintypes.BOOL(True)
-                hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    handle, attr, ctypes.byref(value),
-                    ctypes.sizeof(value))
+                hr = dwm(wintypes.HWND(handle), attr, ctypes.byref(value),
+                         ctypes.sizeof(value))
                 if hr == 0:
                     return
                 last_hr = hr

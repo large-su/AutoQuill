@@ -58,7 +58,9 @@ class ZhihuWorkflow(WorkflowBase):
     # 步骤1：选题（DOM）
     # ============================================================
 
-    def select_topic(self):
+    def select_topic(self, avoid=None):
+        """选题；avoid 为已尝试过的问题 href 集合（重选时避开，
+        否则候选池不变时会反复选到同一题直到重试耗尽）。"""
         from config.story import QUESTION_SELECT_MODE, QUESTION_SOURCE
 
         browser = self._browser()
@@ -73,8 +75,8 @@ class ZhihuWorkflow(WorkflowBase):
         log.info("=" * 50)
 
         if QUESTION_SELECT_MODE == "auto":
-            return self._select_auto(browser)
-        return self._select_manual(browser)
+            return self._select_auto(browser, avoid=avoid)
+        return self._select_manual(browser, avoid=avoid)
 
     def _source_url(self):
         """选题候选池 URL：跟随设置里的选题来源（默认推荐话题）。"""
@@ -120,15 +122,16 @@ class ZhihuWorkflow(WorkflowBase):
             score *= 2
         return score
 
-    def _select_auto(self, browser):
+    def _select_auto(self, browser, avoid=None):
         """全自动选题：DOM 解析 → 热度检测 → 规则筛选 → 评分选最优。
 
         筛选为空（整页无故事类问题）时滚动推荐页扩池重扫，最多
         MAX_SELECT_SCREENS 屏；仍无命中则明确报错——绝不静默选非
         故事热门话题（线上曾因此选到「美伊战争」）。
-        """
+        avoid：已尝试问题 href 集合，选优与扩池时一并排除。"""
         from config.story import (
             ENABLE_STORY_FILTER, MAX_SELECT_SCREENS)
+        avoid = avoid or set()
 
         all_qs, hot_qs, normal_qs = self._scan_recommend(
             browser, self._source_url())
@@ -146,7 +149,7 @@ class ZhihuWorkflow(WorkflowBase):
             log.info(f"    {i+1}. {q['title'][:35]}{hot_flag} "
                      f"score={q['score']:.0f} {sig}")
 
-        best = self._pick_best(all_qs, hot_qs, normal_qs)
+        best = self._pick_best(all_qs, hot_qs, normal_qs, avoid)
 
         # 筛选为空 → 滚动扩池重扫（瀑布流要滚动才渲染更多卡片）
         seen = {q["href"] for q in all_qs}
@@ -158,7 +161,8 @@ class ZhihuWorkflow(WorkflowBase):
                         f"{MAX_SELECT_SCREENS} 屏找故事类问题")
             browser.scroll_feed()
             fresh = [q for q in browser.get_recommend_questions(max_cards=60)
-                     if q.get("href") not in seen]
+                     if q.get("href") not in seen
+                     and q.get("href") not in avoid]
             if not fresh:
                 continue
             seen.update(q["href"] for q in fresh)
@@ -168,12 +172,14 @@ class ZhihuWorkflow(WorkflowBase):
             hot_qs = hot_qs + [q for q in fresh if q.get("is_hot")]
             normal_qs = normal_qs + [q for q in fresh
                                      if not q.get("is_hot")]
-            best = self._pick_best(all_qs, hot_qs, normal_qs)
+            best = self._pick_best(all_qs, hot_qs, normal_qs, avoid)
 
         if best is None:
+            tried = (f"，已尝试 {len(avoid)} 个候选均不满足要求"
+                     if avoid else "")
             raise RuntimeError(
                 "推荐页扫描多屏均未发现故事类问题（关键词白名单无"
-                "命中）。可重试（推荐页内容会刷新），或把 "
+                f"命中{tried}）。可重试（推荐页内容会刷新），或把 "
                 "QUESTION_SELECT_MODE 改为 manual 手动选题。")
 
         log.info("")
@@ -195,8 +201,10 @@ class ZhihuWorkflow(WorkflowBase):
         browser.open_question(best["href"])
         return best["href"]
 
-    def _select_manual(self, browser):
-        """手动选题：DOM 解析供参考，输入编号进入（无需鼠标）。"""
+    def _select_manual(self, browser, avoid=None):
+        """手动选题：DOM 解析供参考，输入编号进入（无需鼠标）。
+        avoid：已尝试问题 href 集合（重试时排除，避免再次进入）。"""
+        avoid = avoid or set()
         all_qs, hot_qs, normal_qs = self._scan_recommend(
             browser, self._source_url())
         if not all_qs:
@@ -206,6 +214,12 @@ class ZhihuWorkflow(WorkflowBase):
         # 规则筛选（替代 LLM 筛选）
         normal_filtered = self._apply_story_filter(normal_qs) or normal_qs
         candidates = hot_qs + normal_filtered
+        if avoid:
+            candidates = [q for q in candidates if q["href"] not in avoid]
+            if not candidates:
+                raise RuntimeError(
+                    f"候选 {len(avoid)} 个均已尝试过且不满足要求，"
+                    "请更换选题来源或稍后重试")
         candidates.sort(key=lambda q: (bool(q.get("is_hot")), q["score"]),
                         reverse=True)
 
@@ -294,15 +308,27 @@ class ZhihuWorkflow(WorkflowBase):
 
         return filtered
 
-    def _pick_best(self, all_questions, hot_questions, normal_questions):
+    def _pick_best(self, all_questions, hot_questions, normal_questions,
+                   avoid=None):
         """从候选中选出最优问题；无合格候选返回 None（绝不回退）。
 
         ★ 规则筛选强制生效：筛选为空时不能回退到未筛选列表——否则
         会选到「美伊战争」这类与故事写作无关的热门话题（线上翻车
         正是这个回退：日志「规则筛选后无可用问题」后按分数选了
         美伊战争）。返回 None 由调用方滚动扩池或明确报错。
-        """
+        avoid：已尝试问题 href 集合，排除后再选优。"""
         from config.story import ENABLE_STORY_FILTER
+
+        if avoid:
+            all_questions = [q for q in all_questions
+                             if q["href"] not in avoid]
+            hot_questions = [q for q in hot_questions
+                             if q["href"] not in avoid]
+            normal_questions = [q for q in normal_questions
+                                if q["href"] not in avoid]
+            if not all_questions:
+                log.info(f"  候选已全部尝试过（{len(avoid)} 个），"
+                         "排除后无可用候选")
 
         def keep(qs):
             return self._apply_story_filter(qs) if ENABLE_STORY_FILTER else qs
@@ -358,15 +384,18 @@ class ZhihuWorkflow(WorkflowBase):
 
         browser = self._browser()
         gate_reject_count = 0   # 点赞门槛拒绝计数（重试耗尽时提示）
+        attempted = set()       # 已尝试问题 href（重选时避开，
+                                # 防候选池不变时反复选同一题）
 
         for attempt in range(MAX_TOPIC_RETRY + 1):
             if attempt > 0:
                 log.warning(f"  首答过短或不可回答，重新选题"
                             f"（第 {attempt}/{MAX_TOPIC_RETRY} 次）")
-                self.select_topic()
+                self.select_topic(avoid=attempted)
             # 确保当前停在问题页（幂等重进，防止页面被外部跳转）
             url = normalize_question_url(browser.page.url)
             if url:
+                attempted.add(url)
                 browser.open_question(url)
 
             # ★ 先快速检测本问题是否可回答（DOM 替代 OCR「撤销删除」）

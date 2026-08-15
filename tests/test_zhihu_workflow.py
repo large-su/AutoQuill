@@ -274,6 +274,46 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
         # 从 config.story 读取（单一事实来源），不硬编码次数
         self.assertIn("from config.story import", src)
 
+    def test_extract_retopic_excludes_attempted(self):
+        # ★ 回归：邀请回答/推荐页候选池固定时，重选必须排除已尝试
+        #   题目——否则每次重选同一题直到重试耗尽（用户线上复现：
+        #   「选到同一题 → 不满足 → 重选又同一题 → 选项耗尽」）。
+        src = self._src("extract_content")
+        self.assertIn("self.select_topic(avoid=attempted)", src)
+        self.assertIn("attempted.add(url)", src)
+
+    def test_select_topic_passes_avoid_down(self):
+        # select_topic 的 avoid 必须传递到 auto/manual 两条分支
+        src = self._src("select_topic")
+        self.assertIn("_select_auto(browser, avoid=avoid)", src)
+        self.assertIn("_select_manual(browser, avoid=avoid)", src)
+
+    def test_auto_select_excludes_avoided_in_expansion(self):
+        # 扩池滚动时的新卡片也要排除已尝试（防滚动后重选同一题）
+        src = self._src("_select_auto")
+        self.assertIn("q.get(\"href\") not in avoid", src)
+        self.assertIn("_pick_best(all_qs, hot_qs, normal_qs, avoid)", src)
+
+    def test_pick_best_excludes_avoided(self):
+        # _pick_best 必须过滤 avoid（行为级验证）
+        from config import story
+        orig = story.ENABLE_STORY_FILTER
+        try:
+            story.ENABLE_STORY_FILTER = False
+            qs = [
+                {"title": "A", "href": "/a", "score": 100,
+                 "is_hot": True, "is_story": True},
+                {"title": "B", "href": "/b", "score": 50,
+                 "is_hot": True, "is_story": True},
+            ]
+            best = self.wf._pick_best(qs, qs, [], avoid={"/a"})
+            self.assertEqual(best["href"], "/b")
+            # 全部尝试过 → None（由调用方明确报错，不再死循环）
+            self.assertIsNone(
+                self.wf._pick_best(qs, qs, [], avoid={"/a", "/b"}))
+        finally:
+            story.ENABLE_STORY_FILTER = orig
+
     def test_topic_retry_default_is_five(self):
         # 用户需求：选题重试 3 → 5（总尝试 6 次）
         from config import story

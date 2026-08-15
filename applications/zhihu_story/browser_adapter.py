@@ -1029,14 +1029,28 @@ def _has_deepseek_cookies(context):
 
 
 def web_llm_logged_in():
-    """网页版 LLM（chat.deepseek.com）是否已登录：持久化 profile cookie 判断。
+    """网页版 LLM（chat.deepseek.com）是否真实可登录。
+
+    判定 = deepseek.com cookie 存在 + 加载 chat.deepseek.com 未停在
+    登录页（URL 无 sign_in）。仅查 cookie 会假阳性：过期/无效 cookie
+    残留时预检放行，运行才撞登录页（线上：切 Web 成功但运行报
+    「找不到 DeepSeek 输入框」，页面停在 chat.deepseek.com/sign_in）。
 
     用独立无头实例检查，不碰共享浏览器（get_browser）——首启引导轮询
     setup/status 时不会反复弹出可见 Edge，也不影响任务浏览器的无头模式。
     返回 True/False；浏览器无法启动等异常返回 False（不阻塞引导）。"""
     try:
         with ZhihuBrowser(headless=True) as browser:
-            return _has_deepseek_cookies(browser.context)
+            if not _has_deepseek_cookies(browser.context):
+                return False
+            page = browser.context.new_page()
+            try:
+                page.goto("https://chat.deepseek.com",
+                          wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(1500)  # 等 SPA 跳转到登录页
+                return "sign_in" not in page.url
+            finally:
+                page.close()
     except Exception:
         return False
 
@@ -1045,17 +1059,19 @@ def login_deepseek_web_flow(timeout=300):
     """打开可见 Edge 到 chat.deepseek.com，等待用户登录网页版 LLM。
 
     供首启引导（/api/setup/web-login）使用；登录后 cookie 写入持久化
-    profile，web_llm_logged_in() 即可判定。返回 (是否成功, 提示信息)。"""
+    profile，web_llm_logged_in() 即可判定。返回 (是否成功, 提示信息)。
+    登录完成判定 = cookie 存在 + 页面不在登录页（仅 cookie 会因残留
+    假阳性，导致引导秒过但实际未登录）。"""
     try:
         browser = get_browser()
-        if _has_deepseek_cookies(browser.context):
-            return True, "已登录 DeepSeek 网页版"
         page = browser.context.new_page()
         page.goto("https://chat.deepseek.com", wait_until="domcontentloaded")
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(3)
-            if _has_deepseek_cookies(browser.context):
+            page.wait_for_timeout(500)  # 等 SPA 从登录页跳回主页
+            if (_has_deepseek_cookies(browser.context)
+                    and "sign_in" not in page.url):
                 break
         else:
             page.close()

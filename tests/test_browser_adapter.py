@@ -440,5 +440,80 @@ class TestClickByText(unittest.TestCase):
         self.assertIn("_safe_evaluate", src)  # DOM 直点 + 有界等待
 
 
+class TestWebLlmLoggedIn(unittest.TestCase):
+    """web_llm_logged_in 真实登录判定：cookie 存在 + 页面不在登录页。
+
+    ★ 回归：仅查 cookie 会假阳性（过期/无效 cookie 残留），预检放行
+    切 Web，运行才撞登录页（线上：页面停在 chat.deepseek.com/sign_in，
+    报「找不到 DeepSeek 输入框」，且切换时不弹登录引导）。"""
+
+    def _run(self, cookies, page_url, goto_error=None):
+        from unittest import mock
+        from applications.zhihu_story import browser_adapter as mod
+
+        class _Page:
+            url = page_url
+
+            def goto(self, *a, **k):
+                if goto_error:
+                    raise goto_error
+                _Page.url = page_url  # 模拟 SPA 落地后的最终 URL
+
+            def wait_for_timeout(self, *a):
+                pass
+
+            def close(self):
+                pass
+
+        class _Ctx:
+            def __init__(self):
+                self.page = _Page()
+
+            def cookies(self):
+                return cookies
+
+            def new_page(self):
+                return self.page
+
+        class _Browser:
+            def __init__(self, ctx):
+                self.context = ctx
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def close(self):
+                pass
+
+        ctx = _Ctx()
+        with mock.patch.object(mod, "ZhihuBrowser",
+                               return_value=_Browser(ctx)):
+            return mod.web_llm_logged_in(), ctx
+
+    def test_no_cookies_false(self):
+        ok, _ = self._run([], "https://chat.deepseek.com/")
+        self.assertFalse(ok)
+
+    def test_cookies_but_stuck_on_sign_in_false(self):
+        # ★ 线上场景：cookie 残留 + 页面停在登录页 → 必须判未登录
+        ok, _ = self._run(
+            [{"domain": "chat.deepseek.com", "value": "x"}],
+            "https://chat.deepseek.com/sign_in")
+        self.assertFalse(ok)
+
+    def test_cookies_and_home_true(self):
+        ok, _ = self._run(
+            [{"domain": "chat.deepseek.com", "value": "x"}],
+            "https://chat.deepseek.com/")
+        self.assertTrue(ok)
+
+    def test_browser_failure_false(self):
+        ok, _ = self._run([], "", goto_error=RuntimeError("boom"))
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main()
