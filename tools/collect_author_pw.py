@@ -25,7 +25,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from applications.zhihu_story.extractors import _EXTRACT_JS, PlaywrightAnswerExtractor
+from applications.zhihu_story.browser_adapter import _PRIMARY_ANSWER_JS as _EXTRACT_JS
 
 
 # 列表页提取 JS：收集所有回答链接（问题标题 + URL）
@@ -156,7 +156,7 @@ def _close_tab():
 
 
 def _extract():
-    """提取当前详情页（复用 extractors 的已验证 JS）。"""
+    """提取当前详情页（复用 browser_adapter 的已验证 JS）。"""
     result = _evaluate(_EXTRACT_JS)
     title = (result.get("title") or "").strip()
     answer = (result.get("answer") or "").strip()

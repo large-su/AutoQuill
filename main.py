@@ -7,7 +7,7 @@
 #   python main.py --test-api      测试 API 连接
 #
 # 架构分层：
-#   applications/zhihu_story/ → 应用层（采集 browser_adapter/extractors、
+#   applications/zhihu_story/ → 应用层（采集 browser_adapter、
 #                               文风蒸馏 author_profiler）
 #   workflows/                → 工作流编排（知乎批量）
 #   core/                     → 核心领域（story_text 正文渲染、paths 路径）
