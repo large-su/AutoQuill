@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """AutoQuill 一键启动器
 
-双击即可启动 Web 控制台：
-  源码态：检查 Python 环境与依赖（fastapi / uvicorn / playwright），
+双击即可启动 Web 控制台（独立窗口，pywebview / WebView2 内核）：
+  源码态：检查 Python 环境与依赖（fastapi / uvicorn / playwright / webview），
           后台启动 `python main.py --web`（日志写 DATA_ROOT/logs/webui.log）
   打包态：跳过环境检查，首启迁移旧数据（旧解压目录 → %APPDATA%/AutoQuill），
           拉起自身 `AutoQuill.exe --service` 作为服务进程
-  通用：8787 已有服务 → 直接打开浏览器复用；关窗/强杀 → Job Object 连带
-        服务进程清理；就绪后自动打开浏览器
+  通用：8787 已有服务 → 直接开独立窗口复用；关窗/强杀 → Job Object 连带
+        服务进程清理；就绪后打开独立窗口（pywebview 失败时回退系统浏览器）
 
 打包态数据目录与 core/paths.py 保持一致（%APPDATA%/AutoQuill），
 程序文件（含服务代码）全部内置于 exe，不依赖系统 Python。
@@ -88,7 +88,7 @@ def find_python():
 
 def check_deps(python_cmd):
     """确认运行依赖齐全。"""
-    r = _run_quiet(python_cmd + ["-c", "import fastapi, uvicorn, playwright"], timeout=DEPCHECK_TIMEOUT)
+    r = _run_quiet(python_cmd + ["-c", "import fastapi, uvicorn, playwright, webview"], timeout=DEPCHECK_TIMEOUT)
     return r is not None and r.returncode == 0
 
 
@@ -218,6 +218,25 @@ def _pause():
         pass
 
 
+def open_window():
+    """打开控制台窗口：pywebview 独立窗口（WebView2 内核），失败回退系统浏览器。
+
+    阻塞直到窗口关闭；返回 True=独立窗口，False=回退浏览器（调用方需保持
+    服务存活语义，等待服务进程退出）。"""
+    try:
+        import webview
+
+        webview.create_window(
+            "AutoQuill", BASE_URL,
+            width=1280, height=820, min_size=(960, 640),
+        )
+        webview.start()
+        return True
+    except Exception:
+        webbrowser.open(BASE_URL)
+        return False
+
+
 def _set_title(title):
     if os.name == "nt":
         try:
@@ -254,12 +273,11 @@ def main():
         _pause()
         return 1
 
-    # 服务已在跑 → 复用，直接开浏览器
+    # 服务已在跑 → 复用，直接开窗口
     if service_alive():
-        print(f"检测到 AutoQuill 服务已在运行（{BASE_URL}），直接打开浏览器…")
-        webbrowser.open(BASE_URL)
+        print(f"检测到 AutoQuill 服务已在运行（{BASE_URL}），直接打开窗口…")
+        open_window()
         print("注意：该服务并非本启动器启动，关闭本窗口不会停止它。")
-        _pause()
         return 0
 
     if frozen:
@@ -303,21 +321,14 @@ def main():
         return 1
 
     print(f"服务已就绪：{BASE_URL}")
-    print("正在打开浏览器…")
-    webbrowser.open(BASE_URL)
-    print()
-    print("AutoQuill 正在运行。")
-    print("使用期间请保持本窗口开启，关闭本窗口即可停止服务。")
+    print("正在打开 AutoQuill 窗口…")
     try:
-        proc.wait()
+        if not open_window():
+            # 回退浏览器：保持等待服务退出（Job Object 在进程退出时清理服务）
+            proc.wait()
     except KeyboardInterrupt:
-        print("\n收到中断，正在停止服务…")
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    print("服务已停止，再见。")
+        pass
+    print("窗口已关闭，正在停止服务…")
     return 0
 
 

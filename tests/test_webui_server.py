@@ -631,5 +631,51 @@ class TestSetupEndpoints(unittest.TestCase):
             server._login_thread = orig
 
 
+class TestUpdateCheck(unittest.TestCase):
+    """检查更新：有新版 / 已最新 / 网络失败。"""
+
+    def setUp(self):
+        server._update_cache["data"] = None
+
+    def _fake_resp(self, tag_name):
+        r = mock.Mock()
+        r.status_code = 200
+        r.raise_for_status.return_value = None
+        r.json.return_value = {
+            "tag_name": tag_name,
+            "html_url": f"https://github.com/large-su/AutoQuill/releases/tag/{tag_name}",
+        }
+        return r
+
+    def test_latest_greater_than_current(self):
+        with mock.patch("webui.server.requests.get",
+                        return_value=self._fake_resp("v9.9.9")):
+            d = self.client_get()
+        self.assertTrue(d["has_update"])
+        self.assertEqual(d["latest"], "9.9.9")
+
+    def test_same_version_no_update(self):
+        with mock.patch("webui.server.requests.get",
+                        return_value=self._fake_resp("v4.0.0")):
+            d = self.client_get()
+        self.assertFalse(d["has_update"])
+
+    def test_network_error_graceful(self):
+        with mock.patch("webui.server.requests.get",
+                        side_effect=Exception("boom")):
+            d = self.client_get()
+        self.assertIsNone(d["latest"])
+        self.assertIn("error", d)
+
+    def client_get(self):
+        r = self.client.get("/api/update/check")
+        self.assertEqual(r.status_code, 200)
+        return r.json()
+
+    @property
+    def client(self):
+        return TestClient(server.app)
+
+
 if __name__ == "__main__":
     unittest.main()

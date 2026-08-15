@@ -433,6 +433,7 @@
   <div class="logo"><span class="feather">✒️</span>Auto<em>Quill</em></div>
   <div class="top-right">
     <button class="btn ghost" id="btnSetup" title="首次使用引导（Edge / API Key / 知乎登录）" style="display:none">设置</button>
+    <button class="btn ghost" id="btnUpdate" title="检查 GitHub 是否有新版本">检查更新</button>
     <div id="statusPill" class="status-pill"><span class="dot"></span><span id="statusText">空闲</span></div>
   </div>
 </header>
@@ -1514,6 +1515,40 @@ async function pollSetupStatus() {
 
 $("btnSetup").addEventListener("click", loadSetupStatus);
 $("btnSetupFinish").addEventListener("click", hideSetupWizard);
+
+/* ---------- 检查更新 ---------- */
+
+async function checkUpdate() {
+  const btn = $("btnUpdate");
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = "检查中…";
+  try {
+    const r = await fetch("/api/update/check");
+    const d = await r.json();
+    if (d.error) {
+      btn.textContent = orig;
+      alert("检查更新失败：" + d.error);
+      return;
+    }
+    if (d.has_update) {
+      btn.textContent = "有新版本";
+      if (confirm(`发现新版本 ${d.latest}（当前 ${d.current}）\n\n点击「确定」前往下载页。下载后运行安装包即可升级，数据会自动保留。`)) {
+        window.open(d.url, "_blank");
+      }
+    } else {
+      btn.textContent = "已是最新版本";
+      setTimeout(() => { btn.textContent = orig; }, 3000);
+    }
+  } catch (e) {
+    btn.textContent = orig;
+    alert("检查更新失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("btnUpdate").addEventListener("click", checkUpdate);
 
 $("btnEdgeOk").addEventListener("click", () => {
   loadSetupStatus();

@@ -5,6 +5,7 @@ uvicorn>=0.52
 playwright>=1.62
 requests>=2.32
 pydantic>=2.10
+pywebview>=6.2
 
 # 测试依赖（tests/ 用）
 httpx>=0.27

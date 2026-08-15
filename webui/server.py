@@ -687,6 +687,56 @@ def api_setup_zhihu_login():
                        "检测到登录后自动保存并关闭"}
 
 
+# ============================================================
+# 检查更新（查询 GitHub Releases，60s 缓存）
+# ============================================================
+
+_UPDATE_REPO = "large-su/AutoQuill"
+_UPDATE_TTL = 60.0
+_update_cache = {"ts": 0.0, "data": None}
+
+
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in v.lstrip("vV").split("."))
+    except (AttributeError, ValueError):
+        return None
+
+
+@app.get("/api/update/check")
+def api_update_check():
+    """检查 GitHub Releases 是否有新版本（60s 缓存；网络失败只报 error 不抛错）。"""
+    from core.version import VERSION
+    now = time.time()
+    if _update_cache["data"] is not None and now - _update_cache["ts"] < _UPDATE_TTL:
+        return _update_cache["data"]
+    data = {
+        "current": VERSION,
+        "latest": None,
+        "has_update": False,
+        "url": f"https://github.com/{_UPDATE_REPO}/releases",
+        "error": None,
+    }
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest",
+            timeout=5,
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": "AutoQuill"},
+        )
+        r.raise_for_status()
+        info = r.json()
+        latest = info.get("tag_name", "")
+        data["latest"] = latest.lstrip("vV")
+        cur, new = _version_tuple(VERSION), _version_tuple(latest)
+        data["has_update"] = bool(cur and new and new > cur)
+        data["url"] = info.get("html_url") or data["url"]
+    except Exception as exc:
+        data["error"] = f"无法连接更新服务器：{exc.__class__.__name__}"
+    _update_cache.update(ts=now, data=data)
+    return data
+
+
 class _AuthorSpec(BaseModel):
     name: str  # 作者名；空串 = 不注入文风
 
