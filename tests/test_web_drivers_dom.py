@@ -89,7 +89,8 @@ class TestWebDriversDomSemantics(unittest.TestCase):
 
     def test_deepseek_input_uses_fill(self):
         src = self._src("web_drivers/deepseek.py")
-        self.assertIn(".fill(prompt)", src)     # textarea 纯文本，非剪贴板
+        self.assertIn(".fill(prompt, timeout=120000)", src)
+        # textarea 纯文本，非剪贴板；超时放宽因 SPA 逐行处理大 prompt
         self.assertIn("_INPUT_SELECTORS", src)
 
     def test_deepseek_selector_candidate_lists(self):

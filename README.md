@@ -1,4 +1,4 @@
-# AutoQuill v4.1.8
+# AutoQuill v4.2.0
 
 > 一键安装的**知乎故事创作助手**：自动选题 → 模仿指定作者的文风生成故事 → 发布到知乎草稿。
 > 全程自动化，无需命令行，无需安装 Python。
@@ -59,7 +59,7 @@ AutoQuill 是运行在你电脑本地的自动化写作工具。它像人一样�
 
 ## 安装
 
-1. 从发布页下载 `AutoQuill-Setup-4.1.8.exe`
+1. 从发布页下载 `AutoQuill-Setup-4.2.0.exe`
 2. 双击运行安装包
    - 若出现 Windows SmartScreen 提示，点「更多信息」→「仍要运行」即可（软件未做代码签名，属正常提示）
 3. 选择语言与安装位置（默认装在当前用户目录，无需管理员权限）
@@ -216,6 +216,8 @@ A：控制台日志框实时显示；完整日志在 `%APPDATA%\AutoQuill\logs\`
 
 | 版本 | 主要变更 |
 |---|---|
+| **v4.2.0** | 浏览器基础设施下沉：新建 `web_drivers/browser_pool.py` 统一承载共享浏览器单例（工厂由应用层注册）、用户取消钩子、有界页面交互 safe_evaluate（原 base/browser_adapter 两处实现合并）；DeepSeek 登录判定与登录引导（web_llm_logged_in / login_deepseek_web_flow）从 browser_adapter 搬至 web_drivers/deepseek；web_drivers/workflows 不再反向引用 applications，CLI 入口补组合根注册工厂 |
+| **v4.1.9** | 安全加固：Web 控制台加 Host/Origin 白名单（拦 DNS rebinding 与跨站盲打）、采集模式 URL 域名白名单（仅 zhihu.com）、API Key 检查统一为公共函数并 4 处复用；全库体检修正收尾（死代码清理、长文流水线归档、重复收敛） |
 | **v4.1.8** | 修复引导弹窗无法配置 API Key（新装电脑报「选不了 API 模式、输不进去 key」）：真实浏览器实测确认——API 卡片控件（select/输入框/保存按钮）只在卡片带 .sel 时显示，而 .sel 仅当「已配置 API」才赋予，全新安装（未配 key）时控件永远隐藏、点击卡片也不切换，形成死锁；且 2.5s 状态轮询会重置卡片选中。修复：点击卡片即切换选中（用户点选优先，轮询不再覆盖）+ 卡片改 div（消除 label 把点击转发给隐藏下拉框的劫持）；默认推荐逻辑不变（未配置时默认 Web） |
 | **v4.1.7** | 修复 Web 通道剖析（文风提炼）失败 + 登录态检测提速：DeepSeek 新版 UI 的停止按钮与发送按钮同元素（圆形 primary DIV，无 aria/无 stop 字样），旧 selector 全部失效、完成检测只能靠「文本稳定」兜底——LLM 输出中途停顿 >8s 即误判完成、读回残缺 JSON 解析失败；现按真实浏览器实测 DOM 修复 selector（生成中移除 disabled 类即停止态），稳定判定加 read-back 重读验证（并行调度同步）；剖析失败日志带回复长度+首尾片段（可直接区分「读回残缺」与「LLM 输出无效」）；登录检测：并发轮询加锁去重（不再各自拉起浏览器）+ 切换走 15s 缓存 + 条件 URL 等待（省固定 1.5s 等待） |
 | **v4.1.6** | 修复登录成功但引导窗口不更新（卡最后一环）：登录引导改用独立可见浏览器实例 + 全程持锁——之前复用任务共享浏览器，登录线程创建后退出，再次点击登录时新线程复用该实例触发 Playwright「cannot switch to a different thread」；且登录态检查与登录中的浏览器同 profile 并发互杀导致检测失败、引导窗不关闭；现各登录流程（DeepSeek/知乎）均为独立实例、锁内独占 profile，共享浏览器只归任务使用；真实浏览器并发验证通过 |

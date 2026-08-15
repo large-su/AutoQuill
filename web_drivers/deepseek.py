@@ -236,15 +236,21 @@ class DeepSeekDriver(WebLLMDriver):
             log.warning("web_drivers: 开关「%s」点击失败", label)
 
     def input(self, prompt):
-        """向输入框写入 prompt（textarea fill 纯文本，不需要剪贴板）。"""
+        """向输入框写入 prompt（textarea fill 纯文本，不需要剪贴板）。
+
+        超时放宽到 120s：DeepSeek SPA 对输入做逐行处理，实测换行数
+        决定 fill 耗时（2026-08-15 实测：95KB+6316 换行 = 36.8s；
+        同文本去掉换行 = 0.28s）。文风剖析类 prompt 含数十篇样本，
+        换行必达数千行，默认 30s 超时必失败——放宽后首次 fill 即完成，
+        不会留下半写入内容让后续任务重复踩坑。
+        """
         sel, _ = self._probe_selectors(_INPUT_SELECTORS, attr="tagName")
         if not sel:
             self._dump_page_state("找不到 DeepSeek 输入框")
         page = self._page_instance()
         try:
-            page.locator(sel).fill(prompt)
-        except Exception as exc:
-            log.warning("web_drivers: 输入框 fill 失败：%s", exc)
+            page.locator(sel).fill(prompt, timeout=120000)
+        except Exception:
             self._dump_page_state("输入框写入失败")
         log.info("web_drivers: prompt 已写入（%d 字符）", len(prompt))
         return self
@@ -489,6 +495,9 @@ def login_deepseek_web_flow(timeout=300):
 # （需 Edge 持久化 profile 已登录 DeepSeek，或先在页面手动登录）
 
 def _probe():
+    # 组合根：CLI 工具自己负责组装——导入应用层以注册浏览器工厂
+    # （browser_pool 不依赖 applications，工厂由应用层注册）
+    import applications.zhihu_story.browser_adapter  # noqa: F401
     from web_drivers.browser_pool import get_browser
     browser = get_browser()
     page = browser.context.new_page()
