@@ -81,40 +81,27 @@
   .status-pill.timeout .dot { background: var(--orange); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-  /* ---------- 主区布局：侧边栏 + 模块页 ---------- */
-  .app-body {
-    display: flex;
+  /* ---------- 主区布局：三列（左列可切换模式） ---------- */
+  main {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr) 400px;
     gap: 14px;
     padding: 14px 16px;
     height: calc(100vh - 52px);
     max-width: 1720px;
     margin: 0 auto;
-    min-height: 0;
   }
-  .sidebar {
-    flex: 0 0 150px;
-    display: flex; flex-direction: column; gap: 6px;
-    overflow-y: auto; min-height: 0;
+  /* 左列模式切换：下拉 + 简介 + 内容区 */
+  .mode-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 2px 2px 10px;
   }
-  .side-group {
-    font-size: 11px; color: var(--muted);
-    letter-spacing: 1px; padding: 6px 8px 2px;
+  .mode-bar select {
+    flex: 0 0 130px; padding: 6px 8px;
   }
-  .side-item {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 10px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--panel);
-    cursor: pointer; user-select: none; font-size: 13px;
-    transition: border-color 0.15s, background 0.15s;
+  .mode-bar .mode-desc {
+    font-size: 12px; color: var(--muted); line-height: 1.45; min-width: 0;
   }
-  .side-item:hover { border-color: #3b4d74; }
-  .side-item.active {
-    border-color: var(--accent); background: var(--panel-2); color: var(--accent);
-  }
-  .page { display: none; }
-  .page.active { display: grid; gap: 14px; flex: 1; min-width: 0; min-height: 0; }
-  #page-workspace { grid-template-columns: 300px minmax(0, 1fr) 400px; }
-  #page-collect, #page-profile { grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); }
   .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
   .card {
     background: var(--panel);
@@ -486,15 +473,12 @@
   }
 
   @media (max-width: 1200px) {
-    #page-workspace { grid-template-columns: 280px minmax(0,1fr); height: auto; overflow: visible; }
-    #page-collect, #page-profile { grid-template-columns: 1fr; }
+    main { grid-template-columns: 280px minmax(0,1fr); height: auto; overflow: visible; }
     body { overflow: auto; }
     .right-col { grid-column: 1 / -1; }
   }
   @media (max-width: 760px) {
-    #page-workspace { grid-template-columns: 1fr; }
-    .app-body { flex-direction: column; height: auto; }
-    .sidebar { flex-direction: row; flex-wrap: wrap; flex-basis: auto; }
+    main { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -569,15 +553,19 @@
   </div>
 </div>
 
-<div class="app-body">
-  <!-- 侧边栏：模块导航 -->
-  <aside class="sidebar">
-    <div id="sideNav"></div>
-  </aside>
+<main>
+  <!-- 左列：模式切换 + 控制区 -->
+  <div class="col left-col">
+    <div class="mode-bar">
+      <select id="leftModeSel">
+        <option value="workspace">工作台</option>
+        <option value="distill">作者蒸馏</option>
+      </select>
+      <div class="mode-desc" id="leftModeDesc"></div>
+    </div>
 
-  <!-- 工作台（主模块）：运行控制 + 配置速览 + 日志 + 结果 -->
-  <div class="page active" id="page-workspace">
-    <div class="col left-col">
+    <!-- 模式：工作台 -->
+    <div class="mode-pane" id="pane-workspace">
       <div class="card">
         <h2><span class="badge">▶</span>运行控制</h2>
         <div class="mode-group" id="modeGroup">
@@ -609,60 +597,8 @@
       </div>
     </div>
 
-    <!-- 中列：日志 -->
-    <div class="col log-col">
-      <div class="card log-card">
-        <div class="log-head">
-          <h2 style="margin-bottom:0"><span class="badge">◧</span>运行日志</h2>
-          <div class="spacer"></div>
-          <label class="autoscroll"><input type="checkbox" id="autoScroll" checked>自动滚动</label>
-        </div>
-        <div class="progress-wrap" id="progressWrap">
-          <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-          <div class="progress-text" id="progressText">等待生成…</div>
-        </div>
-        <div class="log-box" id="logBox"><div class="placeholder">点击「运行」开始，日志将实时显示在这里。</div></div>
-        <div class="log-file" id="logFile" title="当前进程业务日志文件路径"></div>
-      </div>
-    </div>
-
-    <!-- 右列：结果 -->
-    <div class="col right-col">
-      <div class="card res-card" id="extractCard">
-        <h2><span class="badge">◉</span>提取结果</h2>
-        <div class="res-title" id="extractTitle"></div>
-        <div class="res-sub" id="extractUrl"></div>
-        <div class="chips" id="extractChips"></div>
-        <details id="sampleDetail">
-          <summary>采样注入预览（前 3000 字）</summary>
-          <div class="body" id="samplePreview"></div>
-        </details>
-        <details id="answerDetail">
-          <summary>完整回答</summary>
-          <div class="body" id="answerBody"></div>
-        </details>
-      </div>
-
-      <div class="card res-card" id="storyCard">
-        <h2><span class="badge">✦</span>生成故事</h2>
-        <div class="res-title" id="storyTitle"></div>
-        <div class="story-meta" id="storyMeta"></div>
-        <details id="storyDetail">
-          <summary>故事全文</summary>
-          <div class="body" id="storyBody"></div>
-        </details>
-      </div>
-
-      <div class="card">
-        <h2><span class="badge">☰</span>历史故事</h2>
-        <div class="story-list" id="storyList"><div class="empty-note">加载中…</div></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 扩展模块：数据采集 -->
-  <div class="page" id="page-collect">
-    <div class="col left-col">
+    <!-- 模式：作者蒸馏（采集 + 提炼） -->
+    <div class="mode-pane" id="pane-distill" hidden>
       <div class="card">
         <h2><span class="badge">◈</span>故事采集</h2>
         <div class="set-row">
@@ -679,20 +615,7 @@
           <button class="btn ghost btn-model" id="btnManageLib">管理采集库</button>
         </div>
       </div>
-    </div>
 
-    <div class="col right-col">
-      <div class="card res-card" id="collectCard">
-        <h2><span class="badge">◈</span>采集结果</h2>
-        <div class="res-title" id="collectTitle"></div>
-        <div class="res-sub" id="collectSummary"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 扩展模块：文风提炼 -->
-  <div class="page" id="page-profile">
-    <div class="col left-col">
       <div class="card">
         <h2><span class="badge">✦</span>文风提炼</h2>
         <div class="mp-note" id="profileLibHint" style="margin-bottom:10px">加载中…</div>
@@ -706,20 +629,74 @@
         <div class="mp-note">样本来自采集库；作者名与采集库一致。提炼需调用 LLM（约 1-3 分钟），完成后自动切换为该文风。</div>
       </div>
     </div>
+  </div>
 
-    <div class="col right-col">
-      <div class="card res-card" id="profileCard">
-        <h2><span class="badge">✦</span>文风签名</h2>
-        <div class="res-title" id="profileTitle"></div>
-        <div class="res-sub" id="profilePath"></div>
-        <details id="profileDetail" open>
-          <summary>签名摘要</summary>
-          <div class="body" id="profileBody"></div>
-        </details>
+  <!-- 中列：日志 -->
+  <div class="col log-col">
+    <div class="card log-card">
+      <div class="log-head">
+        <h2 style="margin-bottom:0"><span class="badge">◧</span>运行日志</h2>
+        <div class="spacer"></div>
+        <label class="autoscroll"><input type="checkbox" id="autoScroll" checked>自动滚动</label>
       </div>
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-text" id="progressText">等待生成…</div>
+      </div>
+      <div class="log-box" id="logBox"><div class="placeholder">点击「运行」开始，日志将实时显示在这里。</div></div>
+      <div class="log-file" id="logFile" title="当前进程业务日志文件路径"></div>
     </div>
   </div>
-</div>
+
+  <!-- 右列：结果 -->
+  <div class="col right-col">
+    <div class="card res-card" id="extractCard">
+      <h2><span class="badge">◉</span>提取结果</h2>
+      <div class="res-title" id="extractTitle"></div>
+      <div class="res-sub" id="extractUrl"></div>
+      <div class="chips" id="extractChips"></div>
+      <details id="sampleDetail">
+        <summary>采样注入预览（前 3000 字）</summary>
+        <div class="body" id="samplePreview"></div>
+      </details>
+      <details id="answerDetail">
+        <summary>完整回答</summary>
+        <div class="body" id="answerBody"></div>
+      </details>
+    </div>
+
+    <div class="card res-card" id="storyCard">
+      <h2><span class="badge">✦</span>生成故事</h2>
+      <div class="res-title" id="storyTitle"></div>
+      <div class="story-meta" id="storyMeta"></div>
+      <details id="storyDetail">
+        <summary>故事全文</summary>
+        <div class="body" id="storyBody"></div>
+      </details>
+    </div>
+
+    <div class="card res-card" id="collectCard">
+      <h2><span class="badge">◈</span>采集结果</h2>
+      <div class="res-title" id="collectTitle"></div>
+      <div class="res-sub" id="collectSummary"></div>
+    </div>
+
+    <div class="card res-card" id="profileCard">
+      <h2><span class="badge">✦</span>文风签名</h2>
+      <div class="res-title" id="profileTitle"></div>
+      <div class="res-sub" id="profilePath"></div>
+      <details id="profileDetail" open>
+        <summary>签名摘要</summary>
+        <div class="body" id="profileBody"></div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2><span class="badge">☰</span>历史故事</h2>
+      <div class="story-list" id="storyList"><div class="empty-note">加载中…</div></div>
+    </div>
+  </div>
+</main>
 
 <!-- 故事全文弹层 -->
 <div class="modal-mask" id="modalMask">
@@ -1439,44 +1416,35 @@ function stopTaskTimer() {
   taskTimerText = "";
 }
 
-/* ---------- 模块导航（扩展点：新增模块 = 加一行配置 + 对应 page 容器） ---------- */
+/* ---------- 左列模式切换（扩展点：新增模式 = 加一项 + 对应 pane 容器） ---------- */
 
-const MODULES = [
-  { id: "workspace", name: "工作台",   group: "主模块", icon: "▶" },
-  { id: "collect",   name: "数据采集", group: "扩展模块", icon: "◈" },
-  { id: "profile",   name: "文风提炼", group: "扩展模块", icon: "✦" },
+const LEFT_MODES = [
+  { id: "workspace", name: "工作台",
+    desc: "故事生成主流程：选题、提取、生成、批量运行" },
+  { id: "distill", name: "作者蒸馏",
+    desc: "扩展模块：采集作者样本 → 提炼文风签名" },
 ];
-let currentPage = "workspace";
+let currentLeftMode = "workspace";
 
-function renderSidebar() {
-  const nav = $("sideNav");
-  nav.innerHTML = "";
-  let lastGroup = null;
-  for (const m of MODULES) {
-    if (m.group !== lastGroup) {
-      const g = document.createElement("div");
-      g.className = "side-group";
-      g.textContent = m.group;
-      nav.appendChild(g);
-      lastGroup = m.group;
-    }
-    const item = document.createElement("div");
-    item.className = "side-item" + (m.id === currentPage ? " active" : "");
-    item.dataset.page = m.id;
-    item.innerHTML = `<span>${m.icon}</span><span>${esc(m.name)}</span>`;
-    item.addEventListener("click", () => switchPage(m.id));
-    nav.appendChild(item);
-  }
+function renderLeftMode() {
+  const sel = $("leftModeSel");
+  sel.innerHTML = "";
+  LEFT_MODES.forEach((m) => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.name;
+    sel.appendChild(opt);
+  });
+  sel.value = currentLeftMode;
+  applyLeftMode(currentLeftMode);
 }
 
-function switchPage(id) {
-  if (id === currentPage) return;
-  currentPage = id;
-  document.querySelectorAll(".page").forEach((p) => {
-    p.classList.toggle("active", p.id === "page-" + id);
-  });
-  document.querySelectorAll(".side-item").forEach((it) => {
-    it.classList.toggle("active", it.dataset.page === id);
+function applyLeftMode(id) {
+  currentLeftMode = id;
+  const mode = LEFT_MODES.find((m) => m.id === id);
+  $("leftModeDesc").textContent = mode ? mode.desc : "";
+  document.querySelectorAll(".mode-pane").forEach((p) => {
+    p.hidden = p.id !== "pane-" + id;
   });
 }
 
@@ -1493,7 +1461,7 @@ async function loadProfileSources() {
     const hint = $("profileLibHint");
     if (!data.authors.length) {
       profileSourceSel.innerHTML = '<option value="">（采集库为空）</option>';
-      if (hint) hint.innerHTML = '采集库为空，请先到 <a href="#" data-goto="collect">数据采集</a> 添加样本';
+      if (hint) hint.textContent = '采集库为空，请先在上方「故事采集」添加样本';
       return;
     }
     const total = data.authors.reduce((s, a) => s + (a.records || 0), 0);
@@ -1534,12 +1502,10 @@ function runProfileMode(mode, author) {
 
 btnProfile.addEventListener("click", () => {
   if (profileSourceSel.disabled || !profileSourceSel.value) return;
-  switchPage("profile");
   runProfileMode("profile", profileSourceSel.value);
 });
 
 btnGeneralProfile.addEventListener("click", () => {
-  switchPage("profile");
   runProfileMode("general_profile");
 });
 
@@ -1553,7 +1519,6 @@ function runCollect() {
     alert("请输入作者回答列表 URL（形如 https://www.zhihu.com/people/xxx/answers）");
     return;
   }
-  switchPage("collect");
   if (!/^https?:\/\//.test(url)) {
     alert("URL 须以 http(s):// 开头");
     return;
@@ -2126,14 +2091,8 @@ $("modalMask").addEventListener("click", (e) => {
 });
 
 (async () => {
-  renderSidebar();
-  document.addEventListener("click", (e) => {
-    const goto = e.target.closest("[data-goto]");
-    if (goto) {
-      e.preventDefault();
-      switchPage(goto.dataset.goto);
-    }
-  });
+  renderLeftMode();
+  $("leftModeSel").addEventListener("change", (e) => applyLeftMode(e.target.value));
   initTunables();
   loadConfig();
   loadModels();
