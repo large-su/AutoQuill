@@ -896,7 +896,7 @@ let taskState = "idle";
 
 /* ---------- 状态 ---------- */
 
-function setState(state, message) {
+function setState(state, message, guide) {
   taskState = state;
   const pill = $("statusPill");
   pill.className = "status-pill " + (state === "running" ? "running" : state);
@@ -908,6 +908,31 @@ function setState(state, message) {
     stopTaskTimer();
     $("progressWrap").classList.remove("show");
   }
+  // 运行前检测失败（当前通道缺必要信息）：直接弹引导，不只看报错
+  if (state === "error" && guide) showSetupGuide(guide);
+}
+
+async function showSetupGuide(need) {
+  manualGuideOpen = true;
+  await loadSetupStatus();
+  // 按 need 对应的具体配置判断就绪，而非整体 allDone：用户可能已配好
+  // API Key 但切到 Web 未登录（整体配置「已完成」），此时仍须弹引导
+  const st = setupCache || {};
+  const ready = need === "api_key" ? !!st.llm_configured
+                                   : !!st.web_llm_logged_in;
+  if (ready) {
+    manualGuideOpen = false;
+    hideSetupWizard();  // loadSetupStatus 内部可能已显示引导窗，关掉
+    return;
+  }
+  // loadSetupStatus 可能已因整体配置完成而自动收尾关闭窗口——重新打开
+  manualGuideOpen = true;
+  $("setupMask").classList.add("show");
+  renderModeCardState(setupCache);
+  selectModeCard(setupCache);
+  showStStatus(need === "api_key"
+    ? "API 模式需要先配置 API Key（见引导窗口）"
+    : "Web 模式需要先登录 DeepSeek 网页版（见引导窗口）", "err");
 }
 
 /* ---------- 任务阶段进度（文风提炼等） ---------- */
@@ -936,7 +961,7 @@ async function pollTaskProgress() {
     const r = await fetch("/api/status");
     const st = await r.json();
     if (st.state !== taskState) {
-      setState(st.state, st.message);
+      setState(st.state, st.message, st.guide_needed);
       if (st.state === "running") {
         if (!es) connectSSE();
       } else {
@@ -1320,13 +1345,7 @@ async function applyMode() {
       const body = await r.json().catch(() => null);
       const d = body && body.detail;
       if (d && typeof d === "object" && d.needs) {
-        await loadSetupStatus();
-        $("setupMask").classList.add("show");
-        renderModeCardState(setupCache);
-        selectModeCard(setupCache);
-        showStStatus(d.needs === "deepseek_login"
-          ? "切换 Web 需先登录 DeepSeek 网页版（见引导窗口）"
-          : "切换 API 需先配置 API Key（见引导窗口）", "err");
+        showSetupGuide(d.needs);
         return;
       }
       throw new Error(typeof d === "string" ? d : "切换失败");
@@ -1366,6 +1385,10 @@ async function loadMode() {
 
 /* 生成通道状态（setup/status 查询结果缓存，首次切换引导用） */
 let setupCache = null;
+/* 引导窗是否为按需弹出（模式切换/运行检测失败触发）。
+   为 true 时轮询不得自动关闭窗口——首启引导完成后可自动收尾，
+   按需引导要等用户点「进入控制台」或主动操作完成。 */
+let manualGuideOpen = false;
 async function fetchSetupStatus() {
   try {
     const r = await fetch("/api/setup/status");
@@ -1934,7 +1957,7 @@ async function loadSetupStatus() {
     setupCache = st;
     if (st.version) $("setupVersion").textContent = "v" + st.version;
     setupNeeded = !!st.setup_needed;
-    if (!st.setup_needed) { hideSetupWizard(); return; }
+    if (!st.setup_needed && !manualGuideOpen) { hideSetupWizard(); return; }
 
     const edge = $("stepEdge");
     const mode = $("stepMode");
@@ -1987,12 +2010,15 @@ async function loadSetupStatus() {
     $("setupMask").classList.add("show");
     const allDone = st.edge_ok && st.zhihu_logged_in
       && (st.llm_configured || st.web_llm_logged_in);
-    if (allDone) hideSetupWizard();
+    // allDone 收尾只适用于首启引导；按需引导（manual）等用户点
+    // 「进入控制台」关闭——用户可能整体配置完成但当前模式仍缺配置
+    if (allDone && !manualGuideOpen) hideSetupWizard();
     return st;
   } catch (e) { /* 旧服务无 setup 端点 */ }
 }
 
 function hideSetupWizard() {
+  manualGuideOpen = false;
   $("setupMask").classList.remove("show");
   if (setupTimer) { clearInterval(setupTimer); setupTimer = null; }
 }
@@ -2006,7 +2032,7 @@ async function pollSetupStatus() {
         $("btnZhihuLogin").textContent = "打开 Edge 登录知乎";
       }
     } else if (st && !st.setup_needed) {
-      hideSetupWizard();
+      if (!manualGuideOpen) hideSetupWizard();  // 按需引导窗由用户关闭
     }
   } catch (e) { /* ignore */ }
 }
@@ -2182,7 +2208,7 @@ function connectSSE() {
   });
   es.addEventListener("state", (e) => {
     const s = JSON.parse(e.data);
-    setState(s.state, s.message);
+    setState(s.state, s.message, s.guide_needed);
     if (["done", "error", "stopped", "timeout"].includes(s.state)) {
       genChars = 0;
       refreshStatus();

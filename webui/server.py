@@ -86,6 +86,7 @@ class TaskRunner:
         self.last_context = {}   # {title, answer, footer, url}
         self.last_story = {}     # {text, md_path, chars}
         self.progress = None     # {text, pct}：阶段进度（SSE 断连时前端轮询）
+        self.guide_needed = None # 运行前检测失败："deepseek_login" / "api_key"（前端据此弹引导）
         self._handler = None
 
     # ---------------- 状态 ----------------
@@ -98,6 +99,7 @@ class TaskRunner:
                 "context": self.last_context,
                 "story": self.last_story,
                 "progress": self.progress,
+                "guide_needed": self.guide_needed,
             }
 
     def _set_state(self, state, message=""):
@@ -114,6 +116,7 @@ class TaskRunner:
             self._thread = threading.Thread(
                 target=self._run_task, args=(spec,), daemon=True)
             self._stop_flag.clear()
+            self.guide_needed = None  # 每次运行重新检测，清除上次引导标记
             self._set_state("running", f"任务启动：{spec.mode}")
             self._thread.start()
 
@@ -134,11 +137,15 @@ class TaskRunner:
     # ---------------- 任务体 ----------------
 
     def _run_task(self, spec: _RunSpec):
-        # 闭环兜底：Web 通道生成任务运行前检测 DeepSeek 登录态。
+        # 闭环兜底：LLM 任务（生成/提炼）运行前检测当前通道可用性——
+        # Web 通道查 DeepSeek 登录态、API 通道查 Key。检测失败不直接
+        # 报错收场，而是置 guide_needed 让前端弹引导（与切换通道时的
+        # 闭环预检同语义，覆盖「首启引导被跳过」的场景）。
         # 此时任务浏览器尚未启动（首次 get_browser 在 _dispatch 里），
         # 独立检测实例可安全使用同一 profile；运行中浏览器已占用，
         # 该检测会锁冲突误报，故只在此处（运行前）检查一次。
-        if spec.mode in ("generate", "single", "batch"):
+        if spec.mode in ("generate", "single", "batch",
+                         "profile", "general_profile"):
             from config import LLM_MODE
             if LLM_MODE == "web":
                 from applications.zhihu_story.browser_adapter import (
@@ -148,7 +155,21 @@ class TaskRunner:
                         "error",
                         "Web 通道需要先登录 DeepSeek 网页版："
                         "请点右上角「设置」→ 引导窗口「打开 Edge 登录 "
-                        "DeepSeek」，完成后重新运行")
+                        "DeepSeek」，完成后重新运行",
+                        guide="deepseek_login")
+                    return
+            else:
+                from config import (LLM_MODEL_ID, LLM_PROVIDER,
+                                    _load_provider_config)
+                key = (_load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
+                       .get("apiKey") or "").strip()
+                if not key or key.startswith("sk-your-"):
+                    self._finish(
+                        "error",
+                        "API 模式需要先配置 API Key："
+                        "请点右上角「设置」→ 引导窗口填写 API Key，"
+                        "完成后重新运行",
+                        guide="api_key")
                     return
         # 防卡死：workflow 内部有阻塞 input()（base.py:98 API 失败回退、
         # zhihu.py:204 手动选题编号），Web 运行一律给默认值
@@ -340,11 +361,13 @@ class TaskRunner:
 
         raise HTTPException(400, f"未知模式：{mode}")
 
-    def _finish(self, state, message):
+    def _finish(self, state, message, guide=None):
         # 先清进度再改状态：SSE/轮询看到 state 时 progress 必已为空，
         # 前端不会用过期进度覆盖完成态
         with self._lock:
             self.progress = None  # 任务结束，进度清空
+            if guide is not None:
+                self.guide_needed = guide  # 运行前检测失败：前端弹引导
         self._set_state(state, message)
         log.info("任务结束：%s", message)
 
@@ -757,6 +780,7 @@ def api_setup_apikey(spec: _ApiKeySpec):
     with open(_PROVIDERS_FILE, "w", encoding="utf-8") as f:
         json.dump(providers, f, ensure_ascii=False, indent=2)
     eff = set_runtime_model(spec.provider, None, persist=True)
+    runner.guide_needed = None  # Key 已配置：引导标记解除
     log.info("首启引导：已写入服务商「%s」的 API Key", spec.provider)
     return {"ok": True, "effective": eff}
 
@@ -815,6 +839,7 @@ def _start_login_thread(kind, flow_call, log_name):
                 # 清缓存：登录刚完成时 setup/status 的 15s 缓存可能仍为
                 # False，不立即反映会让切换/引导误判未登录
                 _web_llm_cache.update(ts=0.0, ok=False)
+                runner.guide_needed = None  # 登录完成：引导标记解除
             if not ok:
                 _login_error = msg
         except Exception as exc:
@@ -1150,7 +1175,8 @@ def api_events():
             while True:
                 if runner.state != last_state:
                     yield _sse("state", {"state": runner.state,
-                                         "message": runner.message})
+                                         "message": runner.message,
+                                         "guide_needed": runner.guide_needed})
                     last_state = runner.state
                 for line in log_capture.drain():
                     parsed = log_capture.parse_line(line)

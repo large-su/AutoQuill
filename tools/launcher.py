@@ -16,6 +16,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import webbrowser
@@ -218,32 +219,83 @@ def _pause():
         pass
 
 
+def _log_diag(msg):
+    """启动器诊断日志（打包态用户可反馈 %APPDATA%/AutoQuill/logs/launcher.log）。"""
+    try:
+        path = data_root() / "logs"
+        path.mkdir(parents=True, exist_ok=True)
+        with open(path / "launcher.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
+def _find_titlebar_handle(window):
+    """多路径取窗口句柄：pywebview 版本/后端差异时逐级兜底。"""
+    if not window or not window.native:
+        return 0
+    try:
+        handle = window.native.Handle  # pywebview 6.x WinForms：Form.Handle
+        if handle:
+            return handle
+    except AttributeError:
+        pass
+    try:
+        handle = window.native.get_handle()  # 旧版本 API
+        if handle:
+            return handle
+    except Exception:
+        pass
+    if os.name == "nt":
+        # 兜底：按窗口标题找（防 native 结构变化导致取不到句柄）
+        import ctypes
+        hwnd = ctypes.windll.user32.FindWindowW(None, "AutoQuill")
+        if hwnd:
+            return hwnd
+    return 0
+
+
 def _apply_dark_titlebar(window):
     """Windows 10/11：把标题栏染成与界面一致的深色（DWM 属性）。
 
     WebView2 无 dark_title_bar 参数，深色标题栏需原生 API。
-    pywebview 窗口封装 WinForms 句柄；取句柄失败/非 Windows 时静默跳过
-    （页面本身已是深色，仅标题栏会白一点，不阻塞启动）。"""
-    try:
-        if os.name != "nt" or not window or not window.native:
-            return
-        import ctypes
-        from ctypes import wintypes
-
-        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20（Win10 1809+，Win11 亦可用）
-        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+    失败原因写入日志（launcher.log），方便安装版用户反馈排查；
+    页面本身已是深色，仅标题栏会白一点，不阻塞启动。"""
+    def _apply():
         try:
-            handle = window.native.Handle
-        except AttributeError:
-            handle = ctypes.windll.user32.GetParent(window.native.get_handle())
-        if not handle:
-            return
-        value = wintypes.BOOL(True)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            handle, DWMWA_USE_IMMERSIVE_DARK_MODE,
-            ctypes.byref(value), ctypes.sizeof(value))
+            if os.name != "nt" or not window or not window.native:
+                return
+            import ctypes
+            from ctypes import wintypes
+
+            handle = _find_titlebar_handle(window)
+            if not handle:
+                _log_diag("深色标题栏：未取得窗口句柄，跳过")
+                return
+            # DWMWA_USE_IMMERSIVE_DARK_MODE：20（Win10 1809+ / Win11），
+            # 19 为旧值（更早的 Win10 构建用 19）
+            last_hr = 0
+            for attr in (20, 19):
+                value = wintypes.BOOL(True)
+                hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    handle, attr, ctypes.byref(value),
+                    ctypes.sizeof(value))
+                if hr == 0:
+                    return
+                last_hr = hr
+            _log_diag(f"深色标题栏：DwmSetWindowAttribute 失败"
+                      f" HRESULT=0x{last_hr & 0xFFFFFFFF:08x}")
+        except Exception as exc:
+            _log_diag(f"深色标题栏：{exc}")
+
+    _apply()
+    # 窗口显示过程可能重置 DWM 属性（慢机器/冷启动上更明显），
+    # 显示后再补设一次，覆盖时序竞态
+    try:
+        window.events.shown += lambda: threading.Timer(
+            0.3, _apply).start()
     except Exception:
-        pass  # 深色标题栏是增强项，失败不影响窗口使用
+        pass
 
 
 def open_window():

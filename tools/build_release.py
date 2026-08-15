@@ -131,7 +131,9 @@ def main():
     print("\n构建完成。")
     print(f"  {exe}")
     print(f"  {sha_file}")
-    print("下一步：git tag V<新版本> + gh release create（或 tools/publish.py）")
+    print("下一步：git tag V<新版本> + gh release create")
+    print("提醒：Release 说明请附 SmartScreen 提示——安装包未做代码签名，"
+          "下载时点「更多信息」→「仍要运行」即可（详见 README FAQ）。")
     return 0
 
 

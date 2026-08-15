@@ -225,6 +225,78 @@ class TestServerAPI(unittest.TestCase):
         self.assertIn("登录", runner.message)
         m.assert_not_called()
 
+    def test_run_web_gate_sets_guide_needed(self):
+        # 闭环引导标记：web 未登录 → guide_needed=deepseek_login，
+        # 前端据此弹引导（而非只看报错文案）
+        import applications.zhihu_story.browser_adapter as ba
+        import config
+        runner = server.TaskRunner()
+        spec = server._RunSpec(mode="generate")
+        with mock.patch.object(config, "LLM_MODE", "web"):
+            with mock.patch.object(ba, "web_llm_logged_in",
+                                   return_value=False):
+                with mock.patch.object(runner, "_dispatch"):
+                    runner._run_task(spec)
+        self.assertEqual(runner.guide_needed, "deepseek_login")
+        # status() 透出给前端轮询
+        self.assertEqual(runner.status()["guide_needed"],
+                         "deepseek_login")
+
+    def test_run_api_gate_blocks_without_key(self):
+        # API 模式缺 key 同样闭环：error + guide_needed=api_key
+        import config
+        runner = server.TaskRunner()
+        spec = server._RunSpec(mode="generate")
+        with mock.patch.object(config, "LLM_MODE", "api"):
+            with mock.patch.object(
+                    config, "_load_provider_config",
+                    return_value={"apiKey": "sk-your-placeholder"}):
+                with mock.patch.object(runner, "_dispatch") as m:
+                    runner._run_task(spec)
+        self.assertEqual(runner.state, "error")
+        self.assertIn("API", runner.message)
+        self.assertEqual(runner.guide_needed, "api_key")
+        m.assert_not_called()
+
+    def test_run_api_gate_allows_with_key(self):
+        import config
+        runner = server.TaskRunner()
+        spec = server._RunSpec(mode="generate")
+        with mock.patch.object(config, "LLM_MODE", "api"):
+            with mock.patch.object(
+                    config, "_load_provider_config",
+                    return_value={"apiKey": "sk-real-key-123"}):
+                with mock.patch.object(runner, "_dispatch",
+                                       return_value=True) as m:
+                    runner._run_task(spec)
+        self.assertEqual(runner.state, "done")
+        m.assert_called_once_with(spec)
+
+    def test_profile_mode_also_gated(self):
+        # 文风提炼同样依赖 LLM 通道：web 未登录 → 引导标记
+        import applications.zhihu_story.browser_adapter as ba
+        import config
+        runner = server.TaskRunner()
+        spec = server._RunSpec(mode="profile", author="甲")
+        with mock.patch.object(config, "LLM_MODE", "web"):
+            with mock.patch.object(ba, "web_llm_logged_in",
+                                   return_value=False):
+                with mock.patch.object(runner, "_dispatch") as m:
+                    runner._run_task(spec)
+        self.assertEqual(runner.guide_needed, "deepseek_login")
+        m.assert_not_called()
+
+    def test_start_clears_guide_needed(self):
+        # 新任务开始前清除上次引导标记（每次运行重新检测）
+        runner = server.TaskRunner()
+        runner.guide_needed = "api_key"
+        spec = server._RunSpec(mode="select")
+        with mock.patch.object(runner, "_dispatch", return_value=True):
+            runner.start(spec)
+            runner._thread.join(timeout=10)
+        self.assertIsNone(runner.guide_needed)
+        self.assertEqual(runner.state, "done")
+
     def test_run_web_gate_allows_when_logged_in(self):
         import applications.zhihu_story.browser_adapter as ba
         import config
@@ -766,6 +838,21 @@ class TestSetupEndpoints(unittest.TestCase):
             st = self.client.get("/api/setup/status").json()
             self.assertTrue(st["llm_configured"])
         finally:
+            config.set_runtime_model(*orig, persist=False)
+
+    def test_apikey_write_clears_guide_needed(self):
+        # 填 key 成功 → 运行前引导标记解除（用户可立即重新运行）
+        import config
+        orig = (config.LLM_PROVIDER, config.LLM_MODEL_ID)
+        prev = server.runner.guide_needed
+        try:
+            server.runner.guide_needed = "api_key"
+            r = self.client.post("/api/setup/apikey", json={
+                "provider": "DeepSeek", "api_key": "sk-test-67890"})
+            self.assertEqual(r.status_code, 200)
+            self.assertIsNone(server.runner.guide_needed)
+        finally:
+            server.runner.guide_needed = prev
             config.set_runtime_model(*orig, persist=False)
 
     def test_apikey_empty_rejected(self):
