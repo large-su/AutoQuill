@@ -489,10 +489,11 @@ class TestWebLlmLoggedIn(unittest.TestCase):
             def close(self):
                 pass
 
+        import web_drivers.deepseek as ds
         ctx = _Ctx()
         with mock.patch.object(mod, "ZhihuBrowser",
                                return_value=_Browser(ctx)):
-            return mod.web_llm_logged_in(), ctx
+            return ds.web_llm_logged_in(), ctx
 
     def test_no_cookies_false(self):
         ok, _ = self._run([], "https://chat.deepseek.com/")
@@ -603,14 +604,16 @@ class TestLoginFlows(unittest.TestCase):
     to have exited)」；且共享浏览器存活期间，登录态检查的独立实例
     同 profile 并发互杀（Target page closed）。"""
 
-    def _src(self, fn_name):
+    def _src(self, fn_name, mod=None):
         import inspect
-        from applications.zhihu_story import browser_adapter as mod
-        return inspect.getsource(getattr(mod, fn_name))
+        from applications.zhihu_story import browser_adapter as mod_
+        return inspect.getsource(getattr(mod or mod_, fn_name))
 
     def test_deepseek_login_uses_dedicated_visible_browser(self):
-        src = self._src("login_deepseek_web_flow")
-        self.assertIn("ZhihuBrowser(headless=False)", src)  # 可见实例
+        import inspect
+        import web_drivers.deepseek as ds
+        src = inspect.getsource(ds.login_deepseek_web_flow)
+        self.assertIn("create_browser(headless=False)", src)  # 可见实例
         self.assertIn("_browser_lock", src)                 # 独占 profile
         self.assertNotIn("get_browser(", src)               # 不碰共享实例
 

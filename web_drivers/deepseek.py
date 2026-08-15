@@ -379,6 +379,110 @@ class DeepSeekDriver(WebLLMDriver):
         return bool(self._probe_selectors(_THINK_SELECTORS, attr="tagName")[0])
 
 
+# ---------------- DeepSeek 登录判定 / 登录引导 ----------------
+# 登录态检查与手动登录引导（Web 控制台首启引导 + /api/setup/web-login）。
+# 经 pool.create_browser 创建独立实例（工厂由 browser_adapter 注册，
+# 浏览器本体仍属知乎域，pool 不依赖 applications）；与共享浏览器共用
+# _browser_lock 串行启动——两者都依赖 USER_DATA_DIR 持久化 cookie，
+# Chromium 单例锁禁止同目录并发。
+
+_DEEPSEEK_COOKIE_DOMAINS = ("deepseek.com",)
+
+
+def _has_deepseek_cookies(context):
+    try:
+        cookies = context.cookies()
+    except Exception:
+        return False
+    return any(
+        c.get("domain") and any(
+            d in c["domain"] for d in _DEEPSEEK_COOKIE_DOMAINS)
+        and c.get("value")
+        for c in cookies
+    )
+
+
+def web_llm_logged_in():
+    """网页版 LLM（chat.deepseek.com）是否真实可登录。
+
+    判定 = deepseek.com cookie 存在 + 加载 chat.deepseek.com 未停在
+    登录页（URL 无 sign_in）。仅查 cookie 会假阳性：过期/无效 cookie
+    残留时预检放行，运行才撞登录页（线上：切 Web 成功但运行报
+    「找不到 DeepSeek 输入框」，页面停在 chat.deepseek.com/sign_in）。
+
+    用独立无头实例检查，不碰共享浏览器（get_browser）——首启引导轮询
+    setup/status 时不会反复弹出可见 Edge，也不影响任务浏览器的无头模式。
+    与共享浏览器用同一把 _browser_lock 串行启动：两者都依赖
+    USER_DATA_DIR 的持久化 cookie（临时目录读不到登录态），而
+    Chromium 单例锁禁止同目录并发——串行化后登录引导不再被此
+    检查挤掉（线上：Target page, context or browser has been closed）。
+    返回 True/False；浏览器无法启动等异常返回 False（不阻塞引导）。"""
+    from web_drivers.browser_pool import _browser_lock, create_browser
+    try:
+        with _browser_lock:
+            with create_browser(headless=True) as browser:
+                if not _has_deepseek_cookies(browser.context):
+                    return False
+                page = browser.context.new_page()
+                try:
+                    page.goto("https://chat.deepseek.com",
+                              wait_until="domcontentloaded", timeout=20000)
+                    # 等 SPA 跳转定局：已登录 → URL 稳定即返回（省 1.2s
+                    # 固定等待）；未登录 → 一旦跳到 /sign_in 立即判定
+                    deadline = time.time() + 1.5
+                    prev = page.url
+                    if "sign_in" in prev:
+                        return False
+                    while time.time() < deadline:
+                        page.wait_for_timeout(250)
+                        cur = page.url
+                        if "sign_in" in cur:
+                            return False
+                        if cur == prev:
+                            return True
+                        prev = cur
+                    return "sign_in" not in page.url
+                finally:
+                    page.close()
+    except Exception:
+        return False
+
+
+def login_deepseek_web_flow(timeout=300):
+    """打开可见 Edge 到 chat.deepseek.com，等待用户登录网页版 LLM。
+
+    供首启引导（/api/setup/web-login）使用；登录后 cookie 写入持久化
+    profile，web_llm_logged_in() 即可判定。返回 (是否成功, 提示信息)。
+    登录完成判定 = cookie 存在 + 页面不在登录页（仅 cookie 会因残留
+    假阳性，导致引导秒过但实际未登录）。
+    独立可见实例 + 全程持 _browser_lock：
+      - 共享浏览器（get_browser）归任务线程创建/使用，登录线程跨线程
+        复用会触发 Playwright「cannot switch to a different thread」
+        （线上：登录线程退出后再次点击登录即报错）
+      - 锁内独占持久化 profile，避免与其他浏览器实例并发互杀"""
+    from web_drivers.browser_pool import _browser_lock, create_browser
+    try:
+        with _browser_lock:
+            with create_browser(headless=False) as browser:
+                page = browser.context.new_page()
+                try:
+                    page.goto("https://chat.deepseek.com",
+                              wait_until="domcontentloaded",
+                              timeout=30000)
+                    deadline = time.time() + timeout
+                    while time.time() < deadline:
+                        time.sleep(3)
+                        page.wait_for_timeout(500)  # 等 SPA 跳回主页
+                        if (_has_deepseek_cookies(browser.context)
+                                and "sign_in" not in page.url):
+                            return True, "检测到登录成功"
+                    return False, f"超时（{timeout // 60} 分钟）未检测到登录"
+                finally:
+                    page.close()
+    except Exception as exc:
+        return False, f"登录引导失败：{exc}"
+
+
 # ---------------- --probe CLI ----------------
 # 真实浏览器探测 chat.deepseek.com 的关键 selector，打印命中结果。
 # 用法：python -m web_drivers.deepseek --probe

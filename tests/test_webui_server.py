@@ -189,7 +189,7 @@ class TestServerAPI(unittest.TestCase):
         try:
             config.set_runtime_mode("api", persist=False)
             server._web_llm_cache.update(ts=time.time(), ok=True)
-            with mock.patch.object(ba, "web_llm_logged_in",
+            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                    return_value=False) as m:
                 r = self.client.post("/api/mode", json={"mode": "web"})
                 self.assertEqual(r.status_code, 200)
@@ -233,7 +233,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch.object(ba, "web_llm_logged_in",
+            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                    return_value=False):
                 with mock.patch.object(runner, "_dispatch") as m:
                     runner._run_task(spec)
@@ -249,7 +249,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch.object(ba, "web_llm_logged_in",
+            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                    return_value=False):
                 with mock.patch.object(runner, "_dispatch"):
                     runner._run_task(spec)
@@ -295,7 +295,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="profile", author="甲")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch.object(ba, "web_llm_logged_in",
+            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                    return_value=False):
                 with mock.patch.object(runner, "_dispatch") as m:
                     runner._run_task(spec)
@@ -319,7 +319,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch.object(ba, "web_llm_logged_in",
+            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                    return_value=True):
                 with mock.patch.object(runner, "_dispatch",
                                        return_value=True) as m:
@@ -334,7 +334,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "api"):
-            with mock.patch.object(ba, "web_llm_logged_in") as m:
+            with mock.patch("web_drivers.deepseek.web_llm_logged_in") as m:
                 with mock.patch.object(runner, "_dispatch",
                                        return_value=True):
                     runner._run_task(spec)
@@ -921,7 +921,7 @@ class TestSetupEndpoints(unittest.TestCase):
         # TTL 内重复调用不重复拉起浏览器（web_llm_logged_in 只调一次）
         server._web_llm_cache.update(ts=0.0, ok=False)
         import applications.zhihu_story.browser_adapter as ba
-        with mock.patch.object(ba, "web_llm_logged_in",
+        with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                return_value=True) as m:
             self.assertTrue(server._web_llm_logged_in_cached())
             self.assertTrue(server._web_llm_logged_in_cached())
@@ -945,7 +945,7 @@ class TestSetupEndpoints(unittest.TestCase):
         results = []
         # patch 必须在主线程统一建立/恢复：若每个线程各自 patch 同一
         # 属性，线程退出时的恢复互相覆盖，残留 mock 污染后续测试
-        with mock.patch.object(ba, "web_llm_logged_in",
+        with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                side_effect=_slow_check) as m:
             def _call():
                 results.append(server._web_llm_logged_in_cached())
@@ -1089,8 +1089,8 @@ class TestSetupEndpoints(unittest.TestCase):
         server._login_kind = ""
         try:
             with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
-                with mock.patch.object(
-                        ba, "login_deepseek_web_flow",
+                with mock.patch(
+                        "web_drivers.deepseek.login_deepseek_web_flow",
                         return_value=(True, "ok")) as m:
                     r = self.client.post("/api/setup/web-login")
                     self.assertEqual(r.status_code, 200)

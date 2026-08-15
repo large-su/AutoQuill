@@ -178,8 +178,7 @@ class TaskRunner:
                          "profile", "general_profile"):
             from config import LLM_MODE
             if LLM_MODE == "web":
-                from applications.zhihu_story.browser_adapter import (
-                    web_llm_logged_in)
+                from web_drivers.deepseek import web_llm_logged_in
                 if not web_llm_logged_in():
                     self._finish(
                         "error",
@@ -750,8 +749,7 @@ def _web_llm_logged_in_cached():
         if time.time() - ts < _WEB_LLM_CACHE_TTL:
             return ok
         try:
-            from applications.zhihu_story.browser_adapter import (
-                web_llm_logged_in)
+            from web_drivers.deepseek import web_llm_logged_in
             ok = web_llm_logged_in()
         except Exception:
             ok = False
@@ -882,7 +880,7 @@ def api_setup_zhihu_login():
 @app.post("/api/setup/web-login")
 def api_setup_web_login():
     """后台线程拉起可见 Edge 引导登录 DeepSeek 网页版；轮询 status 收尾。"""
-    from applications.zhihu_story.browser_adapter import login_deepseek_web_flow
+    from web_drivers.deepseek import login_deepseek_web_flow
     _start_login_thread("deepseek", login_deepseek_web_flow, "DeepSeek 网页版登录")
     return {"ok": True,
             "message": "请在弹出的 Edge 窗口中登录 DeepSeek 网页版，"
