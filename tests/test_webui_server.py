@@ -530,7 +530,7 @@ class TestSetupEndpoints(unittest.TestCase):
         for k in ("version", "edge_ok", "llm_configured",
                   "zhihu_logged_in", "setup_needed"):
             self.assertIn(k, st)
-        self.assertEqual(st["version"], "4.0.0")
+        self.assertEqual(st["version"], server._setup_version())
 
     def test_status_placeholder_not_configured(self):
         # example 配置里的占位 key → 视为未配置
