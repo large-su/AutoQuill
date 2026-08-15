@@ -233,15 +233,15 @@ def _run_resume(argv):
         print("  可用的 story_id：")
         from config.story import STORY_OUTPUT_DIR
         root = _data_path(STORY_OUTPUT_DIR)
-        if _os.path.exists(root):
-            for d in sorted(_os.listdir(root)):
-                dp = _os.path.join(root, d)
-                if _os.path.isdir(dp) and _os.path.exists(
-                    _os.path.join(dp, "_progress.json")
+        if os.path.exists(root):
+            for d in sorted(os.listdir(root)):
+                dp = os.path.join(root, d)
+                if os.path.isdir(dp) and os.path.exists(
+                    os.path.join(dp, "_progress.json")
                 ):
                     print(f"    {d}")
-        else:
-            print("    （暂无）")
+            else:
+                print("    （暂无）")
         return
 
     try:
