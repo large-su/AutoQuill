@@ -301,6 +301,7 @@ def main():
     print("  ✓ 就绪\n")
 
     # 创建工作流实例
+    import applications.zhihu_story.browser_adapter  # noqa: F401 注册浏览器工厂
     from workflows.zhihu import ZhihuWorkflow
     workflow = ZhihuWorkflow()
 

@@ -356,19 +356,20 @@ class TestSemanticInterfaces(unittest.TestCase):
     def test_all_page_interactions_are_bounded(self):
         # 历史事故：风控页/加载中页面的 evaluate 无限阻塞，整条 workflow
         # 挂死数分钟无日志。所有页面交互必须走 _safe_evaluate（带超时），
-        # 裸 page.evaluate 只允许存在于 _safe_evaluate 自身。
-        from applications.zhihu_story.browser_adapter import ZhihuBrowser
+        # 裸 page.evaluate 只允许存在于 browser_pool.safe_evaluate 自身。
         import inspect
+        from applications.zhihu_story.browser_adapter import ZhihuBrowser
+        from web_drivers.browser_pool import safe_evaluate
         cls_src = inspect.getsource(ZhihuBrowser)
-        safe_src = inspect.getsource(ZhihuBrowser._safe_evaluate)
-        rest = cls_src.replace(safe_src, "", 1)
-        self.assertNotIn("page.evaluate(", rest,
+        self.assertNotIn("page.evaluate(", cls_src,
                          "存在无超时的裸 page.evaluate 调用")
         # Playwright 1.62 evaluate 无 timeout 参数且 sync API 有线程亲和
-        # 性：用 JS 内部 Promise.race 自限时哨兵实现有界等待
-        self.assertIn("Promise.race", safe_src)
-        self.assertIn("__aq_timeout__", safe_src)
-        self.assertIn("return None", safe_src)
+        # 性：用 JS 内部 Promise.race 自限时哨兵实现有界等待（唯一实现
+        # 下沉 web_drivers/browser_pool，类方法/驱动基类均委托它）
+        pool_src = inspect.getsource(safe_evaluate)
+        self.assertIn("Promise.race", pool_src)
+        self.assertIn("__aq_timeout__", pool_src)
+        self.assertIn("return None", pool_src)
 
     def test_extraction_path_uses_safe_evaluate(self):
         # 提取/发布主链路方法必须经 _safe_evaluate 走有界等待
@@ -525,11 +526,13 @@ class TestGetBrowserConcurrency(unittest.TestCase):
 
     def setUp(self):
         from applications.zhihu_story import browser_adapter as mod
+        from web_drivers import browser_pool as bp
         self.mod = mod
-        mod._shared_browser = None
+        self.bp = bp
+        bp._shared_browser = None
 
     def tearDown(self):
-        self.mod._shared_browser = None
+        self.bp._shared_browser = None
 
     def test_concurrent_calls_start_once(self):
         from unittest import mock
@@ -570,7 +573,7 @@ class TestGetBrowserConcurrency(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.mod.get_browser()
         # 坏实例未落盘：_shared_browser 保持 None，下次可重试
-        self.assertIsNone(self.mod._shared_browser)
+        self.assertIsNone(self.bp._shared_browser)
 
         ok = mock.Mock()
         ok.context = mock.Mock()
@@ -583,7 +586,7 @@ class TestGetBrowserConcurrency(unittest.TestCase):
         from unittest import mock
         stale = mock.Mock()
         stale.context = None
-        self.mod._shared_browser = stale
+        self.bp._shared_browser = stale
         fresh = mock.Mock()
         fresh.context = mock.Mock()
         with mock.patch.object(self.mod, "ZhihuBrowser",

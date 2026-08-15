@@ -49,7 +49,7 @@ class WebLLMDriver:
         """
         if (self._browser is None
                 or getattr(self._browser, "context", None) is None):
-            from applications.zhihu_story.browser_adapter import get_browser
+            from web_drivers.browser_pool import get_browser
             self._browser = get_browser()
             self._page = None  # 旧页来自已关闭的 context，一并丢弃
         return self._browser
@@ -62,7 +62,7 @@ class WebLLMDriver:
 
     def open_session(self):
         """打开网页版 LLM 站点（导航到配置 URL）。"""
-        from applications.zhihu_story.browser_adapter import _check_cancel
+        from web_drivers.browser_pool import _check_cancel
         from config import WEB_DRIVERS, WEB_DRIVER_NAME
         url = WEB_DRIVERS[WEB_DRIVER_NAME]["url"]
         _check_cancel()
@@ -97,30 +97,10 @@ class WebLLMDriver:
     def _safe_evaluate(self, js, *args, timeout=_EVAL_TIMEOUT):
         """执行页面 JS，失败返回 None；JS 内部带自限时哨兵。
 
-        复刻 browser_adapter._safe_evaluate：Playwright 1.62 evaluate
-        不支持 timeout 参数且 sync API 线程亲和，用 Promise.race
-        哨兵截断挂起调用。取消检查点在调用前，WorkflowCancelled
-        必须冒泡（否则「停止」按钮失效）。"""
-        from applications.zhihu_story.browser_adapter import _check_cancel
-        wrapped = (
-            "async function() {"
-            "  const _fn = " + js + ";"
-            "  const _timeout = new Promise(_r => setTimeout("
-            f"() => _r({{__aq_timeout__: true}}), {int(timeout)}));"
-            "  const _result = await Promise.race("
-            "    [Promise.resolve(_fn.apply(null, arguments)), _timeout]);"
-            "  if (_result && _result.__aq_timeout__) return null;"
-            "  return _result;"
-            "}"
-        )
-        _check_cancel()
-        try:
-            return self._page_instance().evaluate(wrapped, *args)
-        except WorkflowCancelled:
-            raise
-        except Exception as exc:
-            log.warning("web_drivers: evaluate 失败：%s", exc)
-            return None
+        有界页面交互（实现下沉 web_drivers/browser_pool.safe_evaluate）。"""
+        from web_drivers.browser_pool import safe_evaluate
+        return safe_evaluate(self._page_instance(), js, *args,
+                             timeout=timeout)
 
     def _probe_selectors(self, candidates, attr="innerText"):
         """从候选 selector 列表返回首个命中元素（含其指定属性）。
@@ -149,7 +129,7 @@ class WebLLMDriver:
 
     def _dump_page_state(self, hint):
         """页面状态 dump（URL/标题/可见文本片段），供前端改版时人工介入。"""
-        from applications.zhihu_story.browser_adapter import WorkflowCancelled
+        from web_drivers.browser_pool import WorkflowCancelled
         page = self._page_instance()
         state = {}
         try:

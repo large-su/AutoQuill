@@ -45,7 +45,7 @@ class ZhihuWorkflow(WorkflowBase):
     # ============================================================
 
     def _browser(self):
-        from applications.zhihu_story.browser_adapter import get_browser
+        from web_drivers.browser_pool import get_browser
         return get_browser()
 
     def _require_login(self, browser):

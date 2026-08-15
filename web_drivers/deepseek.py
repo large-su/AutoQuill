@@ -278,7 +278,7 @@ class DeepSeekDriver(WebLLMDriver):
         由 webui/log_capture 识别为进度条事件（前端零改动）。
         取消检查点每轮执行——Web 控制台「停止」按钮直接生效。
         """
-        from applications.zhihu_story.browser_adapter import _check_cancel
+        from web_drivers.browser_pool import _check_cancel
         from config import WEB_DRIVERS, WEB_DRIVER_NAME
         cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
         max_wait = max_wait or cfg.get("max_wait", 600)
@@ -385,7 +385,7 @@ class DeepSeekDriver(WebLLMDriver):
 # （需 Edge 持久化 profile 已登录 DeepSeek，或先在页面手动登录）
 
 def _probe():
-    from applications.zhihu_story.browser_adapter import get_browser
+    from web_drivers.browser_pool import get_browser
     browser = get_browser()
     page = browser.context.new_page()
     url = "https://chat.deepseek.com/"

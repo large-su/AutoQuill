@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 
 log = logging.getLogger(__name__)
@@ -74,28 +73,6 @@ _NAV_TIMEOUT = 20000
 # 浏览器进程启动超时（毫秒）。启动无日志是历史卡死事故的高发段：
 # playwright 驱动或 Edge 拉起失败时无任何输出，必须显式超时。
 _LAUNCH_TIMEOUT_MS = 60000
-
-
-class WorkflowCancelled(Exception):
-    """用户取消操作（Web 控制台「停止」按钮）。"""
-
-
-_cancel_hook = None
-
-
-def set_cancel_hook(fn):
-    """设置取消检查钩子；fn() 返回 True 时后续浏览器操作抛 WorkflowCancelled。
-
-    仅 Web 控制台设置（stop 置标志）；CLI 模式下无 hook，零影响。
-    检查只允许在 Python 层（浏览器阻塞调用自带超时），绝不能跨线程
-    注入异常——那会破坏 Playwright 协议层导致 close 挂起。"""
-    global _cancel_hook
-    _cancel_hook = fn
-
-
-def _check_cancel():
-    if _cancel_hook is not None and _cancel_hook():
-        raise WorkflowCancelled("已由用户停止")
 
 
 def build_draft_marker(text, limit=60):
@@ -412,34 +389,8 @@ class ZhihuBrowser:
     # ----------------------------------------------------------
 
     def _safe_evaluate(self, js, *args, timeout=_EVAL_TIMEOUT):
-        """执行页面 JS，失败返回 None；JS 内部带自限时哨兵。
-
-        所有页面交互都必须走这里。Playwright 1.62 的 evaluate 不支持
-        timeout 参数（协议层无超时），且 sync API 有线程亲和性（不能
-        从其他线程调用）。对策：把调用 JS 包进 Promise.race 自限时
-        哨兵——页面主线程存活时，任何挂起的 evaluate（fetch 不返回、
-        慢导航等）都会在 timeout 后被哨兵截断返回 None，不阻塞流程。
-        渲染进程彻底卡死（极端风控）时此层无效，由调用方（E2E runner）
-        的进程级看门狗兜底。"""
-        wrapped = (
-            "async function() {"
-            "  const _fn = " + js + ";"
-            "  const _timeout = new Promise(_r => setTimeout("
-            f"() => _r({{__aq_timeout__: true}}), {int(timeout)}));"
-            "  const _result = await Promise.race("
-            "    [Promise.resolve(_fn.apply(null, arguments)), _timeout]);"
-            "  if (_result && _result.__aq_timeout__) return null;"
-            "  return _result;"
-            "}"
-        )
-        _check_cancel()
-        try:
-            return self.page.evaluate(wrapped, *args)
-        except WorkflowCancelled:
-            raise
-        except Exception as exc:
-            log.warning("browser_adapter: evaluate 失败：%s", exc)
-            return None
+        """有界页面交互（实现下沉 web_drivers/browser_pool.safe_evaluate）。"""
+        return safe_evaluate(self.page, js, *args, timeout=timeout)
 
     # ----------------------------------------------------------
     # 语义接口：选题
@@ -980,40 +931,34 @@ class ZhihuBrowser:
 
 
 # ----------------------------------------------------------
-# 模块级浏览器单例：workflow 各阶段共享同一浏览器实例
+# 浏览器基础设施（实现下沉 web_drivers/browser_pool；此处 re-export
+# 垫片保持 workflows/tools/collector/webui 调用点零改动。工厂模块级
+# 注册——引用 ZhihuBrowser 模块全局，mock.patch.object(mod, "ZhihuBrowser")
+# 拦截链不断）
 # ----------------------------------------------------------
 
-_shared_browser = None
-_browser_lock = threading.Lock()  # 懒启动串行化：并发 get_browser 不再互抢 profile
+from web_drivers.browser_pool import (
+    WorkflowCancelled,
+    set_cancel_hook,
+    _check_cancel,
+    _browser_lock,
+    get_browser,
+    close_shared_browser,
+    safe_evaluate,
+    register_browser_factory,
+    create_browser,
+)
 
 
-def get_browser():
-    """获取全局共享的 ZhihuBrowser（懒启动，线程安全）。
+def _browser_factory(headless):
+    """浏览器创建工厂（browser_pool 注册）：创建未启动的 ZhihuBrowser。
 
-    headless 每次动态读取 config.BROWSER_HEADLESS——Web 控制台切换
-    「调试/工作模式」后下一次任务启动即生效。
-    锁内先 start() 成功才落盘 _shared_browser：并发调用时后到的线程
-    不会拿半初始化实例（线上：并发启动互抢同一 profile，坏实例
-    context=None 永久复用于登录引导 → 'NoneType' new_page）。"""
-    global _shared_browser
-    with _browser_lock:
-        if _shared_browser is None or _shared_browser.context is None:
-            from config import BROWSER_HEADLESS
-            candidate = ZhihuBrowser(headless=BROWSER_HEADLESS)
-            candidate.start()  # 失败抛异常，_shared_browser 保持 None 可重试
-            _shared_browser = candidate
-            log.info("browser_adapter: 浏览器模式：%s",
-                     "无头（工作模式）" if BROWSER_HEADLESS
-                     else "前台（调试模式）")
-        return _shared_browser
+    返回未启动实例：get_browser 在 pool 锁内 start()；登录引导等
+    独立实例用 `with create_browser(...)` 经 __enter__ 启动。"""
+    return ZhihuBrowser(headless=headless)
 
 
-def close_shared_browser():
-    global _shared_browser
-    with _browser_lock:
-        if _shared_browser is not None:
-            _shared_browser.close()
-            _shared_browser = None
+register_browser_factory(_browser_factory)
 
 
 _DEEPSEEK_COOKIE_DOMAINS = ("deepseek.com",)

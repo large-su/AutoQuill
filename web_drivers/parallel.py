@@ -203,7 +203,7 @@ class ParallelWebRunner:
         非空即完成；超时失败。每轮 _check_cancel()——Web 控制台
         「停止」按钮直接生效（WorkflowCancelled 冒泡）。
         """
-        from applications.zhihu_story.browser_adapter import _check_cancel
+        from web_drivers.browser_pool import _check_cancel
         drv = slot.driver
         cfg = drv.config
         _check_cancel()

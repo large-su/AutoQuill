@@ -66,7 +66,14 @@ class TestWebDriversDomSemantics(unittest.TestCase):
     def test_base_provides_safe_evaluate_with_cancel(self):
         src = self._src("web_drivers/base.py")
         self.assertIn("_safe_evaluate", src)
+        self.assertIn("_check_cancel", src)     # 取消检查点
+
+    def test_pool_owns_bounded_evaluate_implementation(self):
+        # 有界交互唯一实现下沉 browser_pool（base/browser_adapter 委托）
+        src = self._src("web_drivers/browser_pool.py")
+        self.assertIn("safe_evaluate", src)
         self.assertIn("Promise.race", src)      # 自限时哨兵
+        self.assertIn("__aq_timeout__", src)
         self.assertIn("_check_cancel", src)     # 取消检查点
 
     def test_base_uses_shared_browser_context(self):

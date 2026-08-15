@@ -233,8 +233,7 @@ class TaskRunner:
         finally:
             builtins.input = _orig_input
             try:
-                from applications.zhihu_story.browser_adapter import (
-                    close_shared_browser)
+                from web_drivers.browser_pool import close_shared_browser
                 close_shared_browser()
             except Exception:
                 pass
@@ -344,7 +343,7 @@ class TaskRunner:
             if spec.count < 1 or spec.count > 500:
                 raise HTTPException(400, "采集数量须在 1-500 之间")
             from applications.zhihu_story.collector import collect_author_stories
-            from applications.zhihu_story.browser_adapter import get_browser
+            from web_drivers.browser_pool import get_browser
             result = collect_author_stories(
                 spec.url, count=spec.count, browser=get_browser())
             collected = result["collected"]

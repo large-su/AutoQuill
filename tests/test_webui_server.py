@@ -600,12 +600,11 @@ class TestCollectDispatch(unittest.TestCase):
         self.assertIn("1-500", str(ctx.exception))
 
     def test_dispatch_collect_success(self):
-        from applications.zhihu_story import browser_adapter as ba
         fake_browser = mock.MagicMock()
         fake_result = {"collected": [{"title": "新故事", "answer": "x" * 200,
                                       "footer": {"answer_url": "https://x/1"}}],
                        "author": "自动识别作者", "existing": 5}
-        with mock.patch("applications.zhihu_story.browser_adapter.get_browser",
+        with mock.patch("web_drivers.browser_pool.get_browser",
                         return_value=fake_browser):
             with mock.patch("applications.zhihu_story.collector.collect_author_stories",
                             return_value=fake_result) as m:
@@ -630,7 +629,7 @@ class TestCollectDispatch(unittest.TestCase):
 
     def test_dispatch_collect_nothing_new(self):
         # 全部重复/失败 → 返回 False（任务未成功，日志说明）
-        with mock.patch("applications.zhihu_story.browser_adapter.get_browser",
+        with mock.patch("web_drivers.browser_pool.get_browser",
                         return_value=mock.MagicMock()):
             with mock.patch("applications.zhihu_story.collector.collect_author_stories",
                             return_value={"collected": [], "author": "空作者"}):
