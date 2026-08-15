@@ -564,7 +564,9 @@
           已配置的方式会显示为完成状态。
         </div>
         <div class="mode-pick">
-          <label class="mode-card" id="mcApi">
+          <!-- 用 div 而非 label：label 会把点击转发给第一个表单控件
+               （隐藏的 select），导致卡片点选/输入框聚焦被劫持 -->
+          <div class="mode-card" id="mcApi">
             <div class="mc-t">🔑 API 直接调用</div>
             <div class="mc-d">付费、响应快。DeepSeek 开放平台申请 API Key。</div>
             <div class="mc-ctl">
@@ -574,8 +576,8 @@
               <span class="setup-err mc-msg" id="keyErr"></span>
               <span class="setup-ok mc-msg" id="keyOk"></span>
             </div>
-          </label>
-          <label class="mode-card" id="mcWeb">
+          </div>
+          <div class="mode-card" id="mcWeb">
             <div class="mc-t">🌐 Web 网页版</div>
             <div class="mc-d">免费。登录 chat.deepseek.com 后由浏览器自动操作。</div>
             <div class="mc-ctl">
@@ -583,7 +585,7 @@
               <span class="setup-err mc-msg" id="webErr"></span>
               <span class="setup-ok mc-msg" id="webOk"></span>
             </div>
-          </label>
+          </div>
         </div>
       </div>
       <div class="setup-step" id="stepZhihu">
@@ -1919,9 +1921,23 @@ async function setModeChoice(mode) {
   } catch (e) { /* 旧服务无 /api/mode */ }
 }
 
-/* 卡片选中状态：默认选中已配置的一方；都未配置时默认 Web（免费）。 */
+/* 用户手动点选的卡片（null=未点选，按后端状态取默认）。
+   轮询每 2.5s 重算默认选中，用户点选后不得被覆盖——
+   否则未配置 API 时刚点开的输入框会被轮询切走。 */
+let cardUserPick = null;
+
+/* 卡片选中状态：用户点选优先；否则默认选中已配置的一方；
+   都未配置时默认 Web（免费）。 */
 function selectModeCard(st) {
   const mcApi = $("mcApi"), mcWeb = $("mcWeb");
+  if (cardUserPick === "api") {
+    mcApi.classList.add("sel"); mcWeb.classList.remove("sel");
+    return;
+  }
+  if (cardUserPick === "web") {
+    mcWeb.classList.add("sel"); mcApi.classList.remove("sel");
+    return;
+  }
   mcApi.classList.toggle("sel", !!st.llm_configured && !st.web_llm_logged_in);
   mcWeb.classList.toggle("sel", !mcApi.classList.contains("sel"));
 }
@@ -2053,11 +2069,15 @@ $("settingsMask").addEventListener("click", (e) => {
 $("btnSetupFinish").addEventListener("click", hideSetupWizard);
 
 $("mcApi").addEventListener("click", () => {
+  cardUserPick = "api";
+  selectModeCard(setupCache || {});
   if (!$("setupApiKey").value && !$("mcApi").classList.contains("done")) {
     $("setupApiKey").focus();
   }
 });
 $("mcWeb").addEventListener("click", () => {
+  cardUserPick = "web";
+  selectModeCard(setupCache || {});
   if (!$("mcWeb").classList.contains("done")) {
     $("btnWebLogin").focus();
   }
