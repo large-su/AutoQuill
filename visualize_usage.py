@@ -30,9 +30,10 @@ plt.rcParams['axes.unicode_minus'] = False
 # 配置
 # ============================================================
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(SCRIPT_DIR, "data", "usage_history.jsonl")
-OUTPUT_FILE = os.path.join(SCRIPT_DIR, "data", "usage_report.png")
+from core.paths import data as _data_path
+
+DATA_FILE = _data_path("data", "usage_history.jsonl")
+OUTPUT_FILE = _data_path("data", "usage_report.png")
 
 # ============================================================
 # 数据加载

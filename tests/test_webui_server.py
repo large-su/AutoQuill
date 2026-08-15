@@ -493,5 +493,143 @@ class TestStoryLibApi(unittest.TestCase):
             server.runner.state = orig
 
 
+class TestSetupEndpoints(unittest.TestCase):
+    """首启引导：状态 / API Key 写入 / 连接测试 / 知乎登录分发。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import config
+        cls._orig_file = config._PROVIDERS_FILE
+        cls.tmp = tempfile.mkdtemp(prefix="setup_")
+        cls.dst = os.path.join(cls.tmp, "llm_providers.json")
+        # 复制真实 example 配置到临时数据目录（不碰真实 llm_providers.json）
+        cls._src = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config", "llm_providers.example.json")
+        config._PROVIDERS_FILE = cls.dst
+        cls.client = TestClient(server.app)
+
+    def setUp(self):
+        # 每个测试重置为 example（占位 key）状态，避免写 key 测试污染顺序
+        with open(self._src, encoding="utf-8") as f:
+            providers = json.load(f)
+        with open(self.dst, "w", encoding="utf-8") as f:
+            json.dump(providers, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def tearDownClass(cls):
+        import config
+        config._PROVIDERS_FILE = cls._orig_file
+        import shutil
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_status_shape(self):
+        r = self.client.get("/api/setup/status")
+        self.assertEqual(r.status_code, 200)
+        st = r.json()
+        for k in ("version", "edge_ok", "llm_configured",
+                  "zhihu_logged_in", "setup_needed"):
+            self.assertIn(k, st)
+        self.assertEqual(st["version"], "4.0.0")
+
+    def test_status_placeholder_not_configured(self):
+        # example 配置里的占位 key → 视为未配置
+        r = self.client.get("/api/setup/status")
+        self.assertFalse(r.json()["llm_configured"])
+
+    def test_apikey_write_and_effect(self):
+        import config
+        orig = (config.LLM_PROVIDER, config.LLM_MODEL_ID)
+        try:
+            r = self.client.post("/api/setup/apikey", json={
+                "provider": "DeepSeek", "api_key": "sk-test-12345"})
+            self.assertEqual(r.status_code, 200)
+            eff = r.json()["effective"]
+            self.assertEqual(eff["provider"], "DeepSeek")
+            # 已写入临时 providers 文件
+            with open(config._PROVIDERS_FILE, encoding="utf-8") as f:
+                providers = json.load(f)
+            p = next(p for p in providers if p["name"] == "DeepSeek")
+            self.assertEqual(p["apiKey"], "sk-test-12345")
+            # 立即生效
+            self.assertEqual(config.LLM_API_KEY, "sk-test-12345")
+            # 状态翻转为已配置
+            st = self.client.get("/api/setup/status").json()
+            self.assertTrue(st["llm_configured"])
+        finally:
+            config.set_runtime_model(*orig, persist=False)
+
+    def test_apikey_empty_rejected(self):
+        r = self.client.post("/api/setup/apikey", json={
+            "provider": "DeepSeek", "api_key": "  "})
+        self.assertEqual(r.status_code, 400)
+
+    def test_apikey_unknown_provider_rejected(self):
+        r = self.client.post("/api/setup/apikey", json={
+            "provider": "不存在的服务商", "api_key": "sk-x"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_test_api_mock_ok(self):
+        fake = mock.Mock()
+        fake.status_code = 200
+        fake.json.return_value = {"choices": [
+            {"message": {"content": "连接成功"}}]}
+        with mock.patch("webui.server.requests.post",
+                        return_value=fake) as m:
+            r = self.client.post("/api/setup/test-api")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+        # 请求确实发往 baseUrl + 认证头
+        args = m.call_args
+        self.assertIn("/chat/completions", args.args[0])
+        self.assertIn("Authorization",
+                      args.kwargs["headers"])
+
+    def test_zhihu_login_missing_edge_400(self):
+        # 无 Edge 环境（CI/无浏览器机器）→ 400 而非 500
+        import applications.zhihu_story.browser_adapter as ba
+        with mock.patch.object(ba, "EDGE_PATH", None):
+            r = self.client.post("/api/setup/zhihu-login")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Edge", r.json()["detail"])
+
+    def test_zhihu_login_starts_thread(self):
+        import applications.zhihu_story.browser_adapter as ba
+        orig_thread = server._login_thread
+        server._login_thread = None
+        try:
+            with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
+                with mock.patch.object(
+                        ba, "login_zhihu_flow",
+                        return_value=(True, "ok")) as m:
+                    r = self.client.post("/api/setup/zhihu-login")
+                    self.assertEqual(r.status_code, 200)
+                    # 后台线程里执行了登录流程（等线程跑完）
+                    import time
+                    deadline = time.time() + 5
+                    while (server._login_thread
+                           and server._login_thread.is_alive()
+                           and time.time() < deadline):
+                        time.sleep(0.05)
+                    self.assertEqual(m.call_count, 1)
+                    st = self.client.get("/api/setup/status").json()
+                    self.assertFalse(st["login_running"])
+        finally:
+            server._login_thread = orig_thread
+
+    def test_zhihu_login_duplicate_409(self):
+        import applications.zhihu_story.browser_adapter as ba
+        fake = mock.Mock()
+        fake.is_alive.return_value = True
+        orig = server._login_thread
+        server._login_thread = fake
+        try:
+            with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
+                r = self.client.post("/api/setup/zhihu-login")
+            self.assertEqual(r.status_code, 409)
+        finally:
+            server._login_thread = orig
+
+
 if __name__ == "__main__":
     unittest.main()

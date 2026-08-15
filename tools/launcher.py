@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""AutoQuill 一键启动器（轻量版）
+"""AutoQuill 一键启动器
 
 双击即可启动 Web 控制台：
-  1. 检查 Python 环境与运行依赖（fastapi / uvicorn / playwright）
-  2. 若 8787 端口已有服务在跑 → 直接打开浏览器（复用）
-  3. 否则后台启动 `python main.py --web`（无黑窗、日志写 logs/webui.log）
-  4. 等待服务就绪后自动打开浏览器
-  5. 保持运行；关闭本窗口 / Ctrl+C / 进程被杀 → 服务进程随之清理（Job Object）
+  源码态：检查 Python 环境与依赖（fastapi / uvicorn / playwright），
+          后台启动 `python main.py --web`（日志写 DATA_ROOT/logs/webui.log）
+  打包态：跳过环境检查，首启迁移旧数据（旧解压目录 → %APPDATA%/AutoQuill），
+          拉起自身 `AutoQuill.exe --service` 作为服务进程
+  通用：8787 已有服务 → 直接打开浏览器复用；关窗/强杀 → Job Object 连带
+        服务进程清理；就绪后自动打开浏览器
 
-使用要求：启动器 exe 必须放在 AutoQuill 项目根目录（与 main.py 同级）。
-纯标准库实现，便于 PyInstaller 打出体积很小的 exe。
+打包态数据目录与 core/paths.py 保持一致（%APPDATA%/AutoQuill），
+程序文件（含服务代码）全部内置于 exe，不依赖系统 Python。
 """
 
 import os
@@ -23,7 +24,7 @@ from pathlib import Path
 PORT = 8787
 BASE_URL = f"http://127.0.0.1:{PORT}"
 SERVICE_ARGS = ["main.py", "--web"]
-READY_TIMEOUT = 30  # 服务就绪等待上限（秒）
+READY_TIMEOUT = 40  # 服务就绪等待上限（秒）——打包态首次解压较慢
 DEPCHECK_TIMEOUT = 60  # 依赖检查超时（秒）——playwright 导入较慢
 
 
@@ -32,6 +33,35 @@ def project_root():
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
+
+
+def data_root():
+    """数据根目录：打包态 = %APPDATA%/AutoQuill（与 core/paths 一致）；
+    源码态 = 项目根。"""
+    if getattr(sys, "frozen", False):
+        try:
+            from core import paths
+            return Path(paths.DATA_ROOT)
+        except Exception:
+            pass
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return Path(base) / "AutoQuill"
+    return project_root()
+
+
+def migrate_legacy_data():
+    """打包态首启：旧解压目录数据 → %APPDATA%/AutoQuill（幂等）。"""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        from core import paths
+        result = paths.migrate_legacy_data()
+        if result["migrated"]:
+            print("已迁移旧版数据到用户数据目录（%APPDATA%/AutoQuill）。")
+        elif result["error"]:
+            print(f"数据迁移失败（可稍后重试）：{result['error']}")
+    except Exception as exc:
+        print(f"数据迁移跳过：{exc}")
 
 
 def _run_quiet(cmd, timeout=20):
@@ -136,13 +166,20 @@ def _assign_kill_on_close_job(proc):
 
 
 def start_service(python_cmd, root):
-    """后台启动 Web 控制台服务（无窗口），日志追加到 logs/webui.log。"""
-    log_dir = root / "logs"
-    log_dir.mkdir(exist_ok=True)
-    log_file = open(log_dir / "webui.log", "ab", buffering=0)
+    """后台启动 Web 控制台服务（无窗口），日志追加到 DATA_ROOT/logs/webui.log。
+
+    打包态：python_cmd 为 None，直接拉起自身 `AutoQuill.exe --service`
+    （服务代码内置于 exe，不依赖系统 Python）；源码态仍走 python main.py。"""
+    log_root = data_root() / "logs"
+    log_root.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_root / "webui.log", "ab", buffering=0)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "--service"]
+    else:
+        cmd = list(python_cmd) + SERVICE_ARGS
     proc = subprocess.Popen(
-        python_cmd + SERVICE_ARGS,
+        cmd,
         cwd=str(root),
         stdout=log_file,
         stderr=log_file,
@@ -194,13 +231,24 @@ def _set_title(title):
 def main():
     if sys.stdout and not sys.stdout.isatty():
         sys.stdout.reconfigure(line_buffering=True)  # 管道/重定向时也让输出即时可见
+
+    # --service：打包态服务子进程入口（启动器拉起自身后进入服务本体）。
+    # 先做数据目录 bootstrap，再走 main.py 主入口（与 --web 等价，
+    # 含日志 FileHandler / 取消钩子 / uvicorn）。
+    if '--service' in sys.argv:
+        migrate_legacy_data()
+        import main
+        main.main()
+        return 0
+
     root = project_root()
+    frozen = getattr(sys, "frozen", False)
     _set_title("AutoQuill 启动器")
     print("=" * 44)
-    print("  AutoQuill 一键启动")
+    print("  AutoQuill 一键启动" + ("（正式版）" if frozen else ""))
     print("=" * 44)
 
-    if not (root / "main.py").exists():
+    if not frozen and not (root / "main.py").exists():
         print("未找到 main.py！")
         print("请把启动器放在 AutoQuill 项目根目录（与 main.py 同级）后重试。")
         _pause()
@@ -214,20 +262,26 @@ def main():
         _pause()
         return 0
 
-    python_cmd, python_exe = find_python()
-    if python_cmd is None:
-        print("未找到 Python 环境。")
-        print("请先安装 Python 3.10+（安装时勾选 Add to PATH），再运行本启动器。")
-        _pause()
-        return 1
-    print(f"Python 环境：{python_exe}")
+    if frozen:
+        # 打包态：无需 Python/依赖检查，首启迁移旧数据
+        print("运行模式：正式版（内置运行环境，无需安装 Python）")
+        migrate_legacy_data()
+        python_cmd = None
+    else:
+        python_cmd, python_exe = find_python()
+        if python_cmd is None:
+            print("未找到 Python 环境。")
+            print("请先安装 Python 3.10+（安装时勾选 Add to PATH），再运行本启动器。")
+            _pause()
+            return 1
+        print(f"Python 环境：{python_exe}")
 
-    if not check_deps(python_cmd):
-        print("缺少运行依赖（fastapi / uvicorn / playwright）。")
-        print("请在项目目录执行：")
-        print("    pip install -r requirements.txt")
-        _pause()
-        return 1
+        if not check_deps(python_cmd):
+            print("缺少运行依赖（fastapi / uvicorn / playwright）。")
+            print("请在项目目录执行：")
+            print("    pip install -r requirements.txt")
+            _pause()
+            return 1
 
     print("正在启动服务…（首次约 3-5 秒）")
     proc = start_service(python_cmd, root)
@@ -244,7 +298,7 @@ def main():
 
     if not ready:
         print("服务启动失败，最近日志：")
-        _print_tail(root / "logs" / "webui.log")
+        _print_tail(data_root() / "logs" / "webui.log")
         _pause()
         return 1
 

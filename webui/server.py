@@ -22,6 +22,7 @@ import threading
 import time
 from pathlib import Path
 
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -30,8 +31,9 @@ from webui import log_capture
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = _PROJECT_ROOT / "output"
+from core import paths
+
+OUTPUT_DIR = Path(paths.data("output"))
 INDEX_HTML = Path(__file__).resolve().parent / "static" / "index.html"
 
 HOST = "127.0.0.1"
@@ -542,6 +544,147 @@ def api_set_browser(spec: _BrowserSpec):
     log.info("Web 控制台切换浏览器模式 → %s",
              "无头（工作）" if eff["headless"] else "前台（调试）")
     return {"ok": True, "effective": eff}
+
+
+# ============================================================
+# 首启引导（安装版：Edge 检测 → API Key → 知乎登录 三步）
+# ============================================================
+
+_login_thread = None
+_login_error = ""
+
+
+def _setup_version():
+    try:
+        from core.version import VERSION
+        return VERSION
+    except ImportError:
+        return "0.0.0"
+
+
+@app.get("/api/setup/status")
+def api_setup_status():
+    """引导状态：Edge / API Key / 知乎登录 三项就绪检查。"""
+    from applications.zhihu_story.browser_adapter import (
+        EDGE_PATH, STORAGE_STATE_PATH)
+    from config import LLM_MODEL_ID, LLM_PROVIDER, _load_provider_config
+    llm_configured = False
+    try:
+        key = (_load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
+               .get("apiKey") or "").strip()
+        llm_configured = bool(key) and not key.startswith("sk-your-")
+    except Exception:
+        pass
+    edge_ok = bool(EDGE_PATH)
+    zhihu_logged_in = os.path.exists(STORAGE_STATE_PATH)
+    return {
+        "version": _setup_version(),
+        "edge_ok": edge_ok,
+        "llm_configured": llm_configured,
+        "zhihu_logged_in": zhihu_logged_in,
+        "login_running": (_login_thread is not None
+                          and _login_thread.is_alive()),
+        "login_error": _login_error,
+        "setup_needed": not (edge_ok and llm_configured and zhihu_logged_in),
+    }
+
+
+class _ApiKeySpec(BaseModel):
+    provider: str = "DeepSeek"
+    api_key: str = ""
+
+
+@app.post("/api/setup/apikey")
+def api_setup_apikey(spec: _ApiKeySpec):
+    """写入服务商 API Key（llm_providers.json，DATA_ROOT）并立即生效。
+
+    首启引导专用；写入后按该服务商切换故事生成模型（持久化）。
+    """
+    key = (spec.api_key or "").strip()
+    if not key:
+        raise HTTPException(400, "API Key 不能为空")
+    from config import _PROVIDERS_FILE, set_runtime_model
+    try:
+        with open(_PROVIDERS_FILE, "r", encoding="utf-8") as f:
+            providers = json.load(f)
+    except OSError:
+        raise HTTPException(500, "llm_providers.json 读取失败")
+    p = next((p for p in providers if p["name"] == spec.provider), None)
+    if p is None:
+        raise HTTPException(
+            400, f"llm_providers.json 中未找到服务商「{spec.provider}」")
+    p["apiKey"] = key
+    with open(_PROVIDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(providers, f, ensure_ascii=False, indent=2)
+    eff = set_runtime_model(spec.provider, None, persist=True)
+    log.info("首启引导：已写入服务商「%s」的 API Key", spec.provider)
+    return {"ok": True, "effective": eff}
+
+
+@app.post("/api/setup/test-api")
+def api_setup_test_api():
+    """实测当前配置的 API 连接（首启引导「测试连接」按钮）。"""
+    from config import (LLM_API_BASE_URL, LLM_API_EXTRA_BODY,
+                        LLM_API_KEY, LLM_API_MODEL)
+    if not LLM_API_KEY or LLM_API_KEY.startswith("sk-your-"):
+        raise HTTPException(400, "API Key 未配置或仍是占位符")
+    if not LLM_API_BASE_URL:
+        raise HTTPException(400, "缺少 baseUrl（服务商配置不完整）")
+    payload = {
+        "model": LLM_API_MODEL,
+        "messages": [{"role": "user", "content": "请回复：连接成功"}],
+        "max_tokens": 100,
+        "stream": False,
+    }
+    if isinstance(LLM_API_EXTRA_BODY, dict):
+        payload.update(LLM_API_EXTRA_BODY)
+    try:
+        resp = requests.post(
+            f"{LLM_API_BASE_URL.rstrip('/')}/chat/completions",
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {LLM_API_KEY}"},
+            json=payload, timeout=30)
+        if resp.status_code == 200:
+            reply = (resp.json().get("choices") or [{}])[0] \
+                .get("message", {}).get("content", "")
+            return {"ok": True, "detail": f"连接成功：{reply[:60]}"}
+        return {"ok": False, "detail": f"HTTP {resp.status_code}："
+                                       f"{resp.text[:200]}"}
+    except requests.exceptions.RequestException as exc:
+        return {"ok": False, "detail": str(exc)}
+
+
+@app.post("/api/setup/zhihu-login")
+def api_setup_zhihu_login():
+    """后台线程拉起可见 Edge 引导登录知乎；前端轮询 setup/status 收尾。"""
+    global _login_error
+    global _login_thread
+    if _login_thread is not None and _login_thread.is_alive():
+        raise HTTPException(409, "登录引导已在运行，请在弹出的 Edge 窗口完成登录")
+    from applications.zhihu_story.browser_adapter import EDGE_PATH
+    if not EDGE_PATH:
+        raise HTTPException(400, "未找到 Microsoft Edge，请先安装 Edge 后重试")
+
+    _login_error = ""
+
+    def _run():
+        global _login_error
+        try:
+            from applications.zhihu_story.browser_adapter import (
+                login_zhihu_flow)
+            ok, msg = login_zhihu_flow()
+            log.info("首启引导：知乎登录%s", "成功" if ok else f"失败：{msg}")
+            if not ok:
+                _login_error = msg
+        except Exception as exc:
+            _login_error = str(exc)
+            log.error("首启引导：知乎登录异常：%s", exc, exc_info=True)
+
+    _login_thread = threading.Thread(target=_run, daemon=True)
+    _login_thread.start()
+    return {"ok": True,
+            "message": "请在弹出的 Edge 窗口中完成登录（扫码/短信），"
+                       "检测到登录后自动保存并关闭"}
 
 
 class _AuthorSpec(BaseModel):

@@ -48,7 +48,9 @@ KB_MODEL_ID  = "deepseek-v4-pro"    # 知识库/评分模型，正文同用 pro
 # --- 以下为自动加载逻辑，一般无需修改 ---
 import json as _json, os as _os
 
-_PROVIDERS_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "llm_providers.json")
+from core.paths import data as _data_path
+
+_PROVIDERS_FILE = _data_path("config", "llm_providers.json")
 
 def _load_provider_config(provider_name, model_id):
     """从 config/llm_providers.json 中解析指定服务商和模型的完整配置"""
@@ -241,8 +243,7 @@ def random_mouse_duration():
 # 下次启动自动恢复。
 # ============================================================
 
-_WEBUI_MODEL_FILE = _os.path.join(
-    _os.path.dirname(_os.path.abspath(__file__)), "webui_model.json")
+_WEBUI_MODEL_FILE = _data_path("config", "webui_model.json")
 
 
 def _save_webui_state(**extra):

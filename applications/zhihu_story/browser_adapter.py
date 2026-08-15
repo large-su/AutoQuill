@@ -27,10 +27,41 @@ import time
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-USER_DATA_DIR = os.path.join(_PROJECT_ROOT, "data", "browser_profile")
-STORAGE_STATE_PATH = os.path.join(_PROJECT_ROOT, "config", "browser_state.json")
+from core.paths import data as _data_path
+
+
+def _find_edge():
+    """定位系统 Edge 可执行文件：AQ_EDGE_PATH 环境变量 → x86 → x64 →
+    注册表 App Paths（用户级/便携安装兜底）。找不到返回 None。"""
+    cand = os.environ.get("AQ_EDGE_PATH", "").strip()
+    if cand and os.path.isfile(cand):
+        return cand
+    for p in (
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ):
+        if os.path.isfile(p):
+            return p
+    try:
+        import winreg
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(
+                        hive, "Software\\Microsoft\\Windows\\"
+                              "CurrentVersion\\App Paths\\msedge.exe") as key:
+                    path, _ = winreg.QueryValueEx(key, "")
+                    if path and os.path.isfile(path):
+                        return path
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+EDGE_PATH = _find_edge()
+USER_DATA_DIR = _data_path("data", "browser_profile")
+STORAGE_STATE_PATH = _data_path("config", "browser_state.json")
 
 _ZHIHU_HOME = "https://www.zhihu.com/"
 
@@ -297,6 +328,10 @@ class ZhihuBrowser:
         log.info("browser_adapter: 驱动就绪（%.1fs），拉起 Edge 持久化上下文…",
                  time.time() - t0)
         os.makedirs(self.user_data_dir, exist_ok=True)
+        if not EDGE_PATH:
+            raise RuntimeError(
+                "未找到系统 Microsoft Edge！请安装 Edge 后重试"
+                "（或设置 AQ_EDGE_PATH 环境变量指向 msedge.exe）")
         try:
             self.context = self._pw.chromium.launch_persistent_context(
                 user_data_dir=self.user_data_dir,
@@ -992,6 +1027,28 @@ def close_shared_browser():
         _shared_browser = None
 
 
+def login_zhihu_flow(timeout=300):
+    """打开可见 Edge 窗口引导用户手动登录知乎，检测到登录后保存登录态。
+
+    供 CLI（--login）与 Web 首启引导（/api/setup/zhihu-login）共用。
+    返回 (是否成功, 提示信息)。"""
+    with ZhihuBrowser(headless=False) as browser:
+        if browser.is_logged_in():
+            browser.save_storage_state()
+            return True, "已登录，登录态已保存"
+        browser.page.goto("https://www.zhihu.com/signin",
+                          wait_until="domcontentloaded")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(3)
+            if browser.is_logged_in():
+                break
+        else:
+            return False, f"超时（{timeout // 60} 分钟）未检测到登录"
+        browser.save_storage_state()
+        return True, "检测到登录成功"
+
+
 def main():
     """CLI：python -m applications.zhihu_story.browser_adapter --check-login
     或 --collect-author <作者页URL> --author 镜中花"""
@@ -1020,23 +1077,10 @@ def main():
             return
 
         if args.login:
-            if browser.is_logged_in():
-                print("已登录，直接保存登录态")
-            else:
-                print("请在打开的 Edge 窗口中登录知乎（扫码/短信），"
-                      "检测到登录后会自动保存并退出……")
-                browser.page.goto("https://www.zhihu.com/signin",
-                                  wait_until="domcontentloaded")
-                deadline = time.time() + 300
-                while time.time() < deadline:
-                    time.sleep(3)
-                    if browser.is_logged_in():
-                        break
-                else:
-                    print("超时（5 分钟）未检测到登录，退出")
-                    sys.exit(1)
-                print("检测到登录成功")
-            browser.save_storage_state()
+            ok, msg = login_zhihu_flow()
+            print(msg)
+            if not ok:
+                sys.exit(1)
             print(f"登录态已保存 → {browser.storage_state}")
             return
 

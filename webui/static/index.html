@@ -362,6 +362,61 @@
     font-size: 13.5px; line-height: 1.9; white-space: pre-wrap; word-break: break-all;
   }
 
+  /* ---------- 首启引导遮罩（Edge → API Key → 知乎登录） ---------- */
+  .setup-mask {
+    display: none; position: fixed; inset: 0; z-index: 60;
+    background: rgba(4,6,10,0.78); backdrop-filter: blur(4px);
+    align-items: center; justify-content: center; padding: 24px;
+  }
+  .setup-mask.show { display: flex; }
+  .setup-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; width: min(620px, 100%);
+    box-shadow: 0 24px 80px rgba(0,0,0,0.55);
+    max-height: 92vh; overflow-y: auto;
+  }
+  .setup-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    font-size: 15px; font-weight: 700;
+  }
+  .setup-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .setup-step {
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--panel-2); padding: 12px 14px;
+  }
+  .setup-step.done { border-color: #24503f; }
+  .setup-step .s-title { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 13.5px; }
+  .setup-step .s-badge {
+    width: 22px; height: 22px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; background: var(--panel); border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .setup-step.done .s-badge {
+    background: rgba(52,211,153,0.15); border-color: #24503f; color: var(--green);
+  }
+  .setup-step .s-desc {
+    font-size: 12px; color: var(--muted); margin: 7px 0 0 31px; line-height: 1.75;
+  }
+  .setup-step .s-desc a { color: var(--accent-2); }
+  .setup-step .s-ctl { margin: 10px 0 0 31px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .setup-step .s-ctl input[type="password"], .setup-step .s-ctl select {
+    padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--panel);
+    color: var(--text); font-size: 13px; font-family: inherit;
+  }
+  .setup-step .s-ctl input[type="password"] { flex: 1; min-width: 200px; }
+  .setup-step .s-ctl input:focus, .setup-step .s-ctl select:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .setup-err { color: var(--red); font-size: 12px; }
+  .setup-ok { color: var(--green); font-size: 12px; }
+  .setup-foot {
+    padding: 14px 20px; border-top: 1px solid var(--border);
+    display: flex; justify-content: flex-end; gap: 10px;
+  }
+
   @media (max-width: 1200px) {
     main { grid-template-columns: 280px minmax(0,1fr); height: auto; overflow: visible; }
     body { overflow: auto; }
@@ -377,9 +432,57 @@
 <header>
   <div class="logo"><span class="feather">✒️</span>Auto<em>Quill</em></div>
   <div class="top-right">
+    <button class="btn ghost" id="btnSetup" title="首次使用引导（Edge / API Key / 知乎登录）" style="display:none">设置</button>
     <div id="statusPill" class="status-pill"><span class="dot"></span><span id="statusText">空闲</span></div>
   </div>
 </header>
+
+<!-- 首启引导遮罩 -->
+<div class="setup-mask" id="setupMask">
+  <div class="setup-card">
+    <div class="setup-head">
+      <span>👋 欢迎使用 AutoQuill</span>
+      <span style="margin-left:auto;font-weight:400;font-size:12px;color:var(--muted)" id="setupVersion"></span>
+    </div>
+    <div class="setup-body">
+      <div class="setup-step" id="stepEdge">
+        <div class="s-title"><span class="s-badge">1</span>环境检测 · Microsoft Edge</div>
+        <div class="s-desc" id="stepEdgeDesc"></div>
+        <div class="s-ctl">
+          <button class="btn primary" id="btnEdgeOk">我已安装 Edge，重新检测</button>
+        </div>
+      </div>
+      <div class="setup-step" id="stepKey">
+        <div class="s-title"><span class="s-badge">2</span>配置 API Key（故事生成使用）</div>
+        <div class="s-desc">
+          Key 仅保存在本机 <code>%APPDATA%\AutoQuill\config\llm_providers.json</code>，
+          不会上传。模型生成也支持免费的「Web 网页版」通道，可在控制台随时切换。
+        </div>
+        <div class="s-ctl">
+          <select id="setupProviderSel"></select>
+          <input type="password" id="setupApiKey" placeholder="粘贴 API Key（sk-…）" autocomplete="off">
+          <button class="btn primary" id="btnKeySave">保存并测试连接</button>
+        </div>
+        <div class="s-ctl" style="margin-top:6px">
+          <span class="setup-err" id="keyErr"></span>
+          <span class="setup-ok" id="keyOk"></span>
+        </div>
+      </div>
+      <div class="setup-step" id="stepZhihu">
+        <div class="s-title"><span class="s-badge">3</span>登录知乎（采集/发布需要）</div>
+        <div class="s-desc" id="stepZhihuDesc"></div>
+        <div class="s-ctl">
+          <button class="btn primary" id="btnZhihuLogin">打开 Edge 登录知乎</button>
+          <span class="setup-ok" id="zhihuOk"></span>
+          <span class="setup-err" id="zhihuErr"></span>
+        </div>
+      </div>
+    </div>
+    <div class="setup-foot">
+      <button class="btn primary" id="btnSetupFinish">进入控制台</button>
+    </div>
+  </div>
+</div>
 
 <main>
   <!-- 左列：运行控制 + 配置速览 -->
@@ -1308,6 +1411,166 @@ libMask.addEventListener("click", (e) => {
   if (e.target === libMask) libMask.classList.remove("show");
 });
 
+/* ---------- 首启引导（Edge → API Key → 知乎登录） ---------- */
+
+let setupNeeded = false;
+let zhLoginTimer = null;
+
+async function fillSetupProviders() {
+  try {
+    const r = await fetch("/api/models");
+    const data = await r.json();
+    const sel = $("setupProviderSel");
+    (data.providers || []).forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    });
+    if (data.current) sel.value = data.current.provider;
+  } catch (e) { /* 服务不可用时保持空 */ }
+}
+
+async function loadSetupStatus() {
+  try {
+    const r = await fetch("/api/setup/status");
+    const st = await r.json();
+    if (st.version) $("setupVersion").textContent = "v" + st.version;
+    setupNeeded = !!st.setup_needed;
+    $("btnSetup").style.display = st.setup_needed ? "" : "none";
+    if (!st.setup_needed) { hideSetupWizard(); return; }
+
+    const edge = $("stepEdge");
+    const key = $("stepKey");
+    const zhihu = $("stepZhihu");
+
+    if (st.edge_ok) {
+      edge.classList.add("done");
+      edge.querySelector(".s-badge").textContent = "✓";
+      $("stepEdgeDesc").textContent = "已检测到 Microsoft Edge。";
+    } else {
+      edge.classList.remove("done");
+      edge.querySelector(".s-badge").textContent = "1";
+      $("stepEdgeDesc").innerHTML =
+        "未找到 Microsoft Edge。AutoQuill 需要 Edge 来操作知乎。<br>" +
+        "请安装：<a href=\"https://www.microsoft.com/edge\" target=\"_blank\" rel=\"noopener\">microsoft.com/edge</a>，安装完成后点「重新检测」。";
+    }
+    edge.style.display = "";
+
+    if (st.llm_configured) {
+      key.classList.add("done");
+      key.querySelector(".s-badge").textContent = "✓";
+      key.querySelector(".s-ctl").style.display = "none";
+    } else {
+      key.classList.remove("done");
+      key.querySelector(".s-badge").textContent = "2";
+      key.querySelector(".s-ctl").style.display = "";
+    }
+    key.style.display = "";
+
+    if (st.zhihu_logged_in) {
+      zhihu.classList.add("done");
+      zhihu.querySelector(".s-badge").textContent = "✓";
+      $("stepZhihuDesc").textContent = "已保存知乎登录态。";
+      zhihu.querySelector(".s-ctl").style.display = "none";
+    } else {
+      zhihu.classList.remove("done");
+      zhihu.querySelector(".s-badge").textContent = "3";
+      zhihu.querySelector(".s-ctl").style.display = "";
+      $("stepZhihuDesc").innerHTML =
+        "用于采集素材与发布草稿。点击后弹出 Edge 窗口，扫码或短信登录即可，检测到登录会自动保存。";
+      if (st.login_running) {
+        $("btnZhihuLogin").disabled = true;
+        $("btnZhihuLogin").textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
+      }
+      if (st.login_error) $("zhihuErr").textContent = "登录未完成：" + st.login_error;
+    }
+    zhihu.style.display = "";
+
+    $("setupMask").classList.add("show");
+    const allDone = st.edge_ok && st.llm_configured && st.zhihu_logged_in;
+    if (allDone) hideSetupWizard();
+    return st;
+  } catch (e) { /* 旧服务无 setup 端点 */ }
+}
+
+function hideSetupWizard() {
+  $("setupMask").classList.remove("show");
+  if (zhLoginTimer) { clearInterval(zhLoginTimer); zhLoginTimer = null; }
+}
+
+async function pollSetupStatus() {
+  try {
+    const st = await loadSetupStatus();
+    if (st && !st.login_running && !st.zhihu_logged_in) {
+      $("btnZhihuLogin").disabled = false;
+      $("btnZhihuLogin").textContent = "打开 Edge 登录知乎";
+    }
+    if (st && st.zhihu_logged_in) {
+      hideSetupWizard();
+    }
+  } catch (e) { /* ignore */ }
+}
+
+$("btnSetup").addEventListener("click", loadSetupStatus);
+$("btnSetupFinish").addEventListener("click", hideSetupWizard);
+
+$("btnEdgeOk").addEventListener("click", () => {
+  loadSetupStatus();
+});
+
+$("btnKeySave").addEventListener("click", async () => {
+  const key = $("setupApiKey").value.trim();
+  $("keyErr").textContent = "";
+  $("keyOk").textContent = "";
+  if (!key) { $("keyErr").textContent = "请粘贴 API Key"; return; }
+  const btn = $("btnKeySave");
+  btn.disabled = true;
+  btn.textContent = "保存中…";
+  try {
+    const r = await fetch("/api/setup/apikey", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: $("setupProviderSel").value, api_key: key }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
+    const t = await fetch("/api/setup/test-api", { method: "POST" });
+    const td = await t.json();
+    if (td.ok) {
+      $("keyOk").textContent = "已保存，连接测试成功：" + td.detail;
+      $("setupApiKey").value = "";
+      loadSetupStatus();
+      loadModels(); loadConfig();
+    } else {
+      $("keyErr").textContent = "已保存，但连接测试未通过：" + td.detail;
+      loadSetupStatus();
+    }
+  } catch (e) {
+    $("keyErr").textContent = "保存失败：" + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存并测试连接";
+  }
+});
+
+$("btnZhihuLogin").addEventListener("click", async () => {
+  const btn = $("btnZhihuLogin");
+  btn.disabled = true;
+  btn.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
+  $("zhihuErr").textContent = "";
+  $("zhihuOk").textContent = "";
+  try {
+    const r = await fetch("/api/setup/zhihu-login", { method: "POST" });
+    if (!r.ok) throw new Error((await r.json()).detail || "启动失败");
+    if (zhLoginTimer) clearInterval(zhLoginTimer);
+    zhLoginTimer = setInterval(pollSetupStatus, 2500);
+  } catch (e) {
+    $("zhihuErr").textContent = e.message;
+    btn.disabled = false;
+    btn.textContent = "打开 Edge 登录知乎";
+  }
+});
+
 /* ---------- 任务运行 ---------- */
 
 function connectSSE() {
@@ -1438,6 +1701,8 @@ $("modalMask").addEventListener("click", (e) => {
   loadProfileSources();
   loadStories();
   loadLogHistory();  // 页面加载即回放最近日志（运行后实时流继续追加）
+  fillSetupProviders();
+  loadSetupStatus();  // 首启引导（未配置时弹出遮罩）
   try {
     const r = await fetch("/api/status");
     const st = await r.json();

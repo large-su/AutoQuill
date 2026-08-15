@@ -50,8 +50,8 @@ class ZhihuWorkflow(WorkflowBase):
     def _require_login(self, browser):
         if not browser.is_logged_in():
             raise RuntimeError(
-                "知乎登录态失效，请先运行：\n"
-                "  python -m applications.zhihu_story.browser_adapter --login")
+                "知乎登录态失效或尚未登录。\n"
+                "请点击控制台右上角「设置」→「登录知乎」完成登录后再运行。")
 
     # ============================================================
     # 步骤1：选题（DOM）

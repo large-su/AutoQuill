@@ -17,8 +17,9 @@ import logging
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-_PRICING_FILE = os.path.join(_PROJECT_ROOT, "config", "model_pricing.json")
+from core.paths import data as _data_path, program as _program_path
+
+_PRICING_FILE = _program_path("config", "model_pricing.json")
 
 
 def _load_pricing():
@@ -189,7 +190,7 @@ class TokenTracker:
         """
         import datetime
 
-        history_file = os.path.join(_PROJECT_ROOT, "data", "usage_history.jsonl")
+        history_file = _data_path("data", "usage_history.jsonl")
         os.makedirs(os.path.dirname(history_file), exist_ok=True)
 
         total_calls = sum(m.get("calls", 0) for m in self._models.values())

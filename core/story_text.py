@@ -182,7 +182,8 @@ def plot_paragraph_distribution(generated_materials, output_dir=None):
 
     # 保存
     if output_dir is None:
-        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output")
+        from core import paths
+        output_dir = paths.data("output")
     os.makedirs(output_dir, exist_ok=True)
 
     from datetime import datetime

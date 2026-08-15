@@ -34,7 +34,9 @@ log = logging.getLogger(__name__)
 # 知识库文件操作
 # ============================================================
 
-KB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "knowledge_base.json")
+from core.paths import data as _data_path
+
+KB_FILE = _data_path("data", "knowledge_base.json")
 
 _EMPTY_KB = {
     "version": 2,
@@ -719,7 +721,7 @@ def compress_kb():
 # 从原始素材重建知识库
 # ============================================================
 
-RAW_MATERIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "raw_materials.jsonl")
+RAW_MATERIALS_FILE = _data_path("data", "raw_materials.jsonl")
 
 def rebuild_from_raw():
     """

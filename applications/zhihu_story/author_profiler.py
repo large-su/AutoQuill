@@ -29,9 +29,10 @@ import time
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-AUTHORS_DIR = os.path.join(_PROJECT_ROOT, "data", "authors")
-STORY_LIB = os.path.join(_PROJECT_ROOT, "data", "collected_stories.jsonl")
+from core.paths import data as _data_path
+
+AUTHORS_DIR = _data_path("data", "authors")
+STORY_LIB = _data_path("data", "collected_stories.jsonl")
 
 # 喂给 LLM 的每篇故事截取量（开头 + 中段 + 结尾），控制 prompt 体积
 _SAMPLE_HEAD = 1200

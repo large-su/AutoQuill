@@ -16,12 +16,12 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-STORY_LIB = os.path.join(_PROJECT_ROOT, "data", "collected_stories.jsonl")
+from core.paths import data as _data_path
+
+STORY_LIB = _data_path("data", "collected_stories.jsonl")
 
 # 作者回答列表页：提取真实昵称（URL 只有 token，昵称在页头）
 _AUTHOR_NAME_JS = r"""

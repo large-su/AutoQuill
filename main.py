@@ -52,6 +52,17 @@ import time
 import logging
 from datetime import datetime
 
+# 首启引导（必须在 config 导入之前）：安装态把 example 配置复制为
+# llm_providers.json（否则 config 导入即抛 FileNotFoundError），并
+# 迁移旧版（解压目录）数据到 %APPDATA%\AutoQuill。源码态均为无操作。
+from core.paths import (
+    data as _data_path,
+    ensure_provider_file,
+    migrate_legacy_data,
+)
+ensure_provider_file()
+migrate_legacy_data()
+
 from config import (
     PYAUTOGUI_PAUSE,
     LLM_MODE,
@@ -76,14 +87,15 @@ from config.story import (
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = PYAUTOGUI_PAUSE
 
-os.makedirs("logs", exist_ok=True)
+os.makedirs(_data_path("logs"), exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(
-            f"logs/autoquill_{datetime.now():%Y%m%d_%H%M%S}.log",
+            _data_path("logs",
+                       f"autoquill_{datetime.now():%Y%m%d_%H%M%S}.log"),
             encoding="utf-8"
         ),
         logging.StreamHandler()
@@ -242,9 +254,7 @@ def _run_image_gen():
         print("  ❌ 无法启动 Edge 浏览器，请手动打开后重试。")
         return
 
-    save_dir = _os.path.join(
-        _os.path.dirname(_os.path.abspath(__file__)), IMAGE_OUTPUT_DIR
-    )
+    save_dir = _data_path(IMAGE_OUTPUT_DIR)
 
     for j in range(count):
         print(f"\n  ── 生成图片 {j+1}/{count} ──")
@@ -275,10 +285,7 @@ def _run_resume(argv):
         print("  用法：python main.py --resume <story_id>")
         print("  可用的 story_id：")
         from config.story import STORY_OUTPUT_DIR
-        import os as _os
-        root = _os.path.join(
-            _os.path.dirname(_os.path.abspath(__file__)), STORY_OUTPUT_DIR
-        )
+        root = _data_path(STORY_OUTPUT_DIR)
         if _os.path.exists(root):
             for d in sorted(_os.listdir(root)):
                 dp = _os.path.join(root, d)
@@ -359,7 +366,7 @@ def main():
     if '--headless' in sys.argv:
         from config import set_runtime_browser_headless
         set_runtime_browser_headless(True, persist=False)
-    if '--web' in sys.argv:
+    if '--web' in sys.argv or '--service' in sys.argv:
         from webui.server import run as run_web
         run_web()
         return
@@ -371,10 +378,11 @@ def main():
     select_str = "手动" if QUESTION_SELECT_MODE == "manual" else "自动"
     llm_str = "API 流式" if LLM_MODE == "api" else "浏览器"
     filter_str = "开" if ENABLE_STORY_FILTER else "关"
+    from core.version import VERSION
 
     print(f"""
     ╔══════════════════════════════════════════════╗
-    ║       ✒️ AutoQuill v3.0                      ║
+    ║       ✒️ AutoQuill v{VERSION}                    ║
     ║                                              ║
     ║  选题：{select_str}  生成：{llm_str}  故事筛选：{filter_str}  ║
     ║                                              ║
@@ -388,7 +396,7 @@ def main():
     ║  --headless  浏览器无头运行（工作模式）       ║
     ║  --web       本地 Web 控制台（127.0.0.1）    ║
     ║                                              ║
-    ║  v3.0：DOM 直连 + Web 控制台                 ║
+    ║  v4.0：安装版发布（首启引导 + 用户数据目录） ║
     ║  安全：鼠标左上角 或 Ctrl+C 终止             ║
     ╚══════════════════════════════════════════════╝
     """)

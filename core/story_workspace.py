@@ -20,12 +20,10 @@ log = logging.getLogger(__name__)
 # 配置
 # ============================================================
 
-SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
 def _get_story_root():
     from config.story import STORY_OUTPUT_DIR
-    return os.path.join(SCRIPT_DIR, STORY_OUTPUT_DIR)
+    from core import paths
+    return paths.data(STORY_OUTPUT_DIR)
 
 
 # ============================================================

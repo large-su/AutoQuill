@@ -141,9 +141,8 @@ class WorkflowBase:
 
     def save_story_file(self, story, index=None):
         """保存故事为 .md 文件，返回绝对路径"""
-        output_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "output"
-        )
+        from core import paths
+        output_dir = paths.data("output")
         os.makedirs(output_dir, exist_ok=True)
 
         if index:

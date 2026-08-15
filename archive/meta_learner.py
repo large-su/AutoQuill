@@ -37,8 +37,9 @@ log = logging.getLogger(__name__)
 # 路径配置
 # ============================================================
 
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-META_DIR = os.path.join(_PROJECT_ROOT, "data", "meta")
+from core.paths import data as _data_path
+
+META_DIR = _data_path("data", "meta")
 POOL_PENDING_FILE = os.path.join(META_DIR, "pool_pending.jsonl")
 POOL_CONSUMED_FILE = os.path.join(META_DIR, "pool_consumed.jsonl")
 META_KNOWLEDGE_FILE = os.path.join(META_DIR, "meta_knowledge.md")

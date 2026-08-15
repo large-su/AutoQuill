@@ -31,10 +31,8 @@ class ImageGenWorkflow:
 
     def _pick_random_story(self):
         """从 output/ 随机选一篇故事 .md 文件"""
-        output_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "output"
-        )
+        from core import paths
+        output_dir = paths.data("output")
         if not os.path.isdir(output_dir):
             raise FileNotFoundError(f"output 目录不存在：{output_dir}")
 
@@ -117,10 +115,8 @@ class ImageGenWorkflow:
         prompt = self._extract_image_prompt(story_path)
 
         # 阶段 1-2：生成 + 下载
-        save_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            IMAGE_OUTPUT_DIR
-        )
+        from core import paths
+        save_dir = paths.data(IMAGE_OUTPUT_DIR)
         filepath = self._generate_and_download(prompt, save_dir)
 
         log.info(f"\n{'=' * 50}")
