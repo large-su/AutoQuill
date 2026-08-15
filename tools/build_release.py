@@ -50,10 +50,19 @@ def _run(cmd, **kw):
     return r
 
 
+# 构建产物目录：永远不入库，也不视为"未提交改动"
+_BUILD_ARTIFACT_DIRS = ("dist/", "release/", "build/")
+
+
 def git_clean():
     r = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
                        capture_output=True, text=True)
-    return not r.stdout.strip()
+    for line in r.stdout.splitlines():
+        rel = line[3:].replace("\\", "/")
+        if any(rel == d.rstrip("/") or rel.startswith(d) for d in _BUILD_ARTIFACT_DIRS):
+            continue
+        return False
+    return True
 
 
 def git_branch():
