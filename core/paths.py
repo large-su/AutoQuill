@@ -16,6 +16,7 @@
 # ============================================================
 
 import os
+import re
 import shutil
 import sys
 
@@ -68,6 +69,11 @@ def program(*parts):
 def data(*parts):
     """可写用户数据路径（源码态 = 项目根，冻结态 = %APPDATA%）。"""
     return os.path.join(DATA_ROOT, *parts)
+
+
+def sanitize_filename(name):
+    """用户文本（作者名等）→ 合法文件名：Windows 保留字符统一为 _。"""
+    return re.sub(r'[\\/:*?"<>|]', "_", str(name))
 
 
 def ensure_provider_file():

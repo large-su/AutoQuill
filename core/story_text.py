@@ -590,8 +590,32 @@ def sample_reference_sections(answer, max_chars=3000):
     return head
 
 # ============================================================
-# 评分 JSON 解析（LLM 输出容错解析）
+# LLM 输出 JSON 容错解析（公共提取 + 各域 schema 解析）
 # ============================================================
+
+def strip_json_fences(text):
+    """剥掉 LLM 回复包裹 JSON 的 ``` / ```json 围栏；无围栏原样返回。"""
+    if not text:
+        return ""
+    clean = text.strip()
+    if clean.startswith("```"):
+        clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+    if clean.endswith("```"):
+        clean = clean[:-3]
+    return clean.strip()
+
+
+def extract_json_block(text):
+    """从 LLM 回复提取 JSON：剥围栏后整体解析（单次尝试）。
+
+    成功返回解析结果（list/dict/标量），失败返回 None。
+    调用方按各自 schema 做二次校验或降级容错（正则/修复等）。
+    """
+    try:
+        return json.loads(strip_json_fences(text))
+    except (json.JSONDecodeError, TypeError):
+        return None
+
 
 _SCORE_OBJ_RE = re.compile(
     r'\{\s*"index"\s*:\s*(\d+)\s*,\s*"hook"\s*:\s*(\d+)\s*,\s*"plot"\s*:\s*(\d+)\s*,'

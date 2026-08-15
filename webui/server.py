@@ -17,7 +17,6 @@ import builtins
 import json
 import logging
 import os
-import re
 import threading
 import time
 from pathlib import Path
@@ -985,31 +984,6 @@ def api_set_author(spec: _AuthorSpec):
     return {"ok": True, "effective": eff}
 
 
-def _norm_storylib_url(url):
-    """采集记录 answer_url 规范化（去 hash/query），删除匹配用。"""
-    if not url:
-        return ""
-    return url.split("#")[0].split("?")[0]
-
-
-def _read_storylib():
-    """读采集库全部记录（跳过空行/坏行）。"""
-    from applications.zhihu_story.author_profiler import STORY_LIB
-    if not os.path.exists(STORY_LIB):
-        return []
-    records = []
-    with open(STORY_LIB, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return records
-
-
 def _storylib_authors(records):
     """按作者聚合 + 是否已有文风签名文件（删除时提示存在）。"""
     from applications.zhihu_story.author_profiler import AUTHORS_DIR
@@ -1020,7 +994,7 @@ def _storylib_authors(records):
             seen[a] = seen.get(a, 0) + 1
     authors = []
     for name, count in sorted(seen.items(), key=lambda kv: -kv[1]):
-        safe = re.sub(r'[\\/:*?"<>|]', "_", name)
+        safe = paths.sanitize_filename(name)
         authors.append({
             "name": name,
             "records": count,
@@ -1034,7 +1008,8 @@ def _storylib_authors(records):
 def api_storylib(author: str = ""):
     """采集库管理数据：不带 author 按作者聚合（含签名存在标记）；
     带 author 返回该作者的记录详情（单条删除用）。"""
-    records = _read_storylib()
+    from applications.zhihu_story.collector import iter_collected_stories
+    records = list(iter_collected_stories())
     if author:
         details = []
         for rec in records:
@@ -1065,19 +1040,20 @@ def api_storylib_delete(spec: _StoryLibDelSpec):
         raise HTTPException(409, "任务运行中，请先停止任务再清理采集库")
     if not spec.author and not spec.url:
         raise HTTPException(400, "须指定 author（整删）或 url（单条删）")
-    from applications.zhihu_story.author_profiler import STORY_LIB
+    from applications.zhihu_story.collector import (
+        _norm_url, iter_collected_stories, STORY_LIB)
     if not os.path.exists(STORY_LIB):
         return {"ok": True, "removed": 0, "authors": []}
 
-    target = _norm_storylib_url(spec.url)
+    target = _norm_url(spec.url)
     kept, removed = [], 0
-    for rec in _read_storylib():
+    for rec in iter_collected_stories():
         if spec.author:
             if (rec.get("author") or "").strip() == spec.author:
                 removed += 1
                 continue
         elif target:
-            if _norm_storylib_url(
+            if _norm_url(
                     (rec.get("footer") or {}).get("answer_url") or "") == target:
                 removed += 1
                 continue
@@ -1099,27 +1075,11 @@ def api_storylib_delete(spec: _StoryLibDelSpec):
 @app.get("/api/profile-sources")
 def api_profile_sources():
     """采集库（collected_stories.jsonl）中可提炼的作者与篇数。"""
-    from applications.zhihu_story.author_profiler import (
-        STORY_LIB, load_author_stories)
-    if not os.path.exists(STORY_LIB):
-        return {"authors": []}
-    seen = {}
-    with open(STORY_LIB, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            author = (rec.get("author") or "").strip()
-            if not author:
-                continue
-            seen[author] = seen.get(author, 0) + 1
+    from applications.zhihu_story.collector import STORY_LIB, load_author_counts
+    counts = load_author_counts(STORY_LIB)
     return {"authors": [
         {"name": k, "records": v} for k, v in
-        sorted(seen.items(), key=lambda kv: -kv[1])]}
+        sorted(counts.items(), key=lambda kv: -kv[1])]}
 
 
 @app.post("/api/run")

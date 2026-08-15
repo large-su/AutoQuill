@@ -678,11 +678,15 @@ class TestStoryLibApi(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import applications.zhihu_story.author_profiler as ap
+        import applications.zhihu_story.collector as cl
         cls._orig_lib = ap.STORY_LIB
         cls._orig_dir = ap.AUTHORS_DIR
+        cls._orig_cl_lib = cl.STORY_LIB
         cls.tmp = tempfile.mkdtemp(prefix="storylib_")
         ap.STORY_LIB = str(Path(cls.tmp) / "lib.jsonl")
         ap.AUTHORS_DIR = str(Path(cls.tmp) / "authors")
+        # server 的 storylib 接口现在统一从 collector 读库（C5 收敛后）
+        cl.STORY_LIB = ap.STORY_LIB
         os.makedirs(ap.AUTHORS_DIR, exist_ok=True)
         Path(ap.AUTHORS_DIR, "甲.json").write_text("{}", encoding="utf-8")
         cls.client = TestClient(server.app)
@@ -690,8 +694,10 @@ class TestStoryLibApi(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         import applications.zhihu_story.author_profiler as ap
+        import applications.zhihu_story.collector as cl
         ap.STORY_LIB = cls._orig_lib
         ap.AUTHORS_DIR = cls._orig_dir
+        cl.STORY_LIB = cls._orig_cl_lib
         import shutil
         shutil.rmtree(cls.tmp, ignore_errors=True)
 

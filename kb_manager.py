@@ -26,6 +26,8 @@ import time
 import logging
 from datetime import datetime
 
+from core.story_text import extract_json_block, strip_json_fences
+
 log = logging.getLogger(__name__)
 
 # ============================================================
@@ -152,24 +154,16 @@ def _parse_json_response(text):
     if not text:
         return []
 
-    clean = text.strip()
-    # 剥离 markdown 代码块
-    if clean.startswith("```"):
-        clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
-    if clean.endswith("```"):
-        clean = clean[:-3]
-    clean = clean.strip()
-
-    # 第1层：直接解析
-    try:
-        result = json.loads(clean)
+    # 第1层：剥围栏直接解析（公共提取，见 core.story_text）
+    result = extract_json_block(text)
+    if result is not None:
         if isinstance(result, list):
             return result
         if isinstance(result, dict):
             return [result]
         return []
-    except json.JSONDecodeError:
-        pass
+
+    clean = strip_json_fences(text)
 
     # 第2层：正则提取 [...] 后解析
     m = re.search(r'\[.*\]', clean, re.DOTALL)

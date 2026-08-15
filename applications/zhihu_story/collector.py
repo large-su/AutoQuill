@@ -50,42 +50,43 @@ def _norm_url(url):
     return url.split("?")[0]
 
 
+def iter_collected_stories(out_file=None):
+    """逐条读取采集库 JSONL（跳过空行/坏行），yield 每条记录 dict。
+
+    采集库统一读取入口（collector 采集写入、author_profiler 读样本、
+    webui storylib/profile-sources 读列表共用同一格式）。"""
+    out_file = out_file or STORY_LIB
+    if not os.path.exists(out_file):
+        return
+    with open(out_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
 def load_done_urls(out_file):
     """从已有 JSONL 读出已采集的 answer_url（断点续采集合）。"""
     done = set()
-    if os.path.exists(out_file):
-        with open(out_file, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                footer = rec.get("footer") or {}
-                url = _norm_url(footer.get("answer_url") or rec.get("answer_url"))
-                if url:
-                    done.add(url)
+    for rec in iter_collected_stories(out_file):
+        footer = rec.get("footer") or {}
+        url = _norm_url(footer.get("answer_url") or rec.get("answer_url"))
+        if url:
+            done.add(url)
     return done
 
 
 def load_author_counts(out_file):
     """统计库中各作者的现有篇数（新作者判定与追加日志用）。"""
     counts = {}
-    if os.path.exists(out_file):
-        with open(out_file, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                author = (rec.get("author") or "").strip()
-                if author:
-                    counts[author] = counts.get(author, 0) + 1
+    for rec in iter_collected_stories(out_file):
+        author = (rec.get("author") or "").strip()
+        if author:
+            counts[author] = counts.get(author, 0) + 1
     return counts
 
 

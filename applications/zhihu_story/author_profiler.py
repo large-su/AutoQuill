@@ -29,7 +29,9 @@ import time
 
 log = logging.getLogger(__name__)
 
-from core.paths import data as _data_path
+from core.paths import data as _data_path, sanitize_filename
+from core.story_text import extract_json_block, strip_json_fences
+from applications.zhihu_story.collector import iter_collected_stories
 
 AUTHORS_DIR = _data_path("data", "authors")
 STORY_LIB = _data_path("data", "collected_stories.jsonl")
@@ -110,34 +112,26 @@ def load_author_stories(author, min_likes=0, source=None):
         return []
 
     stories = []
-    with open(source, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("author") != author:
-                continue
-            answer = (rec.get("answer") or "").strip()
-            if len(answer) < 100:
-                continue
-            footer = rec.get("footer") or {}
-            likes = footer.get("likes")
-            if not isinstance(likes, (int, float)) or likes < 0:
-                likes = 0
-            if likes < min_likes:
-                continue
-            stories.append({
-                "title": (rec.get("title") or "").strip(),
-                "answer": answer,
-                "footer": footer,
-                "chars": len(answer),
-                "weight": story_weight(footer),
-                "publish_date": parse_publish_date(footer),
-            })
+    for rec in iter_collected_stories(source):
+        if rec.get("author") != author:
+            continue
+        answer = (rec.get("answer") or "").strip()
+        if len(answer) < 100:
+            continue
+        footer = rec.get("footer") or {}
+        likes = footer.get("likes")
+        if not isinstance(likes, (int, float)) or likes < 0:
+            likes = 0
+        if likes < min_likes:
+            continue
+        stories.append({
+            "title": (rec.get("title") or "").strip(),
+            "answer": answer,
+            "footer": footer,
+            "chars": len(answer),
+            "weight": story_weight(footer),
+            "publish_date": parse_publish_date(footer),
+        })
 
     stories.sort(key=lambda s: s["weight"], reverse=True)
     return stories
@@ -449,15 +443,12 @@ def _format_stories_for_prompt(stories):
 
 
 def _parse_profile_json(text):
-    """从 LLM 回复中解析技能签名 JSON。剥掉 ``` 包裹，失败返回 None。"""
-    if not text:
-        return None
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        parts = cleaned.split("\n", 1)
-        cleaned = parts[1] if len(parts) > 1 else ""
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3].rstrip()
+    """从 LLM 回复中解析技能签名 JSON。先公共整块解析，失败再剥围栏
+    取首尾大括号切片兜底；两者都要求 dict 且含 style 键。"""
+    profile = extract_json_block(text)
+    if isinstance(profile, dict) and "style" in profile:
+        return profile
+    cleaned = strip_json_fences(text)
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end <= start:
         return None
@@ -640,36 +631,28 @@ def load_general_stories(min_likes=0, source=None, authors=None):
         return []
 
     stories = []
-    with open(source, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            author = rec.get("author") or ""
-            if authors is not None and author not in authors:
-                continue
-            answer = (rec.get("answer") or "").strip()
-            if len(answer) < 100:
-                continue
-            footer = rec.get("footer") or {}
-            likes = footer.get("likes")
-            if not isinstance(likes, (int, float)) or likes < 0:
-                likes = 0
-            if likes < min_likes:
-                continue
-            stories.append({
-                "author": author,
-                "title": (rec.get("title") or "").strip(),
-                "answer": answer,
-                "footer": footer,
-                "chars": len(answer),
-                "weight": story_weight(footer),
-                "publish_date": parse_publish_date(footer),
-            })
+    for rec in iter_collected_stories(source):
+        author = rec.get("author") or ""
+        if authors is not None and author not in authors:
+            continue
+        answer = (rec.get("answer") or "").strip()
+        if len(answer) < 100:
+            continue
+        footer = rec.get("footer") or {}
+        likes = footer.get("likes")
+        if not isinstance(likes, (int, float)) or likes < 0:
+            likes = 0
+        if likes < min_likes:
+            continue
+        stories.append({
+            "author": author,
+            "title": (rec.get("title") or "").strip(),
+            "answer": answer,
+            "footer": footer,
+            "chars": len(answer),
+            "weight": story_weight(footer),
+            "publish_date": parse_publish_date(footer),
+        })
 
     stories.sort(key=lambda s: s["weight"], reverse=True)
     return stories
@@ -771,7 +754,7 @@ def save_profile(profile, out_dir=None, filename=None):
     os.makedirs(out_dir, exist_ok=True)
     if filename is None:
         name = profile.get("author") or "unknown"
-        filename = re.sub(r'[\\/:*?"<>|]', "_", name) + ".json"
+        filename = sanitize_filename(name) + ".json"
     path = os.path.join(out_dir, filename)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
@@ -785,8 +768,7 @@ def load_author_profile(author, out_dir=None, filename=None):
     """
     out_dir = out_dir or AUTHORS_DIR
     if filename is None:
-        safe = re.sub(r'[\\/:*?"<>|]', "_", author)
-        filename = f"{safe}.json"
+        filename = f"{sanitize_filename(author)}.json"
     path = os.path.join(out_dir, filename)
     if not os.path.exists(path):
         return None
