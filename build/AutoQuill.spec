@@ -22,6 +22,7 @@ a = Analysis(
         ('../config/llm_providers.example.json', 'config'),
         ('../config/model_pricing.json', 'config'),
         ('../config/builtin_general_profile.json', 'config'),
+        ('../assets/AutoQuill.ico', 'assets'),
     ],
     hiddenimports=[
         # web_drivers/__init__.py 用 importlib.import_module 动态加载驱动
@@ -83,6 +84,7 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
+    icon='../assets/AutoQuill.ico',
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

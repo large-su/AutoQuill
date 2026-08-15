@@ -328,6 +328,22 @@ def _apply_dark_titlebar(window):
         pass
 
 
+def _window_icon():
+    """窗口图标：源码态 = 项目 assets/；打包态优先 _MEIPASS（PyInstaller
+    onedir 把 datas 放进 _internal/），兜底 exe 目录。文件缺失返回 None
+    （pywebview 用默认图标，不阻断启动）。"""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "assets" / "AutoQuill.ico")
+    candidates.append(project_root() / "assets" / "AutoQuill.ico")
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return None
+
+
 def open_window():
     """打开控制台窗口：pywebview 独立窗口（WebView2 内核），失败回退系统浏览器。
 
@@ -341,6 +357,7 @@ def open_window():
             "AutoQuill", BASE_URL,
             width=1280, height=820, min_size=(960, 640),
             background_color="#0b0e14",
+            icon=_window_icon(),
         )
         # start(func) 在窗口创建后、显示前调用回调 → 标题栏在用户看到前已染深
         # （start 本身阻塞直到窗口关闭，样式调用不能放在其后面）

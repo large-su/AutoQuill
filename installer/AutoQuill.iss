@@ -28,6 +28,7 @@ PrivilegesRequired=lowest
 OutputDir=..\release
 OutputBaseFilename=AutoQuill-Setup-{#MyAppVersion}
 WizardStyle=modern
+SetupIconFile=..\assets\AutoQuill.ico
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
