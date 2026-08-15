@@ -515,5 +515,81 @@ class TestWebLlmLoggedIn(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestGetBrowserConcurrency(unittest.TestCase):
+    """get_browser 懒启动并发安全。
+
+    ★ 回归（V4.1.4 线上）：并发调用时多个线程同时 start()，互抢同一
+    Chromium profile；失败实例（context=None）在 start() 抛错前已
+    赋给 _shared_browser → 登录引导永久复用坏实例报
+    'NoneType' object has no attribute 'new_page'。"""
+
+    def setUp(self):
+        from applications.zhihu_story import browser_adapter as mod
+        self.mod = mod
+        mod._shared_browser = None
+
+    def tearDown(self):
+        self.mod._shared_browser = None
+
+    def test_concurrent_calls_start_once(self):
+        from unittest import mock
+        import threading
+
+        b = self.mod.ZhihuBrowser()
+        b.context = mock.Mock()
+        started = []
+
+        def _start():
+            started.append(1)
+
+        b.start = _start
+        with mock.patch.object(self.mod, "ZhihuBrowser", return_value=b):
+            results = [None] * 8
+
+            def _get(i):
+                results[i] = self.mod.get_browser()
+
+            threads = [threading.Thread(target=_get, args=(i,))
+                       for i in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(len(started), 1)  # 并发下只启动一次
+        self.assertTrue(all(r is results[0] for r in results))
+
+    def test_failed_start_not_cached(self):
+        from unittest import mock
+
+        class _Broken:
+            def start(self):
+                raise RuntimeError("profile locked")
+
+        with mock.patch.object(self.mod, "ZhihuBrowser",
+                               return_value=_Broken()):
+            with self.assertRaises(RuntimeError):
+                self.mod.get_browser()
+        # 坏实例未落盘：_shared_browser 保持 None，下次可重试
+        self.assertIsNone(self.mod._shared_browser)
+
+        ok = mock.Mock()
+        ok.context = mock.Mock()
+        with mock.patch.object(self.mod, "ZhihuBrowser",
+                               return_value=ok):
+            self.assertIs(self.mod.get_browser(), ok)
+
+    def test_stale_context_rebuilt(self):
+        # 异常路径残留的 context=None 实例 → 自动重建而非复用
+        from unittest import mock
+        stale = mock.Mock()
+        stale.context = None
+        self.mod._shared_browser = stale
+        fresh = mock.Mock()
+        fresh.context = mock.Mock()
+        with mock.patch.object(self.mod, "ZhihuBrowser",
+                               return_value=fresh):
+            self.assertIs(self.mod.get_browser(), fresh)
+
+
 if __name__ == "__main__":
     unittest.main()

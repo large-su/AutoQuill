@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 
 log = logging.getLogger(__name__)
@@ -987,29 +988,36 @@ class ZhihuBrowser:
 # ----------------------------------------------------------
 
 _shared_browser = None
+_browser_lock = threading.Lock()  # 懒启动串行化：并发 get_browser 不再互抢 profile
 
 
 def get_browser():
-    """获取全局共享的 ZhihuBrowser（懒启动）。
+    """获取全局共享的 ZhihuBrowser（懒启动，线程安全）。
 
     headless 每次动态读取 config.BROWSER_HEADLESS——Web 控制台切换
-    「调试/工作模式」后下一次任务启动即生效。"""
+    「调试/工作模式」后下一次任务启动即生效。
+    锁内先 start() 成功才落盘 _shared_browser：并发调用时后到的线程
+    不会拿半初始化实例（线上：并发启动互抢同一 profile，坏实例
+    context=None 永久复用于登录引导 → 'NoneType' new_page）。"""
     global _shared_browser
-    if _shared_browser is None:
-        from config import BROWSER_HEADLESS
-        _shared_browser = ZhihuBrowser(headless=BROWSER_HEADLESS)
-        _shared_browser.start()
-        log.info("browser_adapter: 浏览器模式：%s",
-                 "无头（工作模式）" if BROWSER_HEADLESS
-                 else "前台（调试模式）")
-    return _shared_browser
+    with _browser_lock:
+        if _shared_browser is None or _shared_browser.context is None:
+            from config import BROWSER_HEADLESS
+            candidate = ZhihuBrowser(headless=BROWSER_HEADLESS)
+            candidate.start()  # 失败抛异常，_shared_browser 保持 None 可重试
+            _shared_browser = candidate
+            log.info("browser_adapter: 浏览器模式：%s",
+                     "无头（工作模式）" if BROWSER_HEADLESS
+                     else "前台（调试模式）")
+        return _shared_browser
 
 
 def close_shared_browser():
     global _shared_browser
-    if _shared_browser is not None:
-        _shared_browser.close()
-        _shared_browser = None
+    with _browser_lock:
+        if _shared_browser is not None:
+            _shared_browser.close()
+            _shared_browser = None
 
 
 _DEEPSEEK_COOKIE_DOMAINS = ("deepseek.com",)
@@ -1038,19 +1046,24 @@ def web_llm_logged_in():
 
     用独立无头实例检查，不碰共享浏览器（get_browser）——首启引导轮询
     setup/status 时不会反复弹出可见 Edge，也不影响任务浏览器的无头模式。
+    与共享浏览器用同一把 _browser_lock 串行启动：两者都依赖
+    USER_DATA_DIR 的持久化 cookie（临时目录读不到登录态），而
+    Chromium 单例锁禁止同目录并发——串行化后登录引导不再被此
+    检查挤掉（线上：Target page, context or browser has been closed）。
     返回 True/False；浏览器无法启动等异常返回 False（不阻塞引导）。"""
     try:
-        with ZhihuBrowser(headless=True) as browser:
-            if not _has_deepseek_cookies(browser.context):
-                return False
-            page = browser.context.new_page()
-            try:
-                page.goto("https://chat.deepseek.com",
-                          wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(1500)  # 等 SPA 跳转到登录页
-                return "sign_in" not in page.url
-            finally:
-                page.close()
+        with _browser_lock:
+            with ZhihuBrowser(headless=True) as browser:
+                if not _has_deepseek_cookies(browser.context):
+                    return False
+                page = browser.context.new_page()
+                try:
+                    page.goto("https://chat.deepseek.com",
+                              wait_until="domcontentloaded", timeout=20000)
+                    page.wait_for_timeout(1500)  # 等 SPA 跳转到登录页
+                    return "sign_in" not in page.url
+                finally:
+                    page.close()
     except Exception:
         return False
 
@@ -1065,19 +1078,19 @@ def login_deepseek_web_flow(timeout=300):
     try:
         browser = get_browser()
         page = browser.context.new_page()
-        page.goto("https://chat.deepseek.com", wait_until="domcontentloaded")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            time.sleep(3)
-            page.wait_for_timeout(500)  # 等 SPA 从登录页跳回主页
-            if (_has_deepseek_cookies(browser.context)
-                    and "sign_in" not in page.url):
-                break
-        else:
-            page.close()
+        try:
+            page.goto("https://chat.deepseek.com",
+                      wait_until="domcontentloaded", timeout=30000)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(3)
+                page.wait_for_timeout(500)  # 等 SPA 从登录页跳回主页
+                if (_has_deepseek_cookies(browser.context)
+                        and "sign_in" not in page.url):
+                    return True, "检测到登录成功"
             return False, f"超时（{timeout // 60} 分钟）未检测到登录"
-        page.close()
-        return True, "检测到登录成功"
+        finally:
+            page.close()
     except Exception as exc:
         return False, f"登录引导失败：{exc}"
 

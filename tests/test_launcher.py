@@ -153,7 +153,7 @@ class TestApplyDarkTitlebar(unittest.TestCase):
         from tools.launcher import _apply_dark_titlebar
 
         class _BadHandle:
-            pass  # 无 __int__
+            pass  # 无 __int__ 也无 ToInt64/ToInt32
 
         w = _Window(_Native(handle=_BadHandle()))
         with mock.patch("ctypes.windll.dwmapi.DwmSetWindowAttribute") as dwm, \
@@ -162,6 +162,26 @@ class TestApplyDarkTitlebar(unittest.TestCase):
         dwm.assert_not_called()
         diag.assert_called_once()
         self.assertIn("int", diag.call_args[0][0])
+
+    def test_real_intptr_without_dunder_int_via_toint64(self):
+        # ★ 回归：真实 .NET System.IntPtr 无 __int__（V4.1.4 线上证据：
+        # int() 报 "not 'IntPtr'"）→ 走 .NET ToInt64() 转换
+        from tools.launcher import _apply_dark_titlebar
+
+        class _RealIntPtr:
+            def __init__(self, v):
+                self._v = v
+
+            def ToInt64(self):
+                return self._v
+
+        w = _Window(_Native(handle=_RealIntPtr(12345)))
+        with mock.patch("ctypes.windll.dwmapi.DwmSetWindowAttribute",
+                        return_value=0) as dwm, \
+             mock.patch("tools.launcher._log_diag") as diag:
+            _apply_dark_titlebar(w)
+        self.assertEqual(dwm.call_args[0][0].value, 12345)
+        diag.assert_not_called()
 
     def test_shown_event_schedules_retry(self):
         # 窗口显示事件后延迟补设一次（覆盖显示过程重置属性的竞态）
@@ -200,12 +220,12 @@ class TestLogDiag(unittest.TestCase):
 
 
 class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
-    """真实 Win32 窗口端到端：IntPtr 句柄 → 修复后转换 → 深色生效。
+    """真实 Win32 窗口端到端：真实形态 IntPtr → ToInt64 转换 → 深色生效。
 
     不依赖 WebView2（普通隐藏 Win32 窗口即可——DWM 属性是窗口级
-    API，无需浏览器内核）。复现新电脑线上场景：pywebview WinForms
-    的 Handle 是 .NET IntPtr 对象（非 int），旧代码直接传 ctypes
-    报 TypeError: wrong type、属性不生效。最后读回 DWM 属性确认。"""
+    API，无需浏览器内核）。模拟类按真实 pythonnet System.IntPtr 形态：
+    无 __int__（int() 必失败，V4.1.4 线上报错路径）、仅 .NET ToInt64()。
+    最后读回 DWM 属性确认深色真实生效。"""
 
     @staticmethod
     def _create_hidden_window():
@@ -269,16 +289,17 @@ class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
         hwnd, class_name, hinst = self._create_hidden_window()
         self.assertTrue(hwnd, "CreateWindowExW 失败（无桌面会话？）")
         try:
-            class _IntPtr:
-                """模拟 pywebview WinForms 的 .NET IntPtr（非 int）"""
+            class _RealIntPtr:
+                """模拟 pythonnet System.IntPtr：无 __int__（int() 必失败，
+                正是 V4.1.4 线上报错路径），仅 .NET 方法 ToInt64()"""
 
                 def __init__(self, v):
                     self._v = v
 
-                def __int__(self):
-                    return int(self._v)
+                def ToInt64(self):
+                    return self._v
 
-            w = _Window(_Native(handle=_IntPtr(hwnd)))
+            w = _Window(_Native(handle=_RealIntPtr(hwnd)))
             _apply_dark_titlebar(w)
 
             dwmget = ctypes.windll.dwmapi.DwmGetWindowAttribute

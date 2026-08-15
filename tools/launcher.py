@@ -260,6 +260,25 @@ def _find_titlebar_handle(window):
     return 0
 
 
+def _handle_to_int(handle):
+    """把 .NET System.IntPtr 转成 int：先试 int()，失败再试 .NET
+    ToInt64()/ToInt32()（真实 IntPtr 无 __int__，int() 必失败）。
+    全部失败返回 0（调用方记日志，不抛不静默）。"""
+    try:
+        return int(handle)
+    except Exception:
+        pass
+    for method in ("ToInt64", "ToInt32"):
+        fn = getattr(handle, method, None)
+        if fn is None:
+            continue
+        try:
+            return int(fn())
+        except Exception:
+            continue
+    return 0
+
+
 def _apply_dark_titlebar(window):
     """Windows 10/11：把标题栏染成与界面一致的深色（DWM 属性）。
 
@@ -278,14 +297,14 @@ def _apply_dark_titlebar(window):
                 _log_diag("深色标题栏：未取得窗口句柄，跳过")
                 return
             # pywebview WinForms 的 Handle 是 .NET IntPtr 对象（非 int），
-            # ctypes 直接传会 TypeError: wrong type（新电脑线上证据）→ 转 int
+            # ctypes 直接传会 TypeError: wrong type（线上证据）→ 转 int。
+            # 注意真实 IntPtr 无 __int__（int() 报 "not 'IntPtr'"，V4.1.4
+            # 线上证据）→ 兜底用 .NET 方法 ToInt64()/ToInt32()
             if not isinstance(handle, int):
-                try:
-                    handle = int(handle)
-                except Exception as exc:
-                    _log_diag(f"深色标题栏：句柄无法转 int：{exc}")
-                    return
+                handle = _handle_to_int(handle)
                 if not handle:
+                    _log_diag("深色标题栏：句柄无法转 int"
+                              "（无 __int__ 且无 ToInt64/ToInt32）")
                     return
             # 显式声明签名：句柄按 64 位传递，防默认 c_int 截断
             dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
