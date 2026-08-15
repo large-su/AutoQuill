@@ -11,7 +11,7 @@
 ; ============================================================
 
 #define MyAppName "AutoQuill"
-#define MyAppVersion "4.2.1"
+#define MyAppVersion "4.2.2"
 #define MyAppPublisher "AutoQuill"
 #define MyAppExeName "AutoQuill.exe"
 
@@ -45,10 +45,13 @@ Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 [Files]
 ; 打包产物整体装入（onedir：exe + _internal/）
 Source: "..\dist\AutoQuill\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+; 图标单独装入：快捷方式显式指向 .ico 文件（覆盖安装时 Shell 从
+; exe 提取图标会命中旧缓存显示空白/旧图标，V4.2.1 用户反馈）
+Source: "..\assets\AutoQuill.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\AutoQuill.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\AutoQuill.ico"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"

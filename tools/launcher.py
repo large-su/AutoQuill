@@ -351,19 +351,33 @@ def open_window():
     阻塞直到窗口关闭；返回 True=独立窗口，False=回退浏览器（调用方需保持
     服务存活语义，等待服务进程退出）。"""
     try:
+        import inspect
         import webview
 
         window = webview.create_window(
             "AutoQuill", BASE_URL,
             width=1280, height=820, min_size=(960, 640),
             background_color="#0b0e14",
-            icon=_window_icon(),
         )
+        # pywebview 6.x 把 icon 参数从 create_window 移到 webview.start
+        # （传 create_window 会 TypeError，V4.2.1 线上证据：整个窗口失败、
+        # 静默回退浏览器）→ 按签名探测传对位置，兼容新老版本
+        start_kwargs = {}
+        ico = _window_icon()
+        if ico:
+            try:
+                if "icon" in inspect.signature(webview.start).parameters:
+                    start_kwargs["icon"] = ico
+            except (ValueError, TypeError):
+                pass  # 签名不可探测 → 用默认图标，不阻断启动
         # start(func) 在窗口创建后、显示前调用回调 → 标题栏在用户看到前已染深
         # （start 本身阻塞直到窗口关闭，样式调用不能放在其后面）
-        webview.start(lambda: _apply_dark_titlebar(window))
+        webview.start(lambda: _apply_dark_titlebar(window), **start_kwargs)
         return True
-    except Exception:
+    except Exception as exc:
+        # 独立窗口失败原因写进诊断日志（否则回退浏览器时无迹可查——
+        # V4.2.1 用户反馈"变成浏览器打开"即此路径，曾完全不可见）
+        _log_diag(f"独立窗口打开失败，回退系统浏览器：{exc!r}")
         webbrowser.open(BASE_URL)
         return False
 

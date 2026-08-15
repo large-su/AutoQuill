@@ -434,15 +434,25 @@ class ZhihuWorkflow(WorkflowBase):
         from applications.zhihu_story.browser_adapter import _NAV_TIMEOUT
         main_page = browser.page
         pages = []
+        total = len(questions)
+        log.info(f"  并行打开 {total} 个候选问题页（浏览器内并发加载）…")
         try:
-            for q in questions:
+            for i, q in enumerate(questions, 1):
                 try:
                     p = browser.context.new_page()
                     p.goto(q["href"], wait_until="domcontentloaded",
                            timeout=_NAV_TIMEOUT)
                     pages.append((q, p))
+                    log.info(f"    ✓ 已加载 {i}/{total}："
+                             f"{q['title'][:28]}...")
                 except Exception as exc:
-                    log.warning(f"  打开失败：{q['title'][:30]}...（{exc}）")
+                    log.warning(f"    ✗ 打开失败 {i}/{total}："
+                                f"{q['title'][:28]}...（{exc}）")
+
+            if not pages:
+                log.warning("  本批候选页面全部打开失败，整批跳过")
+                return []
+            log.info(f"  ⚡ {len(pages)} 页已就绪，开始并行提取首答…")
 
             results = []
             for q, p in pages:

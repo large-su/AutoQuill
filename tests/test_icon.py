@@ -81,11 +81,32 @@ class TestIconIntegration(unittest.TestCase):
         self.assertIn("SetupIconFile=..\\assets\\AutoQuill.ico", src)
         self.assertTrue((ROOT / "assets" / "AutoQuill.ico").exists())
 
+    def test_iss_shortcuts_point_at_ico_file(self):
+        # V4.2.2 修复：快捷方式显式指向 .ico（覆盖安装时从 exe 提取
+        # 图标会命中 Shell 旧缓存 → 桌面图标空白，V4.2.1 用户反馈）
+        src = (ROOT / "installer" / "AutoQuill.iss").read_text(encoding="utf-8")
+        self.assertIn('IconFilename: "{app}\\AutoQuill.ico"', src)
+        self.assertIn('Source: "..\\assets\\AutoQuill.ico"; '
+                      'DestDir: "{app}"', src)
+
     def test_launcher_passes_icon_to_window(self):
         import inspect
         from tools.launcher import open_window
         src = inspect.getsource(open_window)
-        self.assertIn("icon=_window_icon()", src)
+        self.assertIn("_window_icon()", src)
+        # 6.x 把 icon 移到 webview.start：按签名探测后传入 start
+        self.assertIn("inspect.signature(webview.start).parameters", src)
+        self.assertIn('start_kwargs["icon"] = ico', src)
+
+    def test_launcher_icon_not_passed_to_create_window(self):
+        # V4.2.1 回归：create_window 传 icon 在 pywebview 6.x 直接
+        # TypeError → 整个窗口失败静默回退浏览器（用户反馈「变成
+        # 浏览器打开」即此路径）。create_window 调用处不得再带 icon。
+        import inspect
+        from tools.launcher import open_window
+        src = inspect.getsource(open_window)
+        create_call = src.split("webview.start")[0]
+        self.assertNotIn("icon=", create_call)
 
     def test_window_icon_resolves_and_guards_missing(self):
         from tools.launcher import _window_icon
