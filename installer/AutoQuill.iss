@@ -36,9 +36,10 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 用户目录安装 + 未签名 exe：关闭安装器自身的权限/安全提示噪音
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 
+; 单语言（中文）：避免多语言导致安装器弹出「选择安装语言」对话框，
+; 静默安装（/VERYSILENT）会因该对话框挂起
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
-Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 ; 打包产物整体装入（onedir：exe + _internal/）
