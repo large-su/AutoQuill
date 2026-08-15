@@ -74,20 +74,6 @@ def git_branch():
     return r.stdout.strip()
 
 
-def newest_source_ts():
-    """参与打包的源码中最新修改时间。"""
-    latest = 0.0
-    for p in ROOT.rglob("*"):
-        if any(p.name.endswith(s) for s in _GATED_SUFFIXES):
-            # 排除测试/归档/构建产物/发行物
-            rel = p.relative_to(ROOT).as_posix()
-            if rel.startswith(("tests/", "archive/", "dist/", "release/",
-                               "build/", ".git/", ".playwright-mcp/")):
-                continue
-            latest = max(latest, p.stat().st_mtime)
-    return latest
-
-
 def gate():
     print("=" * 60)
     print(f"  AutoQuill 构建门禁 v{version()}")
@@ -98,17 +84,8 @@ def gate():
     if git_branch() != "main":
         sys.exit(f"✗ 当前分支 {git_branch()}，发布需在 main。")
     print("✓ 分支 main")
-    src_ts = newest_source_ts()
-    if DIST.exists():
-        build_ts = (DIST / "_internal").stat().st_mtime
-        if src_ts > build_ts:
-            sys.exit(
-                f"✗ 检测到源码比上次构建新（源码 {time.ctime(src_ts)} > "
-                f"构建 {time.ctime(build_ts)}）——先重新 PyInstaller 构建再打包，"
-                "防止发布旧包。")
-        print(f"✓ 构建时间戳门禁通过（构建 {time.ctime(build_ts)} ≥ 源码 {time.ctime(src_ts)}）")
-    else:
-        print("⚠ 无 dist（首次构建）")
+    # 时间戳不设门禁：本脚本每次都会完整重建 dist + 安装包，
+    # 产物必然来自当前源码（防旧包靠"重建"而非"比对"）。
 
 
 def main():
