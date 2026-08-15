@@ -20,61 +20,12 @@ from story_prompt import build_story_prompt
 log = logging.getLogger(__name__)
 
 
-def _not_implemented_longform():
-    """长文流水线辅助函数在 V3.0.0 精简时被移除，悬空至今。
-
-    调用即显式报错（此前为 NameError）。若需恢复长文模式，需按
-    git 历史（V3.1.0 之前 llm_api.py 的同名函数）重新实现
-    _generate_foundation / _generate_batch_outline /
-    _generate_batch_chapters 三个辅助函数。
-    """
-    raise NotImplementedError(
-        "长文模式（LONG_FORM_MODE）辅助函数已随 V3.0.0 精简移除，"
-        "该功能当前不可用；请按 git 历史重新实现 story_generation 的 "
-        "_generate_foundation / _generate_batch_outline / "
-        "_generate_batch_chapters 后重试。"
-    )
-
-
-def generate_long_form_story(question_title, recipe=None,
-                              meta_knowledge=None, workspace=None):
-    """
-    长文模式（大纲→批量写作）：Foundation → 大纲⇄批量写作 循环。
-
-    当前不可用：流水线辅助函数缺失（V3.0.0 精简遗留），调用抛
-    NotImplementedError。完整实现见 git 历史（V3.1.0 前
-    llm_api.py generate_long_form_story）。
-
-    参数：
-        question_title: 知乎问题标题
-        recipe:         知识库配方 dict
-        meta_knowledge: 跨任务积累的元知识文本
-        workspace:      StoryWorkspace 实例（--resume 恢复用）
-    """
-    _not_implemented_longform()
-
-
-def generate_long_form_story_parallel(question_title, task_id,
-                                       progress, recipe=None, meta_knowledge=None):
-    """
-    长文模式并行版本：用于批量并行生成场景。
-
-    当前不可用（同 generate_long_form_story），调用抛
-    NotImplementedError。
-    """
-    _not_implemented_longform()
-
-
 def generate_story(question_title, reference_answer=None, recipe=None,
                    meta_knowledge=None, author=None):
     """
     通过 API 生成故事，支持流式输出到终端。
 
-    根据 config.story.LONG_FORM_MODE 分流：
-      - True  → 长文模式（当前不可用，抛 NotImplementedError）
-      - False → 短文模式（默认）：单轮按 STORY_MATERIAL_MODE 生成
-
-    短文模式根据 config.story.STORY_MATERIAL_MODE 自动选择 prompt 构建方式：
+    根据 config.story.STORY_MATERIAL_MODE 自动选择 prompt 构建方式：
       - "recipe"               配方驱动
       - "reference"            参考文章模式
       - "recipe_and_reference" 配方 + 参考文章结合
@@ -95,18 +46,6 @@ def generate_story(question_title, reference_answer=None, recipe=None,
     if not LLM_API_KEY:
         log.error("API Key 未配置！请在 config.py 中设置 LLM_API_KEY")
         return None
-
-    # ===== 长文模式分发（盐选投稿） =====
-    try:
-        from config.story import LONG_FORM_MODE
-    except ImportError:
-        LONG_FORM_MODE = False
-    if LONG_FORM_MODE:
-        if author:
-            log.warning("  [作者风格] 长文模式暂不支持作者注入，跳过")
-        return generate_long_form_story(
-            question_title, recipe=recipe, meta_knowledge=meta_knowledge,
-        )
 
     author_profile = _load_author_profile_or_none(author)
 
@@ -236,19 +175,6 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
     if not LLM_API_KEY:
         progress[task_id]['status'] = '❌ 无Key'
         return None
-
-    # ===== 长文模式分发（盐选投稿） =====
-    try:
-        from config.story import LONG_FORM_MODE
-    except ImportError:
-        LONG_FORM_MODE = False
-    if LONG_FORM_MODE:
-        if author:
-            log.warning("  [作者风格] 长文模式暂不支持作者注入，跳过")
-        return generate_long_form_story_parallel(
-            question_title, task_id, progress,
-            recipe=recipe, meta_knowledge=meta_knowledge,
-        )
 
     author_profile = _load_author_profile_or_none(author)
 

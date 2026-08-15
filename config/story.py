@@ -18,9 +18,6 @@ __all__ = [
     "STORY_INCLUDE_KEYWORDS", "MAX_SELECT_SCREENS",
     # 格式与素材
     "ENABLE_FORMAT_RETRY", "STORY_MATERIAL_MODE",
-    # 长文模式
-    "LONG_FORM_MODE", "LONG_FORM_CHAPTER_COUNT", "LONG_FORM_OUTLINE_MAX_TOKENS",
-    "LONG_FORM_CHAPTER_MAX_TOKENS", "BATCH_CHAPTER_COUNT", "STORY_OUTPUT_DIR",
     # 知识库
     "KB_MAX_PER_GENRE", "KB_MERGE_TRIGGER", "KB_ENABLE", "RECIPE_VERBOSE_MODE",
     # reader_score
@@ -112,21 +109,6 @@ ENABLE_FORMAT_RETRY = False
 #   "reference"            纯参考文章（旧模式，用 STORY_SYSTEM_PROMPT + 参考文章）
 #   "recipe_and_reference" 配方 + 参考文章结合（配方指引 + 参考文章风格借鉴）
 STORY_MATERIAL_MODE = "sample"
-
-# ============================================================
-# 长文模式（大纲→批量写作交替流水线）
-# ============================================================
-
-LONG_FORM_MODE = False
-LONG_FORM_CHAPTER_COUNT = 20             # 总章节数
-LONG_FORM_OUTLINE_MAX_TOKENS = 2048      # 大纲 max_tokens
-LONG_FORM_CHAPTER_MAX_TOKENS = 8192      # 批量写作 max_tokens（5 章 × ~1500 字/章）
-
-# 批量写作：每批规划 N 章大纲，然后一次性生成 N 章正文
-# 大纲→写作→大纲→写作交替，大纲生成即审视（基于上一批真实输出调整下一批）
-BATCH_CHAPTER_COUNT = 5                  # 每批章节数
-
-STORY_OUTPUT_DIR = "data/stories"        # 故事工作区根目录
 
 # ============================================================
 # 知识库配置

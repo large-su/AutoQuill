@@ -16,8 +16,6 @@ from story_prompt import _resolve_meta_content, build_story_prompt
 from story_scoring import _resolve_kb_config, score_stories
 from story_generation import (
     generate_story,
-    generate_long_form_story,
-    generate_long_form_story_parallel,
     generate_story_parallel,
     _load_author_profile_or_none,
 )

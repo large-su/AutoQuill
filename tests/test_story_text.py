@@ -13,9 +13,6 @@ from core.story_text import (
     replace_em_dashes,
     fix_story_format,
     validate_story_format,
-    ensure_chapter_complete,
-    normalize_chapter_headers,
-    split_batch_chapters,
     parse_score_json,
     sample_reference_sections,
 )
@@ -172,81 +169,6 @@ class TestValidateStoryFormat(unittest.TestCase):
         body += "## **5**\n\n" + long_para + "\n\n## **6**\n\n" + long_para
         score, valid, details = validate_story_format(body)
         self.assertIn("长段", details)
-
-
-class TestEnsureChapterComplete(unittest.TestCase):
-    def test_complete_ending(self):
-        text = "这是完整内容，以句号结尾。"
-        out, complete = ensure_chapter_complete(text)
-        self.assertTrue(complete)
-        self.assertEqual(out, text)
-
-    def test_truncated_rolls_back(self):
-        # 截断尾巴须 >= 50 字且无句末标点，才会触发回退
-        head = "这是完整的句子。" * 5
-        text = head + "这里被截断了" * 9
-        out, complete = ensure_chapter_complete(text)
-        self.assertFalse(complete)
-        self.assertEqual(out, head)
-
-    def test_short_text_kept(self):
-        text, complete = ensure_chapter_complete("短文本")
-        self.assertEqual(text, "短文本")
-        self.assertFalse(complete)
-
-    def test_no_sentence_end_returns_original(self):
-        text = "这是一段没有任何句末标点的长文本" * 10
-        out, complete = ensure_chapter_complete(text)
-        self.assertEqual(out, text)
-        self.assertFalse(complete)
-
-
-class TestNormalizeChapterHeaders(unittest.TestCase):
-    def test_standard_header_preserved(self):
-        out = normalize_chapter_headers("## **1**\n\n正文。", 1)
-        self.assertTrue(out.startswith("## **1**"))
-
-    def test_variant_headers_cleared(self):
-        text = "## ** 2 ** 标题文字\n\n正文。\n\n**3**\n\n更多正文。"
-        out = normalize_chapter_headers(text, 5)
-        self.assertTrue(out.startswith("## **5**"))
-        self.assertNotIn("**2**", out)
-        self.assertNotIn("标题文字", out)
-
-    def test_bare_number_line_removed(self):
-        # 正则只匹配"数字+标点独占一行"的标题行，如 "5、"
-        text = "5、\n\n正文。"
-        out = normalize_chapter_headers(text, 7)
-        self.assertNotIn("5、", out)
-
-
-class TestSplitBatchChapters(unittest.TestCase):
-    def test_standard_format(self):
-        text = "## **1**\n\n第一章内容。\n\n## **2**\n\n第二章内容。"
-        chapters = split_batch_chapters(text)
-        self.assertEqual(len(chapters), 2)
-        self.assertEqual(chapters[0][0], 1)
-        self.assertEqual(chapters[1][0], 2)
-        self.assertIn("第一章内容", chapters[0][1])
-
-    def test_intro_merged_into_first_chapter(self):
-        text = "引言文字。\n\n## **1**\n\n第一章内容。"
-        chapters = split_batch_chapters(text)
-        self.assertEqual(len(chapters), 1)
-        self.assertIn("引言文字", chapters[0][1])
-
-    def test_numbered_dot_format(self):
-        text = "## 1. 第一章\n\n内容一。\n\n## 2. 第二章\n\n内容二。"
-        chapters = split_batch_chapters(text)
-        self.assertEqual([n for n, _ in chapters], [1, 2])
-
-    def test_chinese_chapter_format(self):
-        text = "## 第1章\n\n内容一。\n\n## 第2章\n\n内容二。"
-        chapters = split_batch_chapters(text)
-        self.assertEqual([n for n, _ in chapters], [1, 2])
-
-    def test_no_separators_returns_empty(self):
-        self.assertEqual(split_batch_chapters("没有章节分隔符的文本"), [])
 
 
 class TestParseScoreJson(unittest.TestCase):

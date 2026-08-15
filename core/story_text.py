@@ -565,65 +565,6 @@ def validate_story_format(text):
 
 
 # ============================================================
-# 章节完整性检测
-# ============================================================
-
-def ensure_chapter_complete(text):
-    """
-    检测章节文本是否在完整句子处结束。
-
-    如果末尾在句末标点（。！？……」》】）处结束 → 视为完整。
-    如果末尾被截断（不在句末标点处）→ 回退到最后一个句末标点截断。
-
-    返回：(text, is_complete)
-      - is_complete=True:  文本末尾完整，无需处理
-      - is_complete=False: 文本被截断，已回截到最后一个完整句
-    """
-    if not text or len(text) < 50:
-        return text, len(text) >= 10
-
-    last_50 = text[-50:]
-    if re.search(r'[。！？……」》】]', last_50):
-        return text, True
-
-    # 被截断：回退到最后一个句末标点
-    match = re.search(r'^(.*[。！？……」》】])[^。！？……」》】]*$', text, re.DOTALL)
-    if match:
-        truncated = match.group(1)
-        return truncated, False
-
-    # 全文找不到句末标点（极端情况），返回原文
-    return text, False
-
-
-def normalize_chapter_headers(text, chapter_num):
-    """
-    归一化章节标题：清除模型自行生成的所有 ## **N** 变体，
-    然后统一在章首补入 ## **{chapter_num}**。
-
-    模型输出的标题格式极不稳定，常见变体：
-      - ## **1**（标准）
-      - ## **1** 标题文字
-      - ## ** 1 **
-      - **1**（缺 #）
-      - 干脆不写
-
-    本函数暴力清除后统一补入，确保每章标题格式一致。
-    """
-    # 清除所有 ## **N** 及其变体（含后面的标题文字）
-    text = re.sub(r'#*\s*\*{1,2}\s*\d+\s*\*{1,2}[^\n]*\n?', '', text)
-    # 清除单独的 **N** 行（无 # 前缀）
-    text = re.sub(r'^\*{1,2}\s*\d+\s*\*{1,2}\s*\n', '', text, flags=re.MULTILINE)
-    # 清除行首孤立的数字标题如 "1." "1、" "1）"（但排除正文中的数字列举）
-    text = re.sub(r'^\s*\d+[\.、）\)]\s*\n', '', text, flags=re.MULTILINE)
-
-    # 统一补入章节标题
-    header = f"## **{chapter_num}**\n\n"
-    text = header + text.strip()
-    return text
-
-
-# ============================================================
 # 参考文章片段采样（采样模式素材）
 # ============================================================
 
@@ -647,68 +588,6 @@ def sample_reference_sections(answer, max_chars=3000):
         if cut >= max_chars * 0.6:
             return head[: cut + 1]
     return head
-
-
-# ============================================================
-# 批量章节拆分
-# ============================================================
-
-def split_batch_chapters(text):
-    """
-    按 ## **N** 分隔批量输出为 [(chapter_num: int, text: str), ...]。
-    同时也支持 ## N. 和 ## 第N章 格式。
-    """
-    # 先按 ## **N** 拆分
-    pattern = re.compile(
-        r'(?:^|\n)(##\s*\*{1,2}\s*(\d+)\s*\*{1,2}[^\n]*)',
-        re.MULTILINE
-    )
-    splits = list(pattern.finditer(text))
-
-    if not splits:
-        # 尝试 ## N. 格式
-        pattern = re.compile(
-            r'(?:^|\n)(##\s*(\d+)[\.、\s][^\n]*)',
-            re.MULTILINE
-        )
-        splits = list(pattern.finditer(text))
-
-    if not splits:
-        # 尝试 ## 第N章 格式
-        pattern = re.compile(
-            r'(?:^|\n)(##\s*第\s*(\d+)\s*章[^\n]*)',
-            re.MULTILINE
-        )
-        splits = list(pattern.finditer(text))
-
-    if not splits:
-        log.warning("[SplitChapters] 无法从批量输出中解析章节分隔符")
-        return []
-
-    # 第一个章节标题之前的文字视为引言，并入第一章
-    intro_text = text[:splits[0].start()].strip()
-
-    chapters = []
-    for i, m in enumerate(splits):
-        num = int(m.group(2))
-        start = m.start()
-        if i + 1 < len(splits):
-            next_start = splits[i + 1].start()
-            body = text[start:next_start].strip()
-        else:
-            body = text[start:].strip()
-
-        if body.startswith('\n'):
-            body = body[1:]
-
-        # 引言并入第一章开头
-        if i == 0 and intro_text:
-            body = intro_text + "\n\n" + body
-
-        chapters.append((num, body))
-
-    return chapters
-
 
 # ============================================================
 # 评分 JSON 解析（LLM 输出容错解析）

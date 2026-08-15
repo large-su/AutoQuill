@@ -102,20 +102,7 @@ class WorkflowBase:
         return story
 
     def _generate_web(self, question_title, top_answer, recipe=None):
-        """Web 模式：通过 Web Driver 操控 LLM 网站
-        
-        支持 LONG_FORM_MODE：
-          - False → 单轮生成（短文模式，直接出正文）
-          - True  → 两轮生成（长文模式：大纲 → 正文）
-        """
-        try:
-            from config.story import LONG_FORM_MODE
-        except ImportError:
-            LONG_FORM_MODE = False
-
-        # Web 模式不支持弧循环长文流水线（~33 次调用），
-        # 当 LONG_FORM_MODE=True 时也走单轮生成，由
-        # build_story_prompt 中的 STORY_RECIPE_PROMPT 承载创作意图
+        """Web 模式：通过 Web Driver 操控 LLM 网站（单轮生成）"""
         return self._generate_web_short_form(
             question_title, top_answer, recipe
         )

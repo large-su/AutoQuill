@@ -10,8 +10,7 @@
 #   applications/zhihu_story/ → 应用层（采集 browser_adapter/extractors、
 #                               文风蒸馏 author_profiler）
 #   workflows/                → 工作流编排（知乎批量）
-#   core/                     → 核心领域（story_workspace 素材暂存、
-#                               story_text 正文渲染）
+#   core/                     → 核心领域（story_text 正文渲染、paths 路径）
 #   tools/                    → 开发期工具（不在运行时路径上）
 #   web_drivers/              → LLM 网站驱动（DeepSeek DOM 驱动）
 #
@@ -214,96 +213,6 @@ def ask_batch_params():
 
 
 # ============================================================
-# 测试 OCR
-# ============================================================
-
-def _run_resume(argv):
-    """--resume <story_id>：从已有工作区恢复生成。"""
-    from core.story_workspace import StoryWorkspace
-
-    # 解析 story_id
-    sid = None
-    for i, a in enumerate(argv):
-        if a == '--resume' and i + 1 < len(argv):
-            sid = argv[i + 1]
-            break
-
-    if not sid:
-        print("  用法：python main.py --resume <story_id>")
-        print("  可用的 story_id：")
-        from config.story import STORY_OUTPUT_DIR
-        root = _data_path(STORY_OUTPUT_DIR)
-        if os.path.exists(root):
-            for d in sorted(os.listdir(root)):
-                dp = os.path.join(root, d)
-                if os.path.isdir(dp) and os.path.exists(
-                    os.path.join(dp, "_progress.json")
-                ):
-                    print(f"    {d}")
-            else:
-                print("    （暂无）")
-        return
-
-    try:
-        ws = StoryWorkspace(story_id=sid)
-    except Exception as e:
-        print(f"  ❌ 无法加载故事 {sid}：{e}")
-        return
-
-    p = ws.progress
-    if not p:
-        print(f"  ❌ 故事 {sid} 缺少 _progress.json")
-        return
-
-    print(f"\n  📖 恢复故事：{p.get('title', sid)}")
-    print(f"     进度：{p.get('last_chapter_written', 0)}/"
-          f"{p.get('total_chapters', '?')} 章")
-
-    last = p.get('last_chapter_written', 0)
-    total = p.get('total_chapters', 0)
-    if last >= total:
-        print(f"  ✓ 故事已完成，无需恢复")
-        return
-
-    # 获取 recipe（从知识库提取）
-    title = p.get('title', '')
-    recipe = None
-    try:
-        from config.story import KB_ENABLE
-        from config import LLM_API_KEY
-        if KB_ENABLE and LLM_API_KEY:
-            from kb_manager import load_kb
-            kb = load_kb()
-            recipes = kb.get("recipes", [])
-            if recipes:
-                recipe = recipes[-1]  # 使用最近配方
-                print(f"  配方：{recipe.get('hook', '?')[:20]}")
-    except Exception:
-        pass
-
-    from config.story import LONG_FORM_MODE
-    if not LONG_FORM_MODE:
-        print("  ❌ 长文模式未启用（LONG_FORM_MODE=False）")
-        return
-
-    print(f"\n  继续生成...\n")
-    try:
-        from llm_api import generate_long_form_story
-        story = generate_long_form_story(
-            title, recipe=recipe, workspace=ws,
-        )
-        if story:
-            print(f"\n  ✅ 故事恢复完成！"
-                  f"共 {len(story)} 字符")
-        else:
-            print(f"\n  ❌ 恢复生成失败")
-    except KeyboardInterrupt:
-        print(f"\n  ⏸ 中断。进度已保存，可再次 --resume {sid} 继续")
-    except Exception as e:
-        log.error(f"恢复生成异常：{e}")
-
-
-# ============================================================
 # 主入口
 # ============================================================
 
@@ -364,9 +273,6 @@ def main():
     if '--test-api' in sys.argv:
         from llm_api import test_api_connection
         test_api_connection()
-        return
-    if '--resume' in sys.argv:
-        _run_resume(sys.argv)
         return
 
     # API/Web 模式检查
