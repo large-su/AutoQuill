@@ -9,32 +9,11 @@
 
 import json
 import logging
-import time
 
-import requests
-
-from core.story_text import parse_score_json
+from core.story_text import parse_score_json, strip_json_fences
+from llm_client import call_llm_non_streaming, resolve_kb_llm_config
 
 log = logging.getLogger(__name__)
-
-
-def _resolve_kb_config():
-    """
-    解析知识库任务用的 API 配置（KB 优先，故事生成回退）。
-
-    返回: (api_key: str, base_url: str, model: str, extra_body: dict)
-    """
-    from config import LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
-    from config import KB_LLM_API_KEY as _kb_key
-    from config import KB_LLM_BASE_URL as _kb_url
-    from config import KB_LLM_MODEL as _model
-    from config import KB_LLM_EXTRA_BODY as _extra_body
-    return (
-        (_kb_key or LLM_API_KEY),
-        (_kb_url or LLM_API_BASE_URL),
-        _model,
-        dict(_extra_body or {}),
-    )
 
 
 def score_stories(stories_data):
@@ -61,7 +40,7 @@ def score_stories(stories_data):
     返回：
         按总分降序排列的列表，每个元素增加 'score' 和 'score_detail' 字段
     """
-    api_key, base_url, _MODEL, extra_body = _resolve_kb_config()
+    api_key, base_url, _MODEL, extra_body = resolve_kb_llm_config()
 
     if not api_key or not stories_data:
         log.warning("评分跳过（无 API Key 或无故事）")
@@ -98,54 +77,20 @@ def score_stories(stories_data):
         prompt += story_preview
         prompt += "\n"
 
-    url = f"{base_url}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    payload = {
-        "model": _MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max(4000, len(stories_data) * 350 + 500),
-        "temperature": 0.3,  # 低温度保证评分稳定
-        "stream": False
-    }
-    if extra_body:
-        payload.update(extra_body)
-
     try:
         log.info("发送评分请求...")
-        start = time.time()
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        resp.encoding = "utf-8"  # 强制 UTF-8
-        elapsed = time.time() - start
-
-        if resp.status_code != 200:
-            log.error(f"评分 API 失败：{resp.status_code}")
+        reply, elapsed, error = call_llm_non_streaming(
+            prompt, max_tokens=max(4000, len(stories_data) * 350 + 500),
+            temperature=0.3, timeout=120,
+            api_key=api_key, base_url=base_url, model=_MODEL,
+            extra_body=extra_body)
+        if error:
+            log.error("评分 API 失败：%s", error)
             return stories_data
-
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"].strip()
-
-        # ★ Token 用量上报
-        try:
-            from llm_token_tracker import tracker
-            tracker.report(_MODEL, data.get("usage", {}))
-        except Exception:
-            pass
 
         log.info(f"评分完成（{elapsed:.1f}s）")
 
-        # 解析 JSON
-        # 清理可能的 markdown 代码块
-        clean_reply = reply.strip()
-        if clean_reply.startswith("```"):
-            clean_reply = clean_reply.split("\n", 1)[1] if "\n" in clean_reply else clean_reply[3:]
-        if clean_reply.endswith("```"):
-            clean_reply = clean_reply[:-3]
-        clean_reply = clean_reply.strip()
-
-        scores = parse_score_json(clean_reply, len(stories_data))
+        scores = parse_score_json(strip_json_fences(reply), len(stories_data))
 
         # 将评分合并到 stories_data
         score_map = {s['index']: s for s in scores}

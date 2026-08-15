@@ -233,6 +233,105 @@ def _call_llm_streaming(user_message, max_tokens, temperature=None,
                 pass
 
 
+def resolve_kb_llm_config():
+    """知识库任务 LLM 配置：KB 专属优先，缺失回退根配置。
+
+    统一 kb_manager / story_scoring 的非流式 KB 配置解析
+    （author_profiler 的流式剖析配置是另一模式，各自保留）。
+    返回 (api_key, base_url, model, extra_body)。
+    """
+    from config import LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
+    from config import KB_LLM_API_KEY as _kb_key
+    from config import KB_LLM_BASE_URL as _kb_url
+    from config import KB_LLM_MODEL as _kb_model
+    from config import KB_LLM_EXTRA_BODY as _kb_extra_body
+    return (
+        _kb_key or LLM_API_KEY,
+        _kb_url or LLM_API_BASE_URL,
+        _kb_model or LLM_API_MODEL,
+        dict(_kb_extra_body or {}),
+    )
+
+
+def call_llm_non_streaming(user_message, max_tokens, temperature=None,
+                           timeout=120,
+                           api_key=None, base_url=None, model=None,
+                           extra_body=None, report_usage=True):
+    """
+    通用非流式 chat.completions 调用（与 _call_llm_streaming 签名对称）。
+
+    参数：
+        user_message: 完整的用户消息文本
+        max_tokens:   max_tokens 参数
+        temperature:  温度（None 则用 config.LLM_API_TEMPERATURE）
+        timeout:      HTTP 超时秒数
+        api_key/base_url/model/extra_body: 显式覆盖（None → 根配置；
+                      extra_body None → 根配置 EXTRA_BODY）。知识库任务
+                      传入 resolve_kb_llm_config() 的产物。
+        report_usage: 成功后是否上报 Token 用量（连通性测试等场景关掉）
+
+    返回：(content: str or None, elapsed: float, error: str or None)
+    content 为 None 时 error 为失败描述。
+    """
+    from config import (
+        LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL,
+        LLM_API_EXTRA_BODY, LLM_API_TEMPERATURE,
+    )
+    if api_key is not None:
+        LLM_API_KEY = api_key
+    if base_url is not None:
+        LLM_API_BASE_URL = base_url
+    if model is not None:
+        LLM_API_MODEL = model
+    if extra_body is None:
+        extra_body = LLM_API_EXTRA_BODY
+
+    if not LLM_API_KEY or LLM_API_KEY == "密":
+        return None, 0.0, "API Key 未配置"
+
+    url = f"{LLM_API_BASE_URL.rstrip('/')}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LLM_API_KEY}"
+    }
+    payload = {
+        "model": LLM_API_MODEL,
+        "messages": [{"role": "user", "content": user_message}],
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    temperature = (temperature if temperature is not None
+                   else LLM_API_TEMPERATURE)
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if isinstance(extra_body, dict):
+        payload.update(extra_body)
+
+    start = time.time()
+    try:
+        resp = requests.post(url, headers=headers, json=payload,
+                             timeout=timeout)
+        resp.encoding = "utf-8"  # 强制 UTF-8，避免响应头无 charset 时中文乱码
+        elapsed = time.time() - start
+        if resp.status_code != 200:
+            return None, elapsed, f"HTTP {resp.status_code}: {resp.text[:300]}"
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        if report_usage and data.get("usage"):
+            try:
+                from llm_token_tracker import tracker
+                tracker.report(LLM_API_MODEL, data["usage"])
+            except Exception:
+                pass
+        return (content or "").strip(), elapsed, None
+    except requests.exceptions.Timeout:
+        return None, time.time() - start, f"超时：{timeout}s 无响应"
+    except requests.exceptions.RequestException as exc:
+        return None, time.time() - start, f"请求失败：{exc}"
+    except Exception as exc:
+        return None, time.time() - start, f"异常：{exc}"
+
+
 def test_api_connection():
     """测试 API 连接"""
     from config import (

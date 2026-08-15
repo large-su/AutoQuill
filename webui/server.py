@@ -790,34 +790,18 @@ def api_setup_apikey(spec: _ApiKeySpec):
 @app.post("/api/setup/test-api")
 def api_setup_test_api():
     """实测当前配置的 API 连接（首启引导「测试连接」按钮）。"""
-    from config import (LLM_API_BASE_URL, LLM_API_EXTRA_BODY,
-                        LLM_API_KEY, LLM_API_MODEL)
+    from config import LLM_API_BASE_URL, LLM_API_KEY
     if not LLM_API_KEY or LLM_API_KEY.startswith("sk-your-"):
         raise HTTPException(400, "API Key 未配置或仍是占位符")
     if not LLM_API_BASE_URL:
         raise HTTPException(400, "缺少 baseUrl（服务商配置不完整）")
-    payload = {
-        "model": LLM_API_MODEL,
-        "messages": [{"role": "user", "content": "请回复：连接成功"}],
-        "max_tokens": 100,
-        "stream": False,
-    }
-    if isinstance(LLM_API_EXTRA_BODY, dict):
-        payload.update(LLM_API_EXTRA_BODY)
-    try:
-        resp = requests.post(
-            f"{LLM_API_BASE_URL.rstrip('/')}/chat/completions",
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {LLM_API_KEY}"},
-            json=payload, timeout=30)
-        if resp.status_code == 200:
-            reply = (resp.json().get("choices") or [{}])[0] \
-                .get("message", {}).get("content", "")
-            return {"ok": True, "detail": f"连接成功：{reply[:60]}"}
-        return {"ok": False, "detail": f"HTTP {resp.status_code}："
-                                       f"{resp.text[:200]}"}
-    except requests.exceptions.RequestException as exc:
-        return {"ok": False, "detail": str(exc)}
+    from llm_client import call_llm_non_streaming
+    content, _elapsed, error = call_llm_non_streaming(
+        "请回复：连接成功", max_tokens=100, timeout=30,
+        report_usage=False)
+    if error:
+        return {"ok": False, "detail": error}
+    return {"ok": True, "detail": f"连接成功：{content[:60]}"}
 
 
 def _start_login_thread(kind, flow_call, log_name):

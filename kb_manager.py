@@ -93,61 +93,16 @@ def _call_llm(prompt, max_tokens=2000, temperature=0.3, timeout=120):
     优先使用 KB 专属的 API Key / Base URL / Model（知识库任务可独立于故事生成配置）。
     若 KB 专属配置缺失，回退到故事生成的配置。
     """
-    import requests
-    from config import LLM_API_KEY, LLM_API_BASE_URL, LLM_API_MODEL
-
-    # ★ KB 专属配置优先，缺失时回退到故事生成配置
-    from config import KB_LLM_API_KEY as _kb_key
-    from config import KB_LLM_BASE_URL as _kb_url
-    from config import KB_LLM_MODEL as _kb_model
-    from config import KB_LLM_EXTRA_BODY as _kb_extra_body
-
-    api_key = _kb_key or LLM_API_KEY
-    base_url = _kb_url or LLM_API_BASE_URL
-    model = _kb_model or LLM_API_MODEL
-    extra_body = dict(_kb_extra_body or {})
-
-    if not api_key or api_key == "密":
-        log.error("API Key 未配置")
+    from llm_client import call_llm_non_streaming, resolve_kb_llm_config
+    api_key, base_url, model, extra_body = resolve_kb_llm_config()
+    content, _elapsed, error = call_llm_non_streaming(
+        prompt, max_tokens=max_tokens, temperature=temperature,
+        timeout=timeout, api_key=api_key, base_url=base_url,
+        model=model, extra_body=extra_body)
+    if error:
+        log.error("LLM 调用失败：%s", error)
         return None
-
-    url = f"{base_url}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": False,
-    }
-    if extra_body:
-        payload.update(extra_body)
-
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        resp.encoding = "utf-8"  # 强制 UTF-8，避免响应头无 charset 时中文乱码
-        if resp.status_code != 200:
-            log.error(f"LLM 请求失败：HTTP {resp.status_code}")
-            return None
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"].strip()
-
-        # ★ Token 用量上报
-        usage = data.get("usage")
-        if usage:
-            try:
-                from llm_token_tracker import tracker
-                tracker.report(model, usage)
-            except Exception:
-                pass
-
-        return content
-    except Exception as e:
-        log.error(f"LLM 调用异常：{e}")
-        return None
+    return content
 
 def _parse_json_response(text):
     """解析 LLM 返回的 JSON（多层容错处理）"""
