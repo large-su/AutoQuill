@@ -52,6 +52,7 @@ class SlotState:
         self.stable = 0
         self.body_started = False  # 正文已出现 → 之后只打生成心跳
         self.stop_seen = False    # 停止按钮曾出现（生成中）→ 消失才算完成
+        self.pending_readback = None  # (长度, 重读轮数)：稳定判定后验证
         self.start_time = 0.0
 
         # 失败计数
@@ -187,6 +188,7 @@ class ParallelWebRunner:
         slot.last_think = 0
         slot.stable = 0
         slot.stop_seen = False
+        slot.pending_readback = None
         slot.body_started = False
         slot.start_time = time.time()
         log.info("[Slot %d] → 派发任务 %d（%s）", slot.slot_id,
@@ -218,6 +220,7 @@ class ParallelWebRunner:
         if cur_len != slot.last_len:
             slot.stable = 0
             slot.last_len = cur_len
+            slot.pending_readback = None  # 长度变化 → 挂起的验证作废
             if cur_len:
                 slot.body_started = True
                 log.info("[Slot %d] 故事生成中… 已生成 %d 字",
@@ -231,10 +234,29 @@ class ParallelWebRunner:
         else:
             slot.stable += 1
         if slot.stable >= cfg.get("stable_count", 2) and cur_len:
-            log.info("[Slot %d] 文本稳定 %d 轮，判定完成（%.1fs，%d 字符）",
-                     slot.slot_id, cfg.get("stable_count", 2),
-                     time.time() - slot.start_time, cur_len)
-            return "DONE"
+            # read-back 验证（与 deepseek.py:wait_complete 同构）：LLM
+            # 流式输出可能中途停顿 >8s（长 JSON 间歇），稳定判定可能是
+            # 暂停而非完成——连续 2 轮重读长度不变才判定完成
+            if slot.pending_readback is None:
+                slot.pending_readback = (cur_len, 0)
+                return "CONTINUING"
+            exp_len, rounds = slot.pending_readback
+            if cur_len != exp_len:
+                log.info("[Slot %d] 稳定判定后输出仍增长（%d→%d），继续等待",
+                         slot.slot_id, exp_len, cur_len)
+                slot.pending_readback = None
+                slot.stable = 0
+                slot.last_len = cur_len
+                return "CONTINUING"
+            if rounds >= 1:
+                slot.pending_readback = None
+                log.info("[Slot %d] 文本稳定 %d 轮，判定完成"
+                         "（%.1fs，%d 字符）",
+                         slot.slot_id, cfg.get("stable_count", 2),
+                         time.time() - slot.start_time, cur_len)
+                return "DONE"
+            slot.pending_readback = (exp_len, rounds + 1)
+            return "CONTINUING"
         if time.time() - slot.start_time > cfg.get("max_wait", 600):
             log.warning("[Slot %d] 生成超时（%ds），重置会话",
                         slot.slot_id, cfg.get("max_wait", 600))
@@ -261,6 +283,7 @@ class ParallelWebRunner:
         slot.last_len = 0
         slot.stable = 0
         slot.stop_seen = False
+        slot.pending_readback = None
         slot.reset_fails = 0
 
     def _on_failure(self, slot):

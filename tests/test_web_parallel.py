@@ -157,12 +157,29 @@ class TestPollLogic(unittest.TestCase):
 
     def test_done_when_text_stable(self):
         drv = FakeDriver(task_scripts={
-            0: ([100, 100, 100], [])})
+            0: ([100, 100, 100, 100, 100], [])})
         runner, slot = self._poll_slot(drv)
         self.assertEqual(runner._poll(slot), "CONTINUING")
         self.assertEqual(runner._poll(slot), "CONTINUING")
-        # 第三轮：stable=2 且文本 >0 → DONE
+        # 第三轮：stable=2 且文本 >0 → 进入 read-back 验证（防停顿误判）
+        self.assertEqual(runner._poll(slot), "CONTINUING")
+        # 第四、五轮：重读长度不变 × 2 → DONE
+        self.assertEqual(runner._poll(slot), "CONTINUING")
         self.assertEqual(runner._poll(slot), "DONE")
+
+    def test_readback_growth_resets_stability(self):
+        # read-back 发现长度增长（LLM 停顿恢复）→ 重置继续等待
+        drv = FakeDriver(task_scripts={
+            0: ([100, 100, 100, 120, 120, 120, 120, 120], [])})
+        runner, slot = self._poll_slot(drv)
+        self.assertEqual(runner._poll(slot), "CONTINUING")  # 100 首次
+        self.assertEqual(runner._poll(slot), "CONTINUING")  # 100 稳定
+        self.assertEqual(runner._poll(slot), "CONTINUING")  # stable=2 → 进入验证
+        self.assertEqual(runner._poll(slot), "CONTINUING")  # 重读发现 120 → 重置
+        self.assertEqual(runner._poll(slot), "CONTINUING")  # 120 重新计数
+        self.assertEqual(runner._poll(slot), "CONTINUING")  # 120 稳定 stable=2
+        self.assertEqual(runner._poll(slot), "CONTINUING")  # 进入验证（pending）
+        self.assertEqual(runner._poll(slot), "DONE")        # 重读一致 ×2 → 完成
 
     def test_never_false_positive_with_zero_text(self):
         # 停止按钮从未出现 + 文本恒 0 → 永不 DONE（仅超时），防误判

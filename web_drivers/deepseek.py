@@ -38,8 +38,13 @@ _SEND_SELECTORS = (
 )
 
 # 生成完成标志：停止按钮消失（DeepSeek 生成时显示停止按钮）。
-# 新版 UI 是纯图标 role=button，无 aria-label；生成中动态探测兜底
+# 新版 UI（2026-08-15 实测）：发送/停止是同一个圆形 primary DIV，
+# 无 aria-label、class 不含 "stop"——生成中移除 ds-button--disabled
+# 类（停止态），完成即恢复。「圆形 primary 且非 disabled」= 停止按钮。
+# 旧候选（button[aria-label*=停止] 等）保留兼容旧版 UI。
 _STOP_SELECTORS = (
+    "div[class*='ds-button--circle'][class*='ds-button--primary']"
+    ":not([class*='ds-button--disabled'])",
     "button[aria-label*='停止']",
     "button[data-testid*='stop']",
     "button[class*='stop']",
@@ -68,6 +73,12 @@ _THINK_SELECTORS = (
 
 # 配置键 → 页面模式 tab 的真实文本（实测：radio 的 innerText 含「模式」）
 _MODE_TEXT = {"fast": "快速模式", "expert": "专家模式", "image": "识图模式"}
+
+# 稳定判定后的重读验证窗口（毫秒）：LLM 流式输出可能中途停顿（长 JSON
+# 间歇停顿可 >8s），「文本连续 N 轮不变」可能是暂停而非完成——判定前
+# 再等 READBACK 毫秒重读一次，内容增长则继续等待（2026-08-15 线上剖析
+# 两次失败均走「文本稳定」兜底，读回残缺 JSON 解析失败）
+_READBACK_MS = 3000
 
 
 class DeepSeekDriver(WebLLMDriver):
@@ -310,8 +321,20 @@ class DeepSeekDriver(WebLLMDriver):
             else:
                 stable += 1
             if stable >= stable_count and cur_len:
-                log.info("web_drivers: 文本稳定 %d 轮，判定完成（%.1fs，%d 字符）",
-                         stable_count, time.time() - start, cur_len)
+                # read-back 验证：稳定可能是停顿（LLM 输出间歇），等
+                # READBACK 毫秒重读，长度变化则说明仍在生成、继续等待
+                page = self._page_instance()
+                page.wait_for_timeout(_READBACK_MS)
+                re_len = self._current_reply_len()
+                if re_len != cur_len:
+                    log.info("web_drivers: 稳定判定后输出仍增长"
+                             "（%d→%d），继续等待", cur_len, re_len)
+                    stable = 0
+                    last_len = re_len
+                    continue
+                log.info("web_drivers: 文本稳定 %d 轮，判定完成"
+                         "（%.1fs，%d 字符）",
+                         stable_count, time.time() - start, re_len)
                 return True
             self._page_instance().wait_for_timeout(poll_interval * 1000)
         log.warning("web_drivers: 生成超时（%ds）", max_wait)

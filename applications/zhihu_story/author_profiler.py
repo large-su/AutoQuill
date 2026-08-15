@@ -485,7 +485,11 @@ def _call_profile_llm(prompt, max_tokens=20000):
         profile = _parse_profile_json(reply)
         if profile:
             return profile
-        log.warning("author_profiler: 第 %d 次剖析结果解析失败（重试）", attempt)
+        # 失败时带证据（长度 + 首尾片段）：剖析失败难复现时日志可直接
+        # 判断是「读回残缺」还是「LLM 输出无效 JSON」
+        log.warning("author_profiler: 第 %d 次剖析结果解析失败（重试），"
+                    "回复长度=%d 首80=%r 尾80=%r", attempt,
+                    len(reply or ""), (reply or "")[:80], (reply or "")[-80:])
         time.sleep(2)
     return None
 

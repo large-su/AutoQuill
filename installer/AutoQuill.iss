@@ -1,5 +1,5 @@
 ; ============================================================
-; AutoQuill 4.1.6 安装器（Inno Setup 6）
+; AutoQuill 4.1.7 安装器（Inno Setup 6）
 ;
 ; 设计原则：
 ;   - 用户目录安装（{localappdata}\Programs\AutoQuill），免管理员权限
@@ -11,7 +11,7 @@
 ; ============================================================
 
 #define MyAppName "AutoQuill"
-#define MyAppVersion "4.1.6"
+#define MyAppVersion "4.1.7"
 #define MyAppPublisher "AutoQuill"
 #define MyAppExeName "AutoQuill.exe"
 

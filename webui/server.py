@@ -637,11 +637,9 @@ def api_set_mode(spec: _ModeSpec):
         if spec.mode == LLM_MODE:
             return {"ok": True, "effective": {"mode": spec.mode}}
         if spec.mode == "web":
-            # 强制真实检测（不走 15s 缓存）：登录刚完成时缓存可能仍为
-            # False，误拦会让用户以为切换功能坏了
-            from applications.zhihu_story.browser_adapter import (
-                web_llm_logged_in)
-            if not web_llm_logged_in():
+            # 走 15s 缓存：登录成功回调会立即清缓存（ts=0），登录刚完成
+            # 时此处必定真实检测，不会误拦；重复切换/轮询则命中缓存秒回
+            if not _web_llm_logged_in_cached():
                 raise HTTPException(400, {
                     "detail": "DeepSeek 网页版尚未登录，无法切换。"
                               "请在引导窗口中打开 Edge 完成登录后重试。",
@@ -694,6 +692,7 @@ _login_kind = ""  # 当前登录引导的站点："zhihu" / "deepseek" / ""
 # 反复拉起 Edge（_WEB_LLM_CACHE_TTL 秒内复用结果）
 _WEB_LLM_CACHE_TTL = 15.0
 _web_llm_cache = {"ts": 0.0, "ok": False}
+_web_llm_cache_lock = threading.Lock()
 
 
 def _setup_version():
@@ -705,16 +704,23 @@ def _setup_version():
 
 
 def _web_llm_logged_in_cached():
-    ts, ok = _web_llm_cache["ts"], _web_llm_cache["ok"]
-    if time.time() - ts < _WEB_LLM_CACHE_TTL:
+    """带缓存的登录态检测。
+
+    加锁去重：真实检测（独立浏览器，约 5s）进行中时，前端 setup/status
+    每 2.5s 的并发轮询不再各自排队启动浏览器，而是等待同一份结果。
+    """
+    with _web_llm_cache_lock:
+        ts, ok = _web_llm_cache["ts"], _web_llm_cache["ok"]
+        if time.time() - ts < _WEB_LLM_CACHE_TTL:
+            return ok
+        try:
+            from applications.zhihu_story.browser_adapter import (
+                web_llm_logged_in)
+            ok = web_llm_logged_in()
+        except Exception:
+            ok = False
+        _web_llm_cache.update(ts=time.time(), ok=ok)
         return ok
-    try:
-        from applications.zhihu_story.browser_adapter import web_llm_logged_in
-        ok = web_llm_logged_in()
-    except Exception:
-        ok = False
-    _web_llm_cache.update(ts=time.time(), ok=ok)
-    return ok
 
 
 @app.get("/api/setup/status")
@@ -838,7 +844,8 @@ def _start_login_thread(kind, flow_call, log_name):
             if ok and kind == "deepseek":
                 # 清缓存：登录刚完成时 setup/status 的 15s 缓存可能仍为
                 # False，不立即反映会让切换/引导误判未登录
-                _web_llm_cache.update(ts=0.0, ok=False)
+                with _web_llm_cache_lock:
+                    _web_llm_cache.update(ts=0.0, ok=False)
                 runner.guide_needed = None  # 登录完成：引导标记解除
             if not ok:
                 _login_error = msg

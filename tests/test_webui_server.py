@@ -150,13 +150,12 @@ class TestServerAPI(unittest.TestCase):
         self.assertIn("web", data["allowed"])
 
     def test_mode_post_switch(self):
-        # 闭环预检：切 web 需 DeepSeek 已登录（mock 通过，免真实拉起 Edge）
-        import applications.zhihu_story.browser_adapter as ba
+        # 闭环预检：切 web 需 DeepSeek 已登录（mock 缓存通过，免真实拉起 Edge）
         import config
         orig = config.LLM_MODE
         try:
             config.set_runtime_mode("api", persist=False)  # 起点非 web
-            with mock.patch.object(ba, "web_llm_logged_in",
+            with mock.patch.object(server, "_web_llm_logged_in_cached",
                                    return_value=True):
                 r = self.client.post("/api/mode", json={"mode": "web"})
                 self.assertEqual(r.status_code, 200)
@@ -167,18 +166,35 @@ class TestServerAPI(unittest.TestCase):
 
     def test_mode_post_web_requires_login(self):
         # 闭环：切 web 且未登录 → 拒绝并带 needs=deepseek_login，模式不变
-        import applications.zhihu_story.browser_adapter as ba
         import config
         orig = config.LLM_MODE
         try:
             config.set_runtime_mode("api", persist=False)  # 起点非 web
-            with mock.patch.object(ba, "web_llm_logged_in",
+            with mock.patch.object(server, "_web_llm_logged_in_cached",
                                    return_value=False):
                 r = self.client.post("/api/mode", json={"mode": "web"})
                 self.assertEqual(r.status_code, 400)
                 self.assertEqual(r.json()["detail"]["needs"],
                                  "deepseek_login")
                 self.assertEqual(config.LLM_MODE, "api")
+        finally:
+            config.set_runtime_mode(orig, persist=False)
+
+    def test_mode_web_switch_uses_cache(self):
+        # 切 web 走 15s 缓存：缓存命中（已登录）不再启动真实检测浏览器
+        # （用户反馈切换检测慢：原来强制真实检测 ≈5-8s，现在秒回）
+        import applications.zhihu_story.browser_adapter as ba
+        import config
+        orig = config.LLM_MODE
+        try:
+            config.set_runtime_mode("api", persist=False)
+            server._web_llm_cache.update(ts=time.time(), ok=True)
+            with mock.patch.object(ba, "web_llm_logged_in",
+                                   return_value=False) as m:
+                r = self.client.post("/api/mode", json={"mode": "web"})
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.json()["effective"]["mode"], "web")
+                m.assert_not_called()
         finally:
             config.set_runtime_mode(orig, persist=False)
 
@@ -817,6 +833,41 @@ class TestSetupEndpoints(unittest.TestCase):
             self.assertTrue(server._web_llm_logged_in_cached())
             self.assertTrue(server._web_llm_logged_in_cached())
             self.assertEqual(m.call_count, 1)
+
+    def test_web_login_cache_dedups_concurrent_calls(self):
+        # 检测进行中（约 5s 真实耗时）的并发轮询不重复启动浏览器：
+        # 锁去重后 8 个并发调用只触发 1 次真实检测（首启轮询 2.5s 间隔
+        # 会撞上检测期，原实现各自排队启动浏览器是「检测慢」的主因）
+        import threading
+        server._web_llm_cache.update(ts=0.0, ok=False)
+        import applications.zhihu_story.browser_adapter as ba
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _slow_check():
+            entered.set()
+            release.wait(timeout=10)
+            return True
+
+        results = []
+        # patch 必须在主线程统一建立/恢复：若每个线程各自 patch 同一
+        # 属性，线程退出时的恢复互相覆盖，残留 mock 污染后续测试
+        with mock.patch.object(ba, "web_llm_logged_in",
+                               side_effect=_slow_check) as m:
+            def _call():
+                results.append(server._web_llm_logged_in_cached())
+
+            threads = [threading.Thread(target=_call) for _ in range(4)]
+            for t in threads:
+                t.start()
+            self.assertTrue(entered.wait(timeout=10))  # 第一个进入真实检测
+            release.set()
+            for t in threads:
+                t.join(timeout=15)
+        # 仅首个线程触发真实检测（1 次），其余等待锁后命中缓存——
+        # 正是锁去重要求的行为（原来并发轮询各自启动浏览器）
+        self.assertEqual(results, [True, True, True, True])
+        self.assertEqual(m.call_count, 1)
 
     def test_apikey_write_and_effect(self):
         import config

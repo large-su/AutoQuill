@@ -1060,7 +1060,20 @@ def web_llm_logged_in():
                 try:
                     page.goto("https://chat.deepseek.com",
                               wait_until="domcontentloaded", timeout=20000)
-                    page.wait_for_timeout(1500)  # 等 SPA 跳转到登录页
+                    # 等 SPA 跳转定局：已登录 → URL 稳定即返回（省 1.2s
+                    # 固定等待）；未登录 → 一旦跳到 /sign_in 立即判定
+                    deadline = time.time() + 1.5
+                    prev = page.url
+                    if "sign_in" in prev:
+                        return False
+                    while time.time() < deadline:
+                        page.wait_for_timeout(250)
+                        cur = page.url
+                        if "sign_in" in cur:
+                            return False
+                        if cur == prev:
+                            return True
+                        prev = cur
                     return "sign_in" not in page.url
                 finally:
                     page.close()
