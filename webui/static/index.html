@@ -250,6 +250,17 @@
   .seg-opt input { display: none; }
   .btn-model { flex: none; }
   .mp-note { font-size: 11px; color: var(--muted); line-height: 1.6; }
+  /* 蒸馏页排版：说明行（虚线分隔）/ 状态行 */
+  .mp-hint {
+    font-size: 11px; color: var(--muted); line-height: 1.6;
+    border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 8px;
+  }
+  .mp-status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text); padding: 6px 10px;
+    border-radius: 7px; border: 1px solid var(--border);
+    background: var(--panel-2); margin-bottom: 10px;
+  }
 
   /* ---------- 左列控制卡片内的表单控件（与设置弹窗风格统一） ---------- */
   .left-col select, .left-col input[type="text"], .left-col input[type="number"] {
@@ -637,32 +648,35 @@
     <div class="mode-pane" id="pane-distill" hidden>
       <div class="card">
         <h2><span class="badge">◈</span>故事采集</h2>
+        <div class="mp-k">作者回答列表 URL</div>
         <div class="set-row">
-          <input type="text" id="collectUrl" placeholder="作者回答列表 URL：https://www.zhihu.com/people/xxx/answers" style="flex:1">
+          <input type="text" id="collectUrl" placeholder="https://www.zhihu.com/people/xxx/answers" style="flex:1">
         </div>
         <div class="set-row">
+          <span class="mp-note">采集数量</span>
           <input type="number" id="collectCount" value="10" min="1" max="500" style="width:64px" title="本次最多新增篇数">
-          <span class="mp-note" style="flex:1">作者名自动识别</span>
+          <div class="spacer" style="flex:1"></div>
           <button class="btn primary btn-model" id="btnCollect">开始采集</button>
         </div>
-        <div class="mp-note">全自动流程：先读取作者名 → 库中已有该作者则追加新样本，没有则自动建档。每次只采新的，重复的自动跳过（断点续采）。</div>
+        <div class="mp-hint">全自动流程：先读取作者名 → 库中已有该作者则追加新样本，没有则自动建档。每次只采新的，重复的自动跳过（断点续采）。</div>
         <div class="set-row" style="margin-top:10px">
-          <span class="mp-note" style="flex:1">需要清理错误采集的内容？</span>
-          <button class="btn ghost btn-model" id="btnManageLib">管理采集库</button>
+          <button class="btn ghost btn-model" id="btnManageLib" style="flex:1">管理采集库</button>
         </div>
       </div>
 
       <div class="card">
         <h2><span class="badge">✦</span>文风提炼</h2>
-        <div class="mp-note" id="profileLibHint" style="margin-bottom:10px">加载中…</div>
+        <div class="mp-status" id="profileLibHint">加载中…</div>
+        <div class="mp-k">提炼作者文风（指定作者）</div>
         <div class="set-row">
-          <select id="profileSourceSel"><option value="">（加载中…）</option></select>
-          <button class="btn primary btn-model" id="btnProfile" disabled>提炼作者文风</button>
+          <select id="profileSourceSel" style="flex:1"><option value="">（加载中…）</option></select>
+          <button class="btn primary btn-model" id="btnProfile" disabled>提炼</button>
         </div>
+        <div class="mp-k">提炼通用文风（跨作者）</div>
         <div class="set-row">
-          <button class="btn primary btn-model" id="btnGeneralProfile" style="flex:1">提炼通用文风（跨作者）</button>
+          <button class="btn primary btn-model" id="btnGeneralProfile" style="flex:1">提炼通用文风</button>
         </div>
-        <div class="mp-note">样本来自采集库；作者名与采集库一致。提炼需调用 LLM（约 1-3 分钟），完成后自动切换为该文风。</div>
+        <div class="mp-hint">样本来自采集库；作者名与采集库一致。提炼需调用 LLM（约 1-3 分钟），完成后自动切换为该文风。</div>
       </div>
     </div>
   </div>
@@ -674,6 +688,8 @@
         <h2 style="margin-bottom:0"><span class="badge">◧</span>运行日志</h2>
         <div class="spacer"></div>
         <label class="autoscroll"><input type="checkbox" id="autoScroll" checked>自动滚动</label>
+        <button class="btn ghost sm" id="btnLogCopy" title="复制日志内容到剪贴板">复制</button>
+        <button class="btn ghost sm" id="btnLogClear" title="清空界面日志（不影响后端日志文件）">清空</button>
       </div>
       <div class="progress-wrap" id="progressWrap">
         <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
@@ -941,6 +957,45 @@ function addLog(text, cls) {
   box.appendChild(line);
   if ($("autoScroll").checked) box.scrollTop = box.scrollHeight;
 }
+
+function clearLog() {
+  const box = $("logBox");
+  box.innerHTML = '<div class="placeholder">日志已清空。点击「运行」开始，日志将实时显示在这里。</div>';
+}
+
+function copyLog() {
+  const box = $("logBox");
+  const text = [...box.querySelectorAll(".log-line")].map((l) => l.textContent).join("\n");
+  if (!text) { showStStatus("日志为空", "err"); return; }
+  const lines = text.split("\n").length;
+  const ok = () => showStStatus(`日志已复制（${lines} 行）`, "ok");
+  const fail = () => showStStatus("复制失败：剪贴板不可用", "err");
+  // 主路径：Clipboard API（要求页面焦点）
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(ok, () => legacyCopy(text) ? ok() : fail());
+  } else {
+    legacyCopy(text) ? ok() : fail();
+  }
+}
+
+function legacyCopy(text) {
+  // 后备：execCommand 复制（无焦点/旧环境仍可用）
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const done = document.execCommand("copy");
+    ta.remove();
+    return done;
+  } catch (e) { return false; }
+}
+
+$("btnLogClear").addEventListener("click", clearLog);
+$("btnLogCopy").addEventListener("click", copyLog);
 
 function handleLogEvent(ev, cls) {
   const payload = JSON.parse(ev.data);
