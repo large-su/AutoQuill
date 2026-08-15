@@ -134,6 +134,22 @@ class TaskRunner:
     # ---------------- 任务体 ----------------
 
     def _run_task(self, spec: _RunSpec):
+        # 闭环兜底：Web 通道生成任务运行前检测 DeepSeek 登录态。
+        # 此时任务浏览器尚未启动（首次 get_browser 在 _dispatch 里），
+        # 独立检测实例可安全使用同一 profile；运行中浏览器已占用，
+        # 该检测会锁冲突误报，故只在此处（运行前）检查一次。
+        if spec.mode in ("generate", "single", "batch"):
+            from config import LLM_MODE
+            if LLM_MODE == "web":
+                from applications.zhihu_story.browser_adapter import (
+                    web_llm_logged_in)
+                if not web_llm_logged_in():
+                    self._finish(
+                        "error",
+                        "Web 通道需要先登录 DeepSeek 网页版："
+                        "请点右上角「设置」→ 引导窗口「打开 Edge 登录 "
+                        "DeepSeek」，完成后重新运行")
+                    return
         # 防卡死：workflow 内部有阻塞 input()（base.py:98 API 失败回退、
         # zhihu.py:204 手动选题编号），Web 运行一律给默认值
         _orig_input = builtins.input
@@ -584,9 +600,41 @@ def api_mode():
 
 @app.post("/api/mode")
 def api_set_mode(spec: _ModeSpec):
-    """运行时切换生成通道（立即生效，持久化到 webui_model.json）。"""
+    """运行时切换生成通道（立即生效，持久化到 webui_model.json）。
+
+    闭环预检：切 web 要求 DeepSeek 网页版已登录、切 api 要求已配置
+    API Key——未满足则拒绝切换，返回 needs 标记让前端弹对应引导
+    （登录/填 key 完成后可再次切换）。
+    """
     from config import set_runtime_mode
     try:
+        if spec.mode not in ("api", "web"):
+            raise HTTPException(400, f"未知生成通道：{spec.mode}")
+        from config import LLM_MODE
+        if spec.mode == LLM_MODE:
+            return {"ok": True, "effective": {"mode": spec.mode}}
+        if spec.mode == "web":
+            # 强制真实检测（不走 15s 缓存）：登录刚完成时缓存可能仍为
+            # False，误拦会让用户以为切换功能坏了
+            from applications.zhihu_story.browser_adapter import (
+                web_llm_logged_in)
+            if not web_llm_logged_in():
+                raise HTTPException(400, {
+                    "detail": "DeepSeek 网页版尚未登录，无法切换。"
+                              "请在引导窗口中打开 Edge 完成登录后重试。",
+                    "needs": "deepseek_login",
+                })
+        else:
+            from config import (LLM_MODEL_ID, LLM_PROVIDER,
+                                _load_provider_config)
+            key = (_load_provider_config(LLM_PROVIDER, LLM_MODEL_ID)
+                   .get("apiKey") or "").strip()
+            if not key or key.startswith("sk-your-"):
+                raise HTTPException(400, {
+                    "detail": "尚未配置 API Key，无法切换。"
+                              "请在设置中填写有效的 API Key 后重试。",
+                    "needs": "api_key",
+                })
         eff = set_runtime_mode(spec.mode)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -763,6 +811,10 @@ def _start_login_thread(kind, flow_call, log_name):
         try:
             ok, msg = flow_call()
             log.info("首启引导：%s%s", log_name, "成功" if ok else f"失败：{msg}")
+            if ok and kind == "deepseek":
+                # 清缓存：登录刚完成时 setup/status 的 15s 缓存可能仍为
+                # False，不立即反映会让切换/引导误判未登录
+                _web_llm_cache.update(ts=0.0, ok=False)
             if not ok:
                 _login_error = msg
         except Exception as exc:

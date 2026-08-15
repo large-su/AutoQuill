@@ -150,19 +150,107 @@ class TestServerAPI(unittest.TestCase):
         self.assertIn("web", data["allowed"])
 
     def test_mode_post_switch(self):
+        # 闭环预检：切 web 需 DeepSeek 已登录（mock 通过，免真实拉起 Edge）
+        import applications.zhihu_story.browser_adapter as ba
         import config
         orig = config.LLM_MODE
         try:
-            r = self.client.post("/api/mode", json={"mode": "web"})
-            self.assertEqual(r.status_code, 200)
-            self.assertEqual(r.json()["effective"]["mode"], "web")
-            self.assertEqual(config.LLM_MODE, "web")
+            config.set_runtime_mode("api", persist=False)  # 起点非 web
+            with mock.patch.object(ba, "web_llm_logged_in",
+                                   return_value=True):
+                r = self.client.post("/api/mode", json={"mode": "web"})
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.json()["effective"]["mode"], "web")
+                self.assertEqual(config.LLM_MODE, "web")
+        finally:
+            config.set_runtime_mode(orig, persist=False)
+
+    def test_mode_post_web_requires_login(self):
+        # 闭环：切 web 且未登录 → 拒绝并带 needs=deepseek_login，模式不变
+        import applications.zhihu_story.browser_adapter as ba
+        import config
+        orig = config.LLM_MODE
+        try:
+            config.set_runtime_mode("api", persist=False)  # 起点非 web
+            with mock.patch.object(ba, "web_llm_logged_in",
+                                   return_value=False):
+                r = self.client.post("/api/mode", json={"mode": "web"})
+                self.assertEqual(r.status_code, 400)
+                self.assertEqual(r.json()["detail"]["needs"],
+                                 "deepseek_login")
+                self.assertEqual(config.LLM_MODE, "api")
+        finally:
+            config.set_runtime_mode(orig, persist=False)
+
+    def test_mode_post_api_requires_key(self):
+        # 闭环：切 api 且未配置 key → 拒绝并带 needs=api_key，模式不变
+        import config
+        orig = config.LLM_MODE
+        try:
+            config.set_runtime_mode("web", persist=False)  # 起点非 api
+            with mock.patch.object(
+                    config, "_load_provider_config",
+                    return_value={"apiKey": "sk-your-placeholder"}):
+                r = self.client.post("/api/mode", json={"mode": "api"})
+                self.assertEqual(r.status_code, 400)
+                self.assertEqual(r.json()["detail"]["needs"], "api_key")
+                self.assertEqual(config.LLM_MODE, "web")
+
+            # key 有效 → 放行
+            with mock.patch.object(
+                    config, "_load_provider_config",
+                    return_value={"apiKey": "sk-real-key-123"}):
+                r = self.client.post("/api/mode", json={"mode": "api"})
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.json()["effective"]["mode"], "api")
         finally:
             config.set_runtime_mode(orig, persist=False)
 
     def test_mode_post_invalid(self):
         r = self.client.post("/api/mode", json={"mode": "gpu"})
         self.assertEqual(r.status_code, 400)
+
+    def test_run_web_gate_blocks_when_not_logged_in(self):
+        # 闭环兜底：Web 通道生成任务运行时未登录 → 直接 error，不进 _dispatch
+        import applications.zhihu_story.browser_adapter as ba
+        import config
+        runner = server.TaskRunner()
+        spec = server._RunSpec(mode="generate")
+        with mock.patch.object(config, "LLM_MODE", "web"):
+            with mock.patch.object(ba, "web_llm_logged_in",
+                                   return_value=False):
+                with mock.patch.object(runner, "_dispatch") as m:
+                    runner._run_task(spec)
+        self.assertEqual(runner.state, "error")
+        self.assertIn("登录", runner.message)
+        m.assert_not_called()
+
+    def test_run_web_gate_allows_when_logged_in(self):
+        import applications.zhihu_story.browser_adapter as ba
+        import config
+        runner = server.TaskRunner()
+        spec = server._RunSpec(mode="generate")
+        with mock.patch.object(config, "LLM_MODE", "web"):
+            with mock.patch.object(ba, "web_llm_logged_in",
+                                   return_value=True):
+                with mock.patch.object(runner, "_dispatch",
+                                       return_value=True) as m:
+                    runner._run_task(spec)
+        self.assertEqual(runner.state, "done")
+        m.assert_called_once_with(spec)
+
+    def test_run_web_gate_skips_for_api_mode(self):
+        # API 模式不查 DeepSeek 登录态（不应拉起浏览器）
+        import applications.zhihu_story.browser_adapter as ba
+        import config
+        runner = server.TaskRunner()
+        spec = server._RunSpec(mode="generate")
+        with mock.patch.object(config, "LLM_MODE", "api"):
+            with mock.patch.object(ba, "web_llm_logged_in") as m:
+                with mock.patch.object(runner, "_dispatch",
+                                       return_value=True):
+                    runner._run_task(spec)
+        m.assert_not_called()
 
     def test_browser_get(self):
         r = self.client.get("/api/browser")
