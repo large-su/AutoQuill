@@ -225,20 +225,30 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         meta_tag = " +心法" if injected else ""
         mode_str = f"参考文章模式{meta_tag}（{len(reference_answer or '')} 字符）"
 
-    # === 风格签名注入（通用在前，作者专用在后） ===
+    # === 风格签名注入（二选一：通用模板 或 具体作者签名，不再叠加） ===
+    # 选中具体作者时只注入该作者签名，避免「通用模板 + 作者」两套规则
+    # 混合（通用是跨作者模板、偏普通；叠加会让写出来的东西都一个味）。
     author_tag = ""
     if author_profile:
         try:
             from applications.zhihu_story.author_profiler import (
                 render_style_section, render_general_section,
                 load_general_profile)
-            general = load_general_profile()
-            general_section = render_general_section(general)
-            if general_section:
-                user_message += general_section
-                author_tag = " +通用风格"
-            user_message += render_style_section(author_profile)
-            author_tag += f" +作者:{author_profile.get('author', '?')}"
+            # 判断是否为「通用」模板：通用 profile 的 author 键为 "通用"
+            # （内置文件即如此）；否则视为具体作者签名。
+            is_general = author_profile.get("author") in (None, "", "通用")
+            if is_general:
+                # 只注入通用模板（用户选"通用"或未置空时）
+                general = author_profile if author_profile.get("signature") \
+                    else load_general_profile()
+                general_section = render_general_section(general)
+                if general_section:
+                    user_message += general_section
+                    author_tag = " +通用风格"
+            else:
+                # 只注入选中作者的签名，不再叠加通用模板
+                user_message += render_style_section(author_profile)
+                author_tag = f" +作者:{author_profile.get('author', '?')}"
         except Exception as e:
             log.warning(f"  [作者风格注入] 渲染失败，跳过：{e}")
     mode_str = mode_str + author_tag

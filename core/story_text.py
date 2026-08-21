@@ -605,6 +605,45 @@ def strip_json_fences(text):
     return clean.strip()
 
 
+def _find_balanced_json_blocks(text):
+    """字符串感知地扫描文本，返回所有平衡的 JSON 块（最外层优先）。
+
+    遇到 `{`/`[` 起一块，用栈计数定位匹配的 `}`/`]`；在字符串内（`"…"`
+    且未被 `\\"` 转义）遇到的括号不计入深度，避免字符串值里的 `}` 提前
+    截断。返回按出现顺序排列的块列表，调用方按长度倒序尝试即可拿到
+    最外层整块，也能忽略 JSON 之后的尾随内容（如多余的 `}`）。"""
+    blocks = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "{[":
+            depth, j, in_str, esc = 0, i, False, False
+            while j < n:
+                c = text[j]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif c == "\\":
+                        esc = True
+                    elif c == '"':
+                        in_str = False
+                else:
+                    if c == '"':
+                        in_str = True
+                    elif c in "[{":
+                        depth += 1
+                    elif c in "]}":
+                        depth -= 1
+                        if depth == 0:
+                            blocks.append(text[i:j + 1])
+                            break
+                j += 1
+            i = j
+        else:
+            i += 1
+    return blocks
+
+
 def extract_json_block(text):
     """从 LLM 回复提取 JSON：剥围栏后整体解析（单次尝试）。
 
@@ -614,7 +653,17 @@ def extract_json_block(text):
     try:
         return json.loads(strip_json_fences(text))
     except (json.JSONDecodeError, TypeError):
-        return None
+        pass
+    # 整体解析失败：用字符串感知的平衡块提取（忽略尾随内容/字符串内括号），
+    # strict=False 允许字符串值里的控制字符（LLM 常把原文换行直接塞进
+    # 字符串而未转义）。按块长从大到小尝试，先拿最外层整块。
+    blocks = sorted(_find_balanced_json_blocks(text), key=len, reverse=True)
+    for block in blocks:
+        try:
+            return json.loads(block, strict=False)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return None
 
 
 _SCORE_OBJ_RE = re.compile(

@@ -298,6 +298,7 @@ class DeepSeekDriver(WebLLMDriver):
         stop_seen = False  # 停止按钮曾出现（生成中）→ 消失才算完成
         body_started = False  # 正文已出现 → 之后只打生成心跳（两阶段）
         start = time.time()
+        last_beat = time.time()  # 兜底心跳：无长度信号超时后仍打日志
         while time.time() < deadline:
             _check_cancel()
             cur_len = self._current_reply_len()
@@ -316,16 +317,24 @@ class DeepSeekDriver(WebLLMDriver):
             if cur_len != last_len:
                 stable = 0
                 last_len = cur_len
+                last_beat = time.time()
                 if cur_len:
                     body_started = True
                     log.info("故事生成中… 已生成 %d 字", cur_len)
             elif not body_started and think_len != last_think:
                 stable = 0
                 last_think = think_len
+                last_beat = time.time()
                 if think_len:
                     log.info("模型思考中… 已思考 %d 字符", think_len)
             else:
                 stable += 1
+            # 兜底心跳：正文/思考长度选器在特定页面态下可能一直匹配不到，
+            # 导致长时间零日志（观感"卡死"）。超时后打进度，不静默。
+            if time.time() - last_beat >= 10:
+                log.info("模型响应中… 已用时 %.0fs（内容仍在生成/思考）",
+                         time.time() - start)
+                last_beat = time.time()
             if stable >= stable_count and cur_len:
                 # read-back 验证：稳定可能是停顿（LLM 输出间歇），等
                 # READBACK 毫秒重读，长度变化则说明仍在生成、继续等待

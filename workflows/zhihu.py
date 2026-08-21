@@ -494,8 +494,9 @@ class ZhihuWorkflow(WorkflowBase):
 
         一批 PARALLEL_EXTRACT_LIMIT 个候选并行提取；过短/不可回答/
         低赞各自记录，不阻塞其他候选。返回 (title, answer, footer,
-        final_url, gate_reject_count)；整批全败返回 None（调用方整批
-        重选，attempted 已累计排除）。
+        final_url, gate_reject_count)；整批全败返回 (None,
+        gate_reject_count)（调用方累加拒绝统计后整批重选，attempted
+        已累计排除）。
         """
         from config.story import (
             MIN_ANSWER_LENGTH, MATERIAL_MIN_LIKES, PARALLEL_EXTRACT_LIMIT)
@@ -582,6 +583,11 @@ class ZhihuWorkflow(WorkflowBase):
                                 f"（第 {attempt}/{MAX_TOPIC_RETRY} 批）")
                 result = self._extract_auto_parallel(browser, attempted)
                 if result is not None:
+                    if result[0] is None:
+                        # 整批全败：_extract_auto_parallel 返回
+                        # (None, 点赞门槛拒绝数) → 累加统计后整批重选
+                        gate_reject_count += result[1]
+                        continue
                     title, answer, footer, final_url, rejects = result
                     gate_reject_count += rejects
                     return title, answer, footer, final_url

@@ -63,6 +63,15 @@ EDGE_PATH = _find_edge()
 USER_DATA_DIR = _data_path("data", "browser_profile")
 STORAGE_STATE_PATH = _data_path("config", "browser_state.json")
 
+# 无头模式下 Playwright 默认 UA 含 "HeadlessChrome"，知乎据此不加载
+# 作者内容列表（列表空 → 采集 0 篇、判定失败；前台正常）。用去掉
+# Headless 的正常 Edge UA 覆盖。版本号与当前 Edge/Chromium 对齐，
+# Edge 升级后仅需同步此处版本号。
+_CLEAN_EDGE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0"
+)
+
 _ZHIHU_HOME = "https://www.zhihu.com/"
 
 # 页面交互超时（毫秒）：所有 evaluate/goto 必须有界。
@@ -255,6 +264,20 @@ def normalize_question_url(href):
     return f"https://www.zhihu.com/question/{m.group(1)}"
 
 
+def normalize_author_url(url):
+    """作者页 URL 归一到「回答」列表：/posts（文章）→ /answers（回答）。
+
+    采集管线按回答提取（get_author_answer / extract_answer_id），文章页
+    /p/ 链接不在支持范围；用户常粘贴 /posts 链接，自动归一到 /answers
+    以免读空、误判为"无文章"。无法识别时原样返回。"""
+    if not url:
+        return url
+    m = re.match(r"^(https?://[^/]+/people/[^/?#]+)/posts(?:[/?#]|$)", url.strip())
+    if m:
+        return m.group(1) + "/answers"
+    return url.strip()
+
+
 def extract_answer_id(href):
     """从链接提取答案 ID；无法识别（非 /answer/ 链接）返回 None。
 
@@ -311,7 +334,7 @@ class ZhihuBrowser:
                 "未找到系统 Microsoft Edge！请安装 Edge 后重试"
                 "（或设置 AQ_EDGE_PATH 环境变量指向 msedge.exe）")
         try:
-            self.context = self._pw.chromium.launch_persistent_context(
+            launch_kwargs = dict(
                 user_data_dir=self.user_data_dir,
                 executable_path=EDGE_PATH,
                 headless=self.headless,
@@ -319,6 +342,12 @@ class ZhihuBrowser:
                 timeout=_LAUNCH_TIMEOUT_MS,
                 args=["--disable-blink-features=AutomationControlled"],
             )
+            if self.headless:
+                # 无头 UA 含 HeadlessChrome → 知乎不渲染作者列表，
+                # 用去掉 Headless 的正常 Edge UA 覆盖。
+                launch_kwargs["user_agent"] = _CLEAN_EDGE_UA
+            self.context = self._pw.chromium.launch_persistent_context(
+                **launch_kwargs)
         except Exception:
             # 启动失败：丢弃半初始化驱动，避免残留进程占住 profile 锁
             self._pw = None
@@ -607,6 +636,7 @@ class ZhihuBrowser:
         列表轮询等待：渲染慢时（无头模式/慢网络）一次固定等待常
         读空——V4.2.2 用户反馈无头采集 0 篇（「答案列表未出现」×5
         后列表读尽，切前台同作者立即可采）。轮询直到链接非空。"""
+        author_page_url = normalize_author_url(author_page_url)
         self.page.goto(author_page_url, wait_until="domcontentloaded",
                        timeout=_NAV_TIMEOUT)
         deadline = time.time() + 20

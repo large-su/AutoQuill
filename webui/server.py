@@ -269,7 +269,7 @@ class TaskRunner:
                 "title": title, "answer": answer,
                 "footer": footer or {}, "url": final_url or url or "",
             }
-            story = wf.generate_story(title, answer)
+            story, _gen_ok = wf.generate_story_with_retry(title, answer)
             if not story:
                 raise RuntimeError("生成失败（模型无输出）")
             md_path = wf.save_story_file(story)

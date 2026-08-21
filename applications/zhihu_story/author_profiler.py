@@ -41,6 +41,11 @@ _SAMPLE_HEAD = 1200
 _SAMPLE_MIDDLE = 600
 _SAMPLE_TAIL = 1200
 
+# 剖析时喂给 LLM 的代表作上限：按经验权重（点赞×新鲜度）取前 N 篇。
+# 全量塞入会让 prompt 膨胀到十几万字符，模型易给出残缺/无效 JSON、且
+# 质量不稳；聚焦高赞与近期代表作，既提高解析成功率也提高风格可信度。
+MAX_PROFILE_STORIES = 12
+
 
 # ============================================================
 # 1. 读取采集库
@@ -446,16 +451,9 @@ def _parse_profile_json(text):
     """从 LLM 回复中解析技能签名 JSON。先公共整块解析，失败再剥围栏
     取首尾大括号切片兜底；两者都要求 dict 且含 style 键。"""
     profile = extract_json_block(text)
-    if isinstance(profile, dict) and "style" in profile:
-        return profile
-    cleaned = strip_json_fences(text)
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        profile = json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError:
-        return None
+    # extract_json_block 已做剥围栏 + 字符串感知平衡块 + strict=False
+    # （嵌套大括号、字符串内换行/控制字符、JSON 后尾随内容都能处理）。
+    # 成功标准：dict 且含 style 键。
     if not isinstance(profile, dict) or "style" not in profile:
         return None
     return profile
@@ -572,6 +570,10 @@ def profile_author(author, min_likes=0, out_dir=None, progress=None):
         log.warning("author_profiler: 作者「%s」可用故事不足（%d 篇），"
                     "至少需要 2 篇", author, len(stories))
         return None
+    # 聚焦代表作：只取权重最高的前 N 篇，避免 prompt 过大导致 LLM
+    # 输出残缺 JSON、解析失败（历史 bug：35 篇 → 108KB prompt，两连败）。
+    if len(stories) > MAX_PROFILE_STORIES:
+        stories = stories[:MAX_PROFILE_STORIES]
 
     _report(progress, f"已读取 {len(stories)} 篇样本，正在做文本统计…", 15)
     stats = compute_text_stats(stories)

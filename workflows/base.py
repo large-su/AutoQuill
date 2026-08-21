@@ -122,6 +122,30 @@ class WorkflowBase:
         driver = get_driver()
         return driver.generate(full_prompt)
 
+    def generate_story_with_retry(self, title, answer, retries=1,
+                                  min_length=500):
+        """生成故事；无输出或过短时自动重试，避免单次失败直接判败。
+
+        Web 通道同样做 clean_story_output + fix_story_format（与
+        run_single 原逻辑一致）。返回 (story, ok)；ok=False 表示多次
+        尝试仍未产出合格文本（调用方再决定跳过/降级）。
+        """
+        from config import LLM_MODE
+        from core.story_text import clean_story_output, fix_story_format
+        last = None
+        for attempt in range(retries + 1):
+            story = self.generate_story(title, answer)
+            if story and LLM_MODE == "web":
+                story = fix_story_format(clean_story_output(story))
+            if story and len(story) >= min_length:
+                return story, True
+            last = story
+            if attempt < retries:
+                log.warning(
+                    "故事生成失败或过短（%d字符），第 %d 次重试…",
+                    len(story or ""), attempt + 1)
+        return last, False
+
     # ============================================================
     # 保存故事文件（通用）
     # ============================================================
@@ -176,11 +200,9 @@ class WorkflowBase:
             except Exception:
                 log.warning("on_extracted 回调失败", exc_info=True)
 
-        # 采样模式：参考文章片段直接注入（零 LLM 提炼），不再走配方
-        story = self.generate_story(title, answer)
-
-        if story and LLM_MODE == "web":
-            story = fix_story_format(clean_story_output(story))
+        # 采样模式：参考文章片段直接注入（零 LLM 提炼），不再走配方。
+        # 生成失败/过短时自动重试一次（内部已做 Web 通道清洗修复）。
+        story, _gen_ok = self.generate_story_with_retry(title, answer)
 
         if not story or len(story) < 500:
             log.error(f"故事过短或生成失败"

@@ -75,7 +75,11 @@ def _run_quiet(cmd, timeout=20):
 
 def find_python():
     """找一个能用的 Python 解释器，返回 (命令列表, 可执行文件路径)。"""
+    # 源码态优先用当前解释器：启动器是用哪个 python 跑的，就用哪个。
+    # 否则 PATH 里 `python` 可能指向无依赖的解释器（如 conda base），
+    # 导致"缺少运行依赖"的误判——即使已用 .venv 的 python 启动。
     candidates = [
+        ("当前解释器 (sys.executable)", [sys.executable]),
         ("python", ["python"]),
         ("py -3（Python 启动器）", ["py", "-3"]),
         ("python3", ["python3"]),
