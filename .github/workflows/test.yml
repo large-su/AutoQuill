@@ -20,5 +20,11 @@ jobs:
           pip install fastapi uvicorn pydantic requests httpx 2>/dev/null || true
           pip install -r requirements.txt 2>/dev/null || true
 
+      - name: Prepare local-only config for tests
+        # config/llm_providers.json 含用户密钥、不入库（.gitignore）；
+        # CI 用占位示例文件生成，保证 config 模块可导入（单测只读不调 API）。
+        run: |
+          cp config/llm_providers.example.json config/llm_providers.json
+
       - name: Run unit tests (skip browser-dependent suites)
         run: python tests/run_all.py
