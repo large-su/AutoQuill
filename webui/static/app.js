@@ -1467,9 +1467,8 @@ async function loadDrafts() {
       setDrfBar(rs.pct, rs.progress);
     } else if (rs.status === "error") {
       showDraftStatus("上次刷新失败：" + esc(rs.error), "err", 8000);
-    } else {
-      $("draftStatus").className = "dash-status";
     }
+    // refresh/delete 完成提示由各自流程的 showDraftStatus 负责保留并自动隐藏
   } catch (e) {
     $("draftList").innerHTML = '<div class="dft-empty">⚠️ 加载失败：' + esc(e.message) + "</div>";
   }
