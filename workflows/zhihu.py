@@ -489,6 +489,38 @@ class ZhihuWorkflow(WorkflowBase):
         finally:
             browser.switch_page(main_page)
 
+    def _ai_pick_best(self, good):
+        """大模型从合格候选中挑最适合写知乎故事/小说的 1 个。
+
+        good: [{q:{title,href}, answer, footer, ...}]
+        返回候选 dict（_extract_parallel_top 用它取 best）；
+        开关关闭 / Web 模式 / LLM 失败时返回 None（调用方沿用点赞最高）。
+        """
+        if len(good) <= 1:
+            return None
+        try:
+            from config.story import QUESTION_AI_SCREEN
+            from llm_api import screen_question_pool
+            if not QUESTION_AI_SCREEN:
+                return None
+            cands = [{"index": i + 1,
+                      "title": r["q"]["title"],
+                      "answer": r.get("answer") or "",
+                      "_raw": r}
+                     for i, r in enumerate(good)]
+            picked = screen_question_pool(cands, keep_best_only=True)
+            if not picked:
+                return None
+            best_raw = picked[0].get("_raw")
+            if not best_raw:
+                return None
+            log.info("大模型筛选：从 %d 个合格候选中挑出最适合写故事的 1 个：%s",
+                     len(good), best_raw["q"]["title"][:40])
+            return best_raw
+        except Exception as exc:
+            log.warning("大模型筛选不可用（沿用点赞最高）：%s", exc)
+            return None
+
     def _extract_auto_parallel(self, browser, attempted):
         """全自动选题并行提取一批候选，取点赞最高的合格者。
 
@@ -530,7 +562,8 @@ class ZhihuWorkflow(WorkflowBase):
 
         good.sort(key=lambda r: (r.get("footer") or {}).get("likes") or 0,
                   reverse=True)
-        best = good[0]
+        # 大模型筛选：排除不适合写故事的候选后，挑最适合的 1 个（API 模式）
+        best = self._ai_pick_best(good) or good[0]
         footer = best.get("footer") or {}
         final_url = (normalize_question_url(best["q"]["href"])
                      or best["q"]["href"])
