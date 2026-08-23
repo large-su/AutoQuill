@@ -16,6 +16,8 @@ data/collected_stories.jsonl
 data/stories/
 data/usage_history.jsonl
 data/usage_report.png
+# 已发布内容管理快照（从知乎创作中心导出的用户数据）
+data/published_answers_*.json
 
 # 个人资产（作者蒸馏档案、元学习知识库——只留本地，不入库）
 data/authors/

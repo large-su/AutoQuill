@@ -65,8 +65,13 @@ class WorkflowBase:
     # 步骤3：生成故事（通用，API/Web 分发）
     # ============================================================
 
-    def generate_story(self, question_title, top_answer, recipe=None):
-        """根据 LLM_MODE 分发到 API 或 Web 模式生成故事"""
+    def generate_story(self, question_title, top_answer, recipe=None,
+                       feedback=None):
+        """根据 LLM_MODE 分发到 API 或 Web 模式生成故事。
+
+        feedback：重试修正反馈（str 或 str 列表，可选），透传给 prompt
+        构建，供模型在新一轮生成中针对性修正上一版的问题。
+        """
         from config import LLM_MODE
 
         log.info("=" * 50)
@@ -78,17 +83,20 @@ class WorkflowBase:
         log.info("=" * 50)
 
         if LLM_MODE == "api":
-            return self._generate_api(question_title, top_answer, recipe)
+            return self._generate_api(question_title, top_answer, recipe,
+                                      feedback=feedback)
         else:
-            return self._generate_web(question_title, top_answer, recipe)
+            return self._generate_web(question_title, top_answer, recipe,
+                                      feedback=feedback)
 
-    def _generate_api(self, question_title, top_answer, recipe=None):
+    def _generate_api(self, question_title, top_answer, recipe=None,
+                      feedback=None):
         """API 模式：流式 HTTP 请求"""
         from llm_api import generate_story
 
         author = getattr(self, "author", None)
         story = generate_story(question_title, top_answer, recipe=recipe,
-                               author=author)
+                               author=author, feedback=feedback)
         if not story:
             log.error("API 生成失败")
             from desktop_utils import focus_edge
@@ -96,18 +104,20 @@ class WorkflowBase:
             if fallback == 'y':
                 focus_edge()
                 return self._generate_web(
-                    question_title, top_answer, recipe
+                    question_title, top_answer, recipe, feedback=feedback
                 )
             return None
         return story
 
-    def _generate_web(self, question_title, top_answer, recipe=None):
+    def _generate_web(self, question_title, top_answer, recipe=None,
+                      feedback=None):
         """Web 模式：通过 Web Driver 操控 LLM 网站（单轮生成）"""
         return self._generate_web_short_form(
-            question_title, top_answer, recipe
+            question_title, top_answer, recipe, feedback=feedback
         )
 
-    def _generate_web_short_form(self, question_title, top_answer, recipe=None):
+    def _generate_web_short_form(self, question_title, top_answer, recipe=None,
+                                 feedback=None):
         """Web 短文模式：单轮 prompt 直接出正文"""
         from web_drivers import get_driver
         from llm_api import build_story_prompt, _load_author_profile_or_none
@@ -116,35 +126,83 @@ class WorkflowBase:
         full_prompt, mode_str = build_story_prompt(
             question_title, top_answer, recipe,
             author_profile=_load_author_profile_or_none(author),
+            feedback=feedback,
         )
         log.info(f"  Prompt 模式：{mode_str}")
 
         driver = get_driver()
         return driver.generate(full_prompt)
 
-    def generate_story_with_retry(self, title, answer, retries=1,
-                                  min_length=500):
-        """生成故事；无输出或过短时自动重试，避免单次失败直接判败。
+    @staticmethod
+    def _format_format_failure(details):
+        """把 validate_story_format 的 details 字典渲染成简短原因串。"""
+        if not details:
+            return ""
+        parts = []
+        for k, v in details.items():
+            if k == "原因":
+                parts.append(f"原因：{v}")
+            else:
+                parts.append(f"{k}：{v}")
+        return "；".join(parts)
 
-        Web 通道同样做 clean_story_output + fix_story_format（与
-        run_single 原逻辑一致）。返回 (story, ok)；ok=False 表示多次
-        尝试仍未产出合格文本（调用方再决定跳过/降级）。
+    def generate_story_with_retry(self, title, answer, max_attempts=None,
+                                  min_length=500):
+        """生成故事；无输出 / 过短 / 格式不合规时带失败原因反馈重试。
+
+        ★ 带反馈的重试：每轮把上一版的失败原因（字数/章节/长段/引号等）
+        注入重试 prompt，让模型针对性修正——比同 prompt 盲目重试的收敛率
+        显著更高，明显提升「单轮完整链路」一次成功概率。
+
+        达到 STORY_GENERATE_MAX_ATTEMPTS（默认 3）次仍未产出合格文本时，
+        返回最高分版本（可能非空，调用方存盘供人工核对）且 ok=False。
+
+        Web 通道同样做 clean_story_output + fix_story_format。
+        返回 (story, ok)：ok=True 表示最后一次产出格式合规且不少于
+        min_length；ok=False 表示多次尝试仍未合格（story 为最高分版本）。
         """
         from config import LLM_MODE
-        from core.story_text import clean_story_output, fix_story_format
-        last = None
-        for attempt in range(retries + 1):
-            story = self.generate_story(title, answer)
+        from config.story import STORY_GENERATE_MAX_ATTEMPTS
+        from core.story_text import (
+            clean_story_output, fix_story_format, validate_story_format,
+        )
+
+        max_attempts = max_attempts or STORY_GENERATE_MAX_ATTEMPTS
+        best = None            # 兜底：多次失败时返回更高分版本
+        best_score = -1
+        last_reason = None     # 上一轮失败原因（重试反馈）
+
+        for attempt in range(max_attempts):
+            story = self.generate_story(title, answer, feedback=last_reason)
             if story and LLM_MODE == "web":
                 story = fix_story_format(clean_story_output(story))
-            if story and len(story) >= min_length:
+
+            if not story:
+                last_reason = "生成失败（模型无输出）"
+                log.warning("故事生成失败（无输出），第 %d/%d 次重试…",
+                            attempt + 1, max_attempts)
+                continue
+
+            if len(story) < min_length:
+                if best is None or len(story) > len(best):
+                    best = story
+                last_reason = f"字数过短（仅 {len(story)} 字，要求至少 " \
+                              f"{min_length} 字）"
+                log.warning("故事过短（%d字），第 %d/%d 次重试…",
+                            len(story), attempt + 1, max_attempts)
+                continue
+
+            fmt_score, is_valid, details = validate_story_format(story)
+            if is_valid:
                 return story, True
-            last = story
-            if attempt < retries:
-                log.warning(
-                    "故事生成失败或过短（%d字符），第 %d 次重试…",
-                    len(story or ""), attempt + 1)
-        return last, False
+            if fmt_score > best_score:
+                best_score, best = fmt_score, story
+            last_reason = (self._format_format_failure(details)
+                           or f"格式不合规（{fmt_score}/10）")
+            log.warning("故事格式不合规（%d/10），第 %d/%d 次重试…",
+                        fmt_score, attempt + 1, max_attempts)
+
+        return best, False
 
     # ============================================================
     # 保存故事文件（通用）
@@ -180,14 +238,6 @@ class WorkflowBase:
         立即调用（Web 控制台展示生成故事卡用；不保证已发布——
         格式不合规被跳过时同样回调，供人工核对废稿）。
         """
-        from config.story import MIN_ANSWER_LENGTH
-        from config import LLM_MODE
-        from core.story_text import (
-            validate_story_format,
-            clean_story_output,
-            fix_story_format,
-        )
-
         url = self.select_topic()
         # footer（读者互动数据）在单条流程中用不上（此流程不走元学习入池），
         # 但签名必须对齐 extract_content 的返回值。★ url 取 extract_content
@@ -200,16 +250,18 @@ class WorkflowBase:
             except Exception:
                 log.warning("on_extracted 回调失败", exc_info=True)
 
-        # 采样模式：参考文章片段直接注入（零 LLM 提炼），不再走配方。
-        # 生成失败/过短时自动重试一次（内部已做 Web 通道清洗修复）。
-        story, _gen_ok = self.generate_story_with_retry(title, answer)
+        # ★ 生成带反馈重试：无输出/过短/格式不合规都自动重试，最多
+        # STORY_GENERATE_MAX_ATTEMPTS 次；重试时把上一版的失败原因
+        #（字数/章节/长段/引号等）注入 prompt 指导模型修正。返回
+        # (story, ok)：ok=True 表示合格；ok=False 时 story 为最高分版本
+        #（可能非空，供人工核对）。
+        story, _pass = self.generate_story_with_retry(title, answer)
 
-        if not story or len(story) < 500:
-            log.error(f"故事过短或生成失败"
-                      f"（{len(story or '')}字符），跳过")
+        if not story:
+            log.error("故事生成失败（模型无输出），本轮未完成")
             return False
 
-        # 生成即存盘：即使格式不合规被跳过，废稿也要落盘供人工核对
+        # 生成即存盘：即使多次尝试仍不合规，最高分版本也要落盘供人工核对
         # （用户需要在 UI 里看到生成结果，而非静默丢弃）
         md_path = self.save_story_file(story)
         if on_story:
@@ -218,39 +270,10 @@ class WorkflowBase:
             except Exception:
                 log.warning("on_story 回调失败", exc_info=True)
 
-        # 格式合规检测
-        fmt_score, is_valid, fmt_details = validate_story_format(story)
-
-        if not is_valid:
-            # ★ 检查是否启用格式重试
-            from config.story import ENABLE_FORMAT_RETRY
-
-            if not ENABLE_FORMAT_RETRY:
-                log.warning(f"格式不合规（{fmt_score}/10），"
-                            f"ENABLE_FORMAT_RETRY=False，跳过重试，标记废稿")
-                return False
-
-            log.warning(f"格式不合规（{fmt_score}/10），重试一次...")
-            retry_story = self.generate_story(title, answer)
-            
-            if retry_story and LLM_MODE == "web":
-                retry_story = fix_story_format(clean_story_output(retry_story))
-
-            if retry_story and len(retry_story) >= 500:
-                retry_fmt, retry_valid, _ = validate_story_format(retry_story)
-                if retry_fmt > fmt_score:
-                    story = retry_story
-                    fmt_score = retry_fmt
-                    is_valid = retry_valid
-                    log.info(f"重试版本更优（{fmt_score}/10）"
-                             f"{'✓合规' if is_valid else '✗仍不合规'}")
-                else:
-                    log.info(f"重试版本未改善，使用原版（{fmt_score}/10）")
-
-            if not is_valid:
-                log.warning(f"两次生成均不合规（{fmt_score}/10），"
-                            f"标记废稿，跳过")
-                return False
+        if not _pass:
+            log.warning("多次尝试均未通过格式校验（最高分版已存盘），"
+                        "标记废稿，本轮未发布")
+            return False
 
         self.publish(story, title, url, md_path)
         log.info("本轮完成！")
@@ -455,6 +478,9 @@ class WorkflowBase:
             log.info(f"阶段3：质量评分 + 择优发布前 {actual_publish} 篇")
             log.info(f"{'─'*50}\n")
             scored = score_stories(generated)
+            if scored and not any("score" in it for it in scored):
+                log.warning("⚠ 评分未生效（评分服务商 API Key 无效或请求失败），"
+                            "将按生成顺序择优发布；请在设置→生成通道检查 API Key")
             to_publish = scored[:actual_publish]
             to_skip = scored[actual_publish:]
 
@@ -463,6 +489,16 @@ class WorkflowBase:
             detail = item.get('score_detail', {})
             detail_str = (' | '.join(f"{k}={v}" for k, v in detail.items())
                           if detail else '')
+            flavor = None
+            try:
+                from tools.ai_flavor_check import check_text
+                got = check_text(item.get("story") or "")
+                flavor = got[1] if got else None
+            except Exception:
+                flavor = None
+            if flavor is not None:
+                detail_str = (detail_str + f" | AI味={flavor}" if detail_str
+                              else f"AI味={flavor}")
             score_str = (f"[{item.get('score', '?')}分] "
                          if 'score' in item else '')
             log.info(f"    第{rank+1}名 {score_str}"

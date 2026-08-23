@@ -17,6 +17,7 @@ import builtins
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -36,15 +37,21 @@ OUTPUT_DIR = Path(paths.data("output"))
 INDEX_HTML = Path(__file__).resolve().parent / "static" / "index.html"
 
 HOST = "127.0.0.1"
-PORT = 8787
+from core.ports import WEB_PORT
+PORT = WEB_PORT
 
 # watchdog：日志超过 STALL 秒无进展或总时长超过 OVERALL 秒 → 判定卡死
 # 240s 而非 180s：慢速页面/模型首 token 前等待窗口可能较长，留足余量
 STALL_LIMIT = 240.0
 OVERALL_LIMIT = 900.0
+# 批量模式（Web 通道）单篇需 3-5 分钟，10 篇两两并行约 20-25 分钟；
+# 若沿用 900s 一刀切总时长会被误杀（正常推进也会超时中断）。
+OVERALL_LIMIT_BATCH = 3600.0
 
 # run 线程最后一条日志的时间戳（CaptureHandler.emit 更新）
 _last_log_ts = [0.0]
+
+# 看板/草稿箱后台任务状态与浏览器互斥已迁移至 webui/browser_tasks.py
 
 
 # ---------- LLM 通道可用性（任务前预检 / 切换 / 引导状态 / 测试连接共用） ----------
@@ -293,10 +300,18 @@ class TaskRunner:
                     sample_reference_sections(answer) if answer else ""
 
             def _on_story(story, md_path):
+                flavor = None
+                try:
+                    from tools.ai_flavor_check import check_text
+                    got = check_text(story)
+                    flavor = got[1] if got else None
+                except Exception:
+                    flavor = None
                 self.last_story = {
                     "text": story,
                     "md_path": str(md_path),
                     "chars": len(story),
+                    "ai_flavor": flavor,
                 }
 
             return wf.run_single(on_extracted=_on_extracted,
@@ -398,7 +413,9 @@ class TaskRunner:
     # ---------------- watchdog ----------------
 
     def _watchdog(self, spec: _RunSpec):
-        deadline = time.time() + OVERALL_LIMIT
+        # 批量模式放宽总时长上限（避免正常推进被一刀切误杀）
+        overall = OVERALL_LIMIT_BATCH if spec.mode == "batch" else OVERALL_LIMIT
+        deadline = time.time() + overall
         # 文风提炼是一次性 LLM 剖析（非流式），调用期间无日志，
         # 单独放宽卡死阈值（剖析请求最长可达 10 分钟）
         stall = STALL_LIMIT * 3 if spec.mode in ("profile", "general_profile") \
@@ -412,14 +429,15 @@ class TaskRunner:
                     return
             age = time.time() - _last_log_ts[0]
             if age > stall:
-                log.warning("watchdog：日志 %.0fs 无进展，判定卡死并中断",
+                log.warning("watchdog：日志 %.0fs 无进展，判定卡死并中断（非用户操作）",
                             age)
                 self._stop_flag.set()  # 取消钩子生效，检查点抛异常
                 self._set_state("timeout",
                                 f"日志 {age:.0f}s 无进展，已判定卡死")
                 return
             if time.time() > deadline:
-                self._set_state("timeout", f"总时长超 {OVERALL_LIMIT:.0f}s")
+                log.warning("watchdog：总时长超 %.0fs（非用户操作），强制中断", overall)
+                self._set_state("timeout", f"总时长超 {overall:.0f}s")
                 self._stop_flag.set()
                 return
 
@@ -494,6 +512,44 @@ def index():
                         headers={"Cache-Control": "no-store"})
 
 
+@app.get("/echarts.min.js")
+def _echarts_js():
+    """看板图表库（本地打包，离线可用）。"""
+    p = Path(__file__).resolve().parent / "static" / "echarts.min.js"
+    if not p.is_file():
+        raise HTTPException(404, "echarts.min.js 未找到")
+    return FileResponse(str(p), media_type="application/javascript")
+
+
+@app.get("/favicon.ico")
+def _favicon():
+    p = Path(__file__).resolve().parent / "static" / "favicon.ico"
+    if not p.is_file():
+        raise HTTPException(404)
+    return FileResponse(str(p), media_type="image/x-icon")
+
+
+def _static_css():
+    p = Path(__file__).resolve().parent / "static" / "style.css"
+    if not p.is_file():
+        raise HTTPException(404, "style.css 未找到")
+    return FileResponse(str(p), media_type="text/css; charset=utf-8",
+                        headers={"Cache-Control": "no-store"})
+
+
+def _static_app_js():
+    p = Path(__file__).resolve().parent / "static" / "app.js"
+    if not p.is_file():
+        raise HTTPException(404, "app.js 未找到")
+    return FileResponse(str(p), media_type="application/javascript",
+                        headers={"Cache-Control": "no-store"})
+
+
+# 为保持与历史路径一致（index.html 引用），注册 http 路径
+app.get("/style.css")(_static_css)
+app.get("/app.js")(_static_app_js)
+
+
 @app.get("/api/config")
 def api_config():
     """配置速览（只读）。模型字段取根 config 的实际生效值（运行时可切换）。"""
@@ -505,7 +561,8 @@ def api_config():
                   "AUTHOR_PROFILE",
                   "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
                   "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES",
-                  "MAX_TOPIC_RETRY", "KB_ENABLE"):
+                  "MAX_TOPIC_RETRY", "STORY_GENERATE_MAX_ATTEMPTS",
+                  "KB_ENABLE"):
             cfg[k] = getattr(sconfig, k, None)
     except Exception as exc:
         cfg["_app_error"] = str(exc)
@@ -539,6 +596,7 @@ _TUNABLE_KEYS = {
     "MAX_TOPIC_RETRY": (int, 0, 10),
     "MIN_ANSWER_LENGTH": (int, 100, 5000),
     "MATERIAL_MIN_LIKES": (int, 0, 100000),
+    "STORY_GENERATE_MAX_ATTEMPTS": (int, 1, 10),
 }
 
 
@@ -1205,9 +1263,27 @@ def api_story(name: str):
     text = path.read_text(encoding="utf-8", errors="replace")
     return {"name": name, "text": text}
 
+# ============================================================
+# 已发布内容看板 / 草稿箱素材 API：模块化后由下述注册调用挂载
+# ============================================================
+
+from webui.dashboard_api import register_dashboard
+from webui.drafts_api import register_drafts
+
+
+def _register_snapshot_api():
+    """挂载已发布内容看板与草稿箱素材的路由（保持 server 入口单一）。"""
+    register_dashboard(app)
+    register_drafts(app)
+
+
+_register_snapshot_api()
 
 def run(host=HOST, port=PORT):
     import uvicorn
+    # 本地单机守卫按实际运行端口放行（否则改端口启动会全部 403）
+    _ALLOWED_HOSTS.update({f"{host}:{port}", f"localhost:{port}"})
+    _ALLOWED_ORIGINS.update({f"http://{host}:{port}", f"http://localhost:{port}"})
     # 取消钩子：browser_adapter 检查点据此中断 workflow（CLI 下为 None）
     from applications.zhihu_story import browser_adapter
     browser_adapter.set_cancel_hook(lambda: runner._stop_flag.is_set())

@@ -9,6 +9,7 @@
 
 import json
 import logging
+import re
 
 from core.story_text import parse_score_json, strip_json_fences
 from llm_client import call_llm_non_streaming, resolve_kb_llm_config
@@ -77,6 +78,16 @@ def score_stories(stories_data):
         prompt += story_preview
         prompt += "\n"
 
+    from config import (KB_LLM_API_KEY as _kb_key,
+                         LLM_API_KEY as _root_key,
+                         LLM_API_BASE_URL as _root_url,
+                         LLM_API_MODEL as _root_model,
+                         LLM_API_EXTRA_BODY as _root_extra_body)
+
+    def _auth_error(error):
+        return bool(error and re.search(
+            r"401|403|authentication|api ?key|invalid", error, re.I))
+
     try:
         log.info("发送评分请求...")
         reply, elapsed, error = call_llm_non_streaming(
@@ -84,8 +95,19 @@ def score_stories(stories_data):
             temperature=0.3, timeout=120,
             api_key=api_key, base_url=base_url, model=_MODEL,
             extra_body=extra_body)
+        # 知识库评分 key 失效（无效/过期）时，自动回退故事生成 key 重试一次
+        if _auth_error(error) and _kb_key and _kb_key != _root_key:
+            log.warning("评分请求被拒（key 无效/过期）：%s", (error or "")[:120])
+            log.warning("知识库服务商 key 无效，改用故事生成服务商 key 重试一次")
+            reply, elapsed, error = call_llm_non_streaming(
+                prompt, max_tokens=max(4000, len(stories_data) * 350 + 500),
+                temperature=0.3, timeout=120,
+                api_key=_root_key, base_url=_root_url, model=_root_model,
+                extra_body=dict(_root_extra_body or {}))
         if error:
             log.error("评分 API 失败：%s", error)
+            log.error("提示：评分走服务商 API，请在 设置→生成通道 检查 API Key，"
+                      "或检查 config/llm_providers.json 中对应服务商的 apiKey")
             return stories_data
 
         log.info(f"评分完成（{elapsed:.1f}s）")
@@ -105,6 +127,7 @@ def score_stories(stories_data):
                     '情节节奏': s.get('plot', s.get('pacing', 0)),
                     '情感共鸣': s.get('emotion', s.get('character', 0)),
                     '真实感': s.get('authenticity', s.get('language', 0)),
+                    '自然度(去AI味)': s.get('natural', 0),
                     '结尾余味': s.get('ending', 0),
                     '格式体验': s.get('format', s.get('texture', 0)),
                 }

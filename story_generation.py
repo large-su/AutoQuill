@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 
 def generate_story(question_title, reference_answer=None, recipe=None,
-                   meta_knowledge=None, author=None):
+                   meta_knowledge=None, author=None, feedback=None):
     """
     通过 API 生成故事，支持流式输出到终端。
 
@@ -37,6 +37,8 @@ def generate_story(question_title, reference_answer=None, recipe=None,
         meta_knowledge:    跨任务积累的元知识文本（可选，外部注入用）
         author:            作者名（可选）。从 data/authors/{name}.json 加载
                            技能签名并注入 prompt（仅短文模式）
+        feedback:          重试修正反馈（可选，str 或 str 列表）。上一版
+                           故事的失败原因，非空时注入 prompt 供模型修正重写
 
     返回：
         生成的故事文本（已清洗），失败返回 None
@@ -53,6 +55,7 @@ def generate_story(question_title, reference_answer=None, recipe=None,
     user_message, mode_str = build_story_prompt(
         question_title, reference_answer, recipe,
         meta_knowledge=meta_knowledge, author_profile=author_profile,
+        feedback=feedback,
     )
 
     log.info(f"API 流式调用开始")
@@ -138,7 +141,8 @@ def _load_author_profile_or_none(author):
 
 
 def generate_story_parallel(question_title, reference_answer, task_id, progress,
-                            recipe=None, meta_knowledge=None, author=None):
+                            recipe=None, meta_knowledge=None, author=None,
+                            feedback=None):
     """
     非流式生成故事，用于多线程并行调用。
 
@@ -155,6 +159,7 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
         recipe:            知识库配方（可选，提供则使用配方模式）
         meta_knowledge:    跨任务积累的元知识文本（可选）
         author:            作者名（可选），注入其技能签名
+        feedback:          重试修正反馈（可选，str 或 str 列表）
 
     返回：
         生成的故事文本（已清洗），失败返回 None
@@ -182,6 +187,7 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
     user_message, _ = build_story_prompt(
         question_title, reference_answer, recipe,
         meta_knowledge=meta_knowledge, author_profile=author_profile,
+        feedback=feedback,
     )
 
     local_start = time.time()

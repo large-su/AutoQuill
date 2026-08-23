@@ -22,7 +22,8 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-PORT = 8787
+from core.ports import WEB_PORT
+PORT = WEB_PORT
 BASE_URL = f"http://127.0.0.1:{PORT}"
 SERVICE_ARGS = ["main.py", "--web"]
 READY_TIMEOUT = 40  # 服务就绪等待上限（秒）——打包态首次解压较慢
@@ -419,17 +420,24 @@ def _set_title(title):
 
 
 def _redirect_frozen_stdio():
-    """打包态（windowed 无控制台）把 stdout/stderr 重定向到
+    """stdout/stderr 为 None（pythonw / windowed 打包态）时重定向到
     DATA_ROOT/logs/launcher.log：启动器输出留档可查，且避免 print
-    因 stdout 为 None（windowed 模式下 PyInstaller 置空）崩溃。
-    源码态不重定向——保留调试终端。"""
-    if not getattr(sys, "frozen", False):
+    因 stdout 为 None 崩溃。
+    - 打包态：PyInstaller windowed 置空 stdout；
+    - 源码态用 pythonw 双击启动时同样置空（无控制台）。
+    普通 python 终端（有 stdout）保持原样，不重定向。"""
+    # 需要重定向的场景：打包态（frozen，windowed 无控制台，旧语义保持）
+    # 或 pythonw 源码态（stdout 为 None）。普通 python 终端不重定向。
+    needs = getattr(sys, "frozen", False) \
+        or sys.stdout is None or sys.stderr is None
+    if not needs:
         return
     try:
         log_root = data_root() / "logs"
         log_root.mkdir(parents=True, exist_ok=True)
         stream = open(log_root / "launcher.log", "a",
                       encoding="utf-8", buffering=1)
+        # needs=True 时无条件替换（frozen 或 stdout 为 None 两种场景）
         sys.stdout = stream
         sys.stderr = stream
         if sys.stdin is None:

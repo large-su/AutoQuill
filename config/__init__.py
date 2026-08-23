@@ -111,8 +111,8 @@ LLM_API_CONNECT_TIMEOUT = 20   # API 建连超时
 LLM_API_STREAM_READ_TIMEOUT = 60  # Socket 读超时；服务端心跳会重置该计时
 LLM_API_STREAM_FIRST_TOKEN_TIMEOUT = 45  # 建立流式响应后，45 秒未收到正文 token 则失败
 LLM_API_STREAM_IDLE_TIMEOUT = 60  # 已开始生成后，连续 60 秒无正文 token 则失败
-LLM_API_FREQUENCY_PENALTY = 0  # 频率惩罚：同一篇内已出现多次的词,再出现的概率降低(减少重复句式)
-LLM_API_PRESENCE_PENALTY = 0   # 存在惩罚:已出现过的词,后续一律降低概率(鼓励用新词新表达)
+LLM_API_FREQUENCY_PENALTY = 0.5  # 频率惩罚：同一篇内已出现多次的词再出现概率降低（减少复读句式/AI味）
+LLM_API_PRESENCE_PENALTY = 0.4  # 存在惩罚：已出现过的词后续一律降低概率（鼓励换新词新表达）
 
 # ============================================================
 # Web LLM 驱动配置

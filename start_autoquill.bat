@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 set "VENV=%~dp0.venv\Scripts"
 
-if not exist "%VENV%\python.exe" (
+if not exist "%VENV%\pythonw.exe" (
     echo [ERROR] Virtual environment not found at:
     echo   %VENV%
     echo.
@@ -16,11 +16,12 @@ if not exist "%VENV%\python.exe" (
     exit /b 1
 )
 
-rem Put the venv first on PATH so the launcher detects the interpreter
-rem that actually has the runtime dependencies.
+rem Put the venv first on PATH so the launcher detects the interpreter.
 set "PATH=%VENV%;%PATH%"
 
-echo Starting AutoQuill launcher...
-"%VENV%\python.exe" "%~dp0tools\launcher.py"
+rem No-console launch: pythonw has no console window, and "start"
+rem closes this cmd window immediately. Launcher/Web logs go to
+rem logs\ (launcher.log / webui.log).
+start "" "%VENV%\pythonw.exe" "%~dp0tools\launcher.py"
 
 endlocal

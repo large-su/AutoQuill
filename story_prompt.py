@@ -26,6 +26,38 @@ NAMING_CONSTRAINT = """
 如现代都市可用朴素常见的名字，古风可参考历史真实人名风格。"""
 
 
+# 行文去AI味守则：AI 生成中文故事的高频"机器味"集中在万能连接词、整齐排比、
+# 抽象形容词与机械句式。作为公共约束追加到所有模式 prompt 末尾（紧跟命名约束），
+# 让"读起来像人写的"成为与格式同等重要的硬要求。
+DEAI_STYLE_RULE = """
+
+## 行文去AI味守则（读起来要像人写的，而不是AI写的）
+
+语言层面：
+- 禁用万能连接词与套话：然而、因此、与此同时、总而言之、不可否认、
+  在这个X的时代、让我们、不禁让人感叹、意味深长地、仿佛在诉说着什么
+- 禁止整齐排比三连："不是……而是……"、连续三个同构分句的炫技排比；
+  需要对称时拆成不同长度的分句，打散节奏
+- 少用抽象形容词与情绪标签：深深地、巨大的、默默地、瞬间、终于；
+  换成具体动作、物件、声音、气味（"他很愤怒"→写他摔了茶杯，茶水泼了一地）
+- 句式长短错落：一句话超过40字必须拆；连续三句以上长句后插一句短句；
+  对话允许打断、抢白、只说一半，别让每个人都把话说完
+- 每段必须有信息增量；删除纯过渡句与"结论句"；不总结、不点题、不升华
+
+开头与结尾：
+- 第一行直接进入动作或对话，不要环境铺垫式开头（不许"窗外雨声淅沥"起笔）
+- 结尾停在画面或悬念上，禁止"这件事让我明白……"式升华收尾
+
+中文 AI 高频句式（全篇从严控制）：
+- 关联句式"一旦……就 / 只有……才 / 无论……都 / 随着……的 / 正是因为……所以 / 通过……来"
+  全篇合计不超过 2 处，能直说就直说
+- 揭露式比喻（遮羞布/面具/画皮/伪装/外衣/幌子/烟幕弹；撕下/戳穿/揭开 + 面具/真面目/本质）禁止使用
+- 极值判断（"最……的地方在于 / 真正……的是 / 更……的是 / ……之处在于"）全篇不超过 1 处
+- 比喻义抽象词（噪音/底色/滤镜/解药/拼图/镜像/缩影/棱镜/窗口/投影）能少用就少用
+- 否定式排比"不仅仅是……而是……"、三段并列堆叠要拆开
+- 删掉"金句"：读起来像名言警句、能单独摘出来的句子，一律重写成随口说出的样子"""
+
+
 def _resolve_meta_content(meta_knowledge, recipe):
     """
     解析要注入的元知识内容（全量注入；分层检索随 meta_learner
@@ -39,8 +71,33 @@ def _resolve_meta_content(meta_knowledge, recipe):
     return str(meta_knowledge).strip(), False
 
 
+def _render_retry_feedback(feedback):
+    """把「重试反馈」（历次失败原因列表）渲染成修正要求段，追加到 prompt 末尾。
+
+    带反馈的重试让模型知道上一版哪里不合格（太短/章节不足/长段太多/引号
+    残留），收敛率远高于同 prompt 盲目重试。渲染模板与 prompts.py 的
+    硬性要求保持一致（≥6 节、≥4000 字、句号后换行等）。
+    """
+    reasons = list(feedback) if isinstance(feedback, (list, tuple)) else [feedback]
+    lines = [
+        "",
+        "## ⚠ 上一版不符合发布要求，请立刻修正（最重要）",
+        "你上一版未通过格式校验，这次必须严格满足以下硬性指标，否则仍不合格：",
+    ]
+    for r in reasons:
+        lines.append(f"- {r}")
+    lines += [
+        "- 章节标题必须用 `## **N**`，且 **不少于 6 节**；总字数 **不少于 4000 字**。",
+        "- 每个句号/问号/感叹号后换行并空一行，长段落占比尽可能低。",
+        "- 对话引号统一用「」，省略号用 ……（六个点），不出现直引号或 AI 废话前缀。",
+        "请重新完整创作一篇全新的故事，不要解释，直接输出正文。",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def build_story_prompt(question_title, reference_answer=None, recipe=None,
-                       meta_knowledge=None, author_profile=None):
+                       meta_knowledge=None, author_profile=None,
+                       feedback=None):
     """
     根据 STORY_MATERIAL_MODE 构建故事生成 prompt。
 
@@ -60,6 +117,9 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         author_profile:    作者技能签名 dict（author_profiler.load_author_profile
                           的返回）。非 None 时把风格签名渲染为独立节追加到 prompt
                           末尾（generate_story 的 author= 参数会自动加载）。
+        feedback:          重试修正反馈（可选）。str 或 str 列表，是上一版故事的
+                          失败原因；非空时在 prompt 末尾渲染成「必须修正」段，
+                          供模型针对性重写。
 
     返回：(user_message, mode_str)
     """
@@ -253,7 +313,12 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
             log.warning(f"  [作者风格注入] 渲染失败，跳过：{e}")
     mode_str = mode_str + author_tag
 
-    # === 命名约束（公共：所有模式生效，追加在 prompt 末尾） ===
+    # === 命名约束 + 行文去AI味守则（公共：所有模式生效，追加在 prompt 末尾） ===
     user_message += NAMING_CONSTRAINT
+    user_message += DEAI_STYLE_RULE
+
+    # === 重试修正反馈（如有：放在最末尾，最醒目，模型应先读到它） ===
+    if feedback:
+        user_message += _render_retry_feedback(feedback)
 
     return user_message, mode_str

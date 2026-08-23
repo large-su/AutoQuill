@@ -5,534 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AutoQuill 控制台</title>
 <link rel="icon" href="favicon.ico">
-<style>
-  :root {
-    --bg: #0b0e14;
-    --panel: #141a24;
-    --panel-2: #1a2130;
-    --border: #232b3d;
-    --text: #dbe3f0;
-    --muted: #7d8aa3;
-    --accent: #6366f1;
-    --accent-2: #a78bfa;
-    --green: #34d399;
-    --red: #f87171;
-    --amber: #fbbf24;
-    --orange: #fb923c;
-    --mono: "Cascadia Code", Consolas, "JetBrains Mono", monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
-  body {
-    background:
-      radial-gradient(1100px 420px at 50% -140px, rgba(99,102,241,0.10), transparent 60%),
-      var(--bg);
-    color: var(--text);
-    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    font-size: 14px;
-    overflow: hidden;
-  }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-thumb { background: #2b3550; border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: #38456b; }
-  ::-webkit-scrollbar-track { background: transparent; }
-
-  /* ---------- 顶栏 ---------- */
-  header {
-    height: 52px;
-    display: flex; align-items: center; gap: 14px;
-    padding: 0 20px;
-    border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, #0b0e14, #0d1119);
-    position: relative; z-index: 5;
-  }
-  .logo {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 17px; font-weight: 700; letter-spacing: 0.5px;
-    user-select: none;
-  }
-  .logo .feather { font-size: 20px; }
-  .logo em {
-    font-style: normal;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    -webkit-background-clip: text; background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-  .top-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-  .status-pill {
-    display: flex; align-items: center; gap: 8px;
-    padding: 5px 14px; border-radius: 999px;
-    border: 1px solid var(--border); background: var(--panel);
-    font-size: 12.5px; color: var(--muted); white-space: nowrap;
-  }
-  .status-pill .dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: #56617a; flex: none;
-  }
-  .status-pill.running { color: #93c5fd; border-color: #3b4d74; }
-  .status-pill.running .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.2s infinite; }
-  .status-pill.done { color: #6ee7b7; border-color: #24503f; }
-  .status-pill.done .dot { background: var(--green); }
-  .status-pill.error { color: #fca5a5; border-color: #5f2e35; }
-  .status-pill.error .dot { background: var(--red); }
-  .status-pill.stopped, .status-pill.stopping { color: #fcd34d; border-color: #5f5020; }
-  .status-pill.stopped .dot, .status-pill.stopping .dot { background: var(--amber); }
-  .status-pill.timeout { color: #fdba74; border-color: #5f3a22; }
-  .status-pill.timeout .dot { background: var(--orange); }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
-
-  /* ---------- 主区布局：三列（左列可切换模式） ---------- */
-  main {
-    display: grid;
-    grid-template-columns: 300px minmax(0, 1fr) 400px;
-    gap: 14px;
-    padding: 14px 16px;
-    height: calc(100vh - 52px);
-    max-width: 1720px;
-    margin: 0 auto;
-  }
-  /* 左列模式切换：下拉 + 简介 + 内容区 */
-  .mode-bar {
-    display: flex; align-items: center; gap: 10px;
-    padding: 2px 2px 10px;
-  }
-  .mode-bar select {
-    flex: 0 0 130px;
-    padding: 7px 26px 7px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--panel-2);
-    color: var(--text);
-    font-size: 13px;
-    cursor: pointer;
-    appearance: none;
-    -webkit-appearance: none;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
-  }
-  .mode-bar select:hover { border-color: #3b4d74; }
-  .mode-bar select:focus { outline: none; border-color: var(--accent); }
-  .mode-bar .mode-desc {
-    font-size: 12px; color: var(--muted); line-height: 1.45; min-width: 0;
-  }
-  .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px;
-    transition: border-color 0.15s;
-  }
-  .card h2 {
-    font-size: 12px; font-weight: 600; color: var(--muted);
-    letter-spacing: 1px; margin-bottom: 10px;
-    display: flex; align-items: center; gap: 6px;
-  }
-  .card h2 .badge { color: var(--accent); font-size: 15px; }
-
-  /* ---------- 左列：控制台 ---------- */
-  .left-col { overflow-y: auto; padding-right: 2px; }
-  .mode-group { display: flex; flex-direction: column; gap: 6px; }
-  .mode-opt {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 12px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    cursor: pointer; user-select: none;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  .mode-opt:hover { border-color: #3b4d74; }
-  .mode-opt.sel { border-color: var(--accent); background: rgba(99,102,241,0.12); }
-  .mode-opt input { accent-color: var(--accent); }
-  .mode-opt .t { font-weight: 600; font-size: 13.5px; }
-  .mode-opt .d { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
-  .params-batch {
-    display: flex; gap: 10px; margin: 8px 0 4px;
-  }
-  .params-batch label { flex: 1; }
-  .params-batch span { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-  .params-batch input {
-    width: 100%; padding: 7px 10px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    color: var(--text); font-size: 13px;
-  }
-  .params-batch input:focus { outline: none; border-color: var(--accent); }
-  .run-row { display: flex; gap: 8px; margin-top: 12px; }
-  button { font-family: inherit; }
-  /* 按钮体系：.btn 基础 + 变体 primary / ghost / danger / sm */
-  .btn {
-    border: none; border-radius: 8px; cursor: pointer;
-    font-size: 13.5px; font-weight: 600;
-    padding: 9px 16px; color: var(--text);
-    background: var(--panel-2); border: 1px solid var(--border);
-    transition: filter 0.15s, background 0.15s, border-color 0.15s;
-  }
-  .btn:hover:not(:disabled) { filter: brightness(1.12); }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
-  .btn.primary {
-    color: #fff;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    border-color: transparent;
-    box-shadow: 0 2px 10px rgba(99,102,241,0.35);
-  }
-  .btn.ghost { background: transparent; }
-  .btn.danger { color: var(--red); background: transparent; border-color: #5f2e35; }
-  .btn.danger:hover:not(:disabled) { background: rgba(248,113,113,0.08); }
-  .btn.sm { padding: 5px 12px; font-size: 12px; border-radius: 7px; }
-  .run-row .btn-run { flex: 1.4; }
-  .run-row .btn-stop { flex: 1; }
-
-  .cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .cfg-cell {
-    background: var(--panel-2); border: 1px solid var(--border);
-    border-radius: 7px; padding: 6px 9px;
-  }
-  .cfg-cell .k { font-size: 10.5px; color: var(--muted); }
-  .cfg-cell .v { font-size: 12.5px; font-weight: 600; margin-top: 2px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cfg-cell .v.on { color: var(--green); }
-  .cfg-cell .v.off { color: var(--muted); font-weight: 400; }
-  /* 设置弹窗（通用设置 + 工作设置）：分组设置行 */
-  .settings-modal { width: min(640px, 100%); }
-  .settings-body {
-    flex: 1; overflow-y: auto; padding: 4px 20px 16px;
-    font-size: 13px; line-height: 1.6;
-  }
-  .st-group { padding: 14px 0 2px; border-bottom: 1px solid var(--border); }
-  .st-group:last-child { border-bottom: none; }
-  .st-title {
-    font-size: 11px; font-weight: 700; color: var(--muted);
-    letter-spacing: 2px; text-transform: uppercase; margin-bottom: 12px;
-  }
-  .st-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 12px; }
-  /* 行级 display 会覆盖 hidden 属性的 UA 样式（display:none），必须显式兜底 */
-  [hidden] { display: none !important; }
-  .st-row:last-child { margin-bottom: 4px; }
-  .st-k { flex: 0 0 96px; font-size: 12.5px; color: var(--muted); }
-  /* 设置操作结果状态条（修改即生效，无需应用按钮） */
-  .st-status {
-    display: none; margin: 12px 0 2px; padding: 6px 12px;
-    border-radius: 7px; font-size: 12px;
-  }
-  .st-status.show { display: block; }
-  .st-status.ok { color: var(--green); background: rgba(52,211,153,0.08); border: 1px solid #24503f; }
-  .st-status.err { color: #fca5a5; background: rgba(248,113,113,0.08); border: 1px solid #5f2e35; }
-  .st-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 1; min-width: 0; }
-  .st-ctl select, .st-ctl input[type="number"] {
-    padding: 6px 9px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    color: var(--text); font-size: 12.5px; font-family: inherit;
-  }
-  .st-ctl select:focus, .st-ctl input[type="number"]:focus {
-    outline: none; border-color: var(--accent);
-  }
-  .st-ctl #providerSel, .st-ctl #modelSel { flex: 1 1 120px; min-width: 0; }
-  .st-d { flex: 0 0 100%; font-size: 11px; color: var(--muted); margin: -6px 0 0 106px; }
-  .tun-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; margin-bottom: 6px; }
-  .tun-row input[type="number"] { width: 92px; }
-  .tun-k { font-size: 12.5px; min-width: 80px; }
-  .tun-hint { font-size: 11px; color: var(--muted); }
-  .set-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 9px; }
-  .set-row:last-child { margin-bottom: 0; }
-  .mp-k { flex: 0 0 100%; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
-  select { font-family: inherit; }
-  input[type="text"], input[type="number"] { font-family: inherit; }
-  .seg { display: inline-flex; border-radius: 8px; overflow: hidden;
-         border: 1px solid var(--border); background: var(--panel-2); }
-  .seg-opt {
-    display: inline-flex; align-items: center; gap: 4px;
-    font-size: 11.5px; color: var(--muted); cursor: pointer;
-    padding: 5px 9px; transition: background 0.15s, color 0.15s;
-    white-space: nowrap;
-  }
-  .seg-opt:hover { color: var(--text); }
-  .seg-opt:has(input:checked) {
-    background: rgba(99,102,241,0.18); color: var(--text);
-  }
-  .seg-opt input { display: none; }
-  .btn-model { flex: none; }
-  .mp-note { font-size: 11px; color: var(--muted); line-height: 1.6; }
-  /* 蒸馏页排版：说明行（虚线分隔）/ 状态行 */
-  .mp-hint {
-    font-size: 11px; color: var(--muted); line-height: 1.6;
-    border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 8px;
-  }
-  .mp-status {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 12px; color: var(--text); padding: 6px 10px;
-    border-radius: 7px; border: 1px solid var(--border);
-    background: var(--panel-2); margin-bottom: 10px;
-  }
-
-  /* ---------- 左列控制卡片内的表单控件（与设置弹窗风格统一） ---------- */
-  .left-col select, .left-col input[type="text"], .left-col input[type="number"] {
-    padding: 6px 9px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    color: var(--text); font-size: 12.5px; font-family: inherit;
-    appearance: none; -webkit-appearance: none;
-  }
-  .left-col select:focus, .left-col input[type="text"]:focus, .left-col input[type="number"]:focus {
-    outline: none; border-color: var(--accent);
-  }
-  .left-col input[type="number"] { -moz-appearance: textfield; }
-  .left-col input[type="number"]::-webkit-outer-spin-button,
-  .left-col input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-  .left-col input::placeholder { color: #64748b; }
-  .left-col select {
-    cursor: pointer;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
-    padding-right: 26px;
-  }
-
-  /* ---------- 中列：日志 ---------- */
-  .log-col { flex: 1; }
-  .log-card { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  .log-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-  .log-head .spacer { flex: 1; }
-  .autoscroll { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
-  .autoscroll input { accent-color: var(--accent); }
-  .progress-wrap { display: none; margin-bottom: 10px; }
-  .progress-wrap.show { display: block; }
-  .progress-bar {
-    height: 5px; border-radius: 3px; overflow: hidden;
-    background: var(--panel-2);
-  }
-  .progress-fill {
-    height: 100%; width: 0%;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    transition: width 0.4s ease;
-    position: relative; overflow: hidden;
-  }
-  .progress-fill::after {
-    content: ""; position: absolute; inset: 0;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
-    animation: slide 1.4s infinite;
-  }
-  .progress-fill.indeterminate {
-    width: 30% !important;
-    animation: indeterminate 1.6s ease-in-out infinite;
-  }
-  @keyframes indeterminate {
-    0% { margin-left: -30%; }
-    100% { margin-left: 100%; }
-  }
-  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
-  .progress-text { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
-  .log-box {
-    flex: 1; overflow-y: auto; min-height: 0;
-    background: #0c1017; border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px 12px;
-    font-family: var(--mono); font-size: 12px; line-height: 1.7;
-  }
-  .log-line { white-space: pre-wrap; word-break: break-all; color: #aab4c8; }
-  .log-line .ts { color: #56617a; }
-  .log-line.stage { color: #93c5fd; font-weight: 600; }
-  .log-line.stage::before { content: "▸ "; color: var(--accent); }
-  .log-line.result { color: var(--green); }
-  .log-line.result::before { content: "✓ "; }
-  .log-line.error { color: #fca5a5; }
-  .log-line.run_end { color: var(--text); font-weight: 700; }
-  .log-box .placeholder { color: #56617a; font-style: italic; }
-  .log-line.muted { color: #66708a; }
-  .log-line.warn { color: #fcd34d; }
-  .log-file { font-size: 11px; color: #56617a; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-  /* ---------- 右列：结果 ---------- */
-  .right-col { overflow-y: auto; padding-right: 2px; }
-  .res-card { display: none; }
-  .res-card.show { display: block; }
-  .res-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; line-height: 1.5; }
-  .res-sub { font-size: 11px; color: var(--muted); margin-bottom: 8px; word-break: break-all; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-  .chip {
-    font-size: 11px; padding: 2.5px 9px; border-radius: 999px;
-    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
-  }
-  .chip.acc { color: #a5b4fc; border-color: #3b4d74; }
-  details {
-    border: 1px solid var(--border); border-radius: 8px;
-    background: var(--panel-2); margin-top: 8px; overflow: hidden;
-  }
-  details summary {
-    cursor: pointer; padding: 8px 12px; font-size: 12px;
-    color: #a5b4fc; user-select: none; list-style: none;
-  }
-  details summary::before { content: "▸ "; }
-  details[open] summary::before { content: "▾ "; }
-  details summary:hover { background: rgba(99,102,241,0.08); }
-  details .body {
-    padding: 10px 12px; font-size: 12.5px; line-height: 1.75;
-    border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-all;
-    color: #c6d0e2; max-height: 380px; overflow-y: auto;
-  }
-  .story-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .empty-note { color: var(--muted); font-size: 12px; padding: 4px 0; }
-  .story-list { display: flex; flex-direction: column; gap: 5px; }
-  .story-item {
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 10px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    cursor: pointer; font-size: 12.5px;
-    transition: border-color 0.15s;
-  }
-  .story-item:hover { border-color: var(--accent); }
-  .story-item .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .story-item .s { color: var(--muted); font-size: 11px; flex: none; }
-  .story-more {
-    margin-top: 4px; padding: 7px 10px;
-    background: transparent; border: 1px dashed var(--border);
-    border-radius: 7px; color: var(--muted); font-size: 12px;
-  }
-  .story-more:hover { color: var(--accent); border-color: var(--accent); filter: none; }
-
-  /* 采集库管理弹层 */
-  .slib-toolbar { display: flex; gap: 8px; align-items: center; }
-  .slib-toolbar .btn { flex: 1; }
-  .slib-total { font-size: 11px; color: var(--muted); }
-  .slib-author {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 12px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    margin-bottom: 8px;
-  }
-  .slib-author .info { flex: 1; min-width: 0; }
-  .slib-author .nm { font-weight: 600; font-size: 13px; }
-  .slib-author .dt { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .slib-author .has-profile { color: var(--amber); font-size: 11px; }
-  .slib-detail { margin-bottom: 10px; }
-  .slib-item {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 10px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    margin-bottom: 4px; font-size: 12px;
-  }
-  .slib-item .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .slib-item .m { color: var(--muted); font-size: 11px; flex: none; }
-  .slib-item .btn-sm { padding: 3px 9px; }
-  .slib-item .btn-sm.danger { border-color: var(--border); color: var(--muted); }
-  .slib-item .btn-sm.danger:hover { color: var(--red); border-color: #5f2e35; background: rgba(248,113,113,0.08); }
-
-  /* 故事详情弹层 */
-  .modal-mask {
-    display: none; position: fixed; inset: 0; z-index: 50;
-    background: rgba(4,6,10,0.72); backdrop-filter: blur(3px);
-    padding: 40px 60px;
-  }
-  .modal-mask.show { display: flex; align-items: stretch; justify-content: center; }
-  .modal {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 12px; width: min(860px, 100%);
-    display: flex; flex-direction: column; overflow: hidden;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-  }
-  .modal-head {
-    display: flex; align-items: center; gap: 10px;
-    padding: 12px 16px; border-bottom: 1px solid var(--border);
-  }
-  .modal-head .n { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .modal-head .close {
-    margin-left: auto; background: transparent; color: var(--muted);
-    padding: 4px 12px; border: 1px solid var(--border);
-  }
-  .modal-head .close:hover { color: var(--red); border-color: #5f2e35; }
-  .modal-body {
-    flex: 1; overflow-y: auto; padding: 16px 20px;
-    font-size: 13.5px; line-height: 1.9; white-space: pre-wrap; word-break: break-all;
-  }
-
-  /* ---------- 首启引导遮罩（Edge → API Key → 知乎登录） ---------- */
-  .setup-mask {
-    display: none; position: fixed; inset: 0; z-index: 60;
-    background: rgba(4,6,10,0.78); backdrop-filter: blur(4px);
-    align-items: center; justify-content: center; padding: 24px;
-  }
-  .setup-mask.show { display: flex; }
-  .setup-card {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 14px; width: min(620px, 100%);
-    box-shadow: 0 24px 80px rgba(0,0,0,0.55);
-    max-height: 92vh; overflow-y: auto;
-  }
-  .setup-head {
-    display: flex; align-items: center; gap: 12px;
-    padding: 16px 20px; border-bottom: 1px solid var(--border);
-    font-size: 15px; font-weight: 700;
-  }
-  .setup-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
-  .setup-step {
-    border: 1px solid var(--border); border-radius: 10px;
-    background: var(--panel-2); padding: 12px 14px;
-  }
-  .setup-step.done { border-color: #24503f; }
-  .setup-step .s-title { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 13.5px; }
-  .setup-step .s-badge {
-    width: 22px; height: 22px; border-radius: 50%; flex: none;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; background: var(--panel); border: 1px solid var(--border);
-    color: var(--muted);
-  }
-  .setup-step.done .s-badge {
-    background: rgba(52,211,153,0.15); border-color: #24503f; color: var(--green);
-  }
-  .setup-step .s-desc {
-    font-size: 12px; color: var(--muted); margin: 7px 0 0 31px; line-height: 1.75;
-  }
-  .setup-step .s-desc a { color: var(--accent-2); }
-  .setup-step .s-ctl { margin: 10px 0 0 31px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .setup-step .s-ctl input[type="password"], .setup-step .s-ctl select {
-    padding: 7px 10px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--panel);
-    color: var(--text); font-size: 13px; font-family: inherit;
-  }
-  .setup-step .s-ctl input[type="password"] { flex: 1; min-width: 200px; }
-  .setup-step .s-ctl input:focus, .setup-step .s-ctl select:focus {
-    outline: none; border-color: var(--accent);
-  }
-  .setup-err { color: var(--red); font-size: 12px; }
-  .setup-ok { color: var(--green); font-size: 12px; }
-  /* 生成方式选择卡片（引导第 2 步） */
-  .mode-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0 0 31px; }
-  @media (max-width: 760px) { .mode-pick { grid-template-columns: 1fr; } }
-  .mode-card {
-    display: block; padding: 11px 13px; border-radius: 10px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    cursor: pointer; user-select: none;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  .mode-card:hover { border-color: #3b4d74; }
-  .mode-card.sel { border-color: var(--accent); background: rgba(99,102,241,0.12); }
-  .mode-card .mc-t { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13.5px; }
-  .mode-card .mc-d { color: var(--muted); font-size: 11.5px; margin: 2px 0 8px; }
-  .mode-card .mc-ctl { display: none; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .mode-card.sel .mc-ctl { display: flex; }
-  .mode-card .mc-ctl input[type="password"], .mode-card .mc-ctl select {
-    padding: 7px 10px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--panel-2);
-    color: var(--text); font-size: 13px;
-  }
-  .mode-card .mc-ctl input[type="password"] { flex: 1; min-width: 180px; }
-  .mode-card .mc-msg { width: 100%; }
-  .mode-card.done { border-color: #24503f; }
-  .mode-card.done .mc-d { color: var(--green); }
-  .setup-foot {
-    padding: 14px 20px; border-top: 1px solid var(--border);
-    display: flex; justify-content: flex-end; gap: 10px;
-  }
-
-  @media (max-width: 1200px) {
-    main { grid-template-columns: 280px minmax(0,1fr); height: auto; overflow: visible; }
-    body { overflow: auto; }
-    .right-col { grid-column: 1 / -1; }
-  }
-  @media (max-width: 760px) {
-    main { grid-template-columns: 1fr; }
-  }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
+<script src="echarts.min.js"></script>
 
 <header>
   <div class="logo"><span class="feather">✒️</span>Auto<em>Quill</em></div>
@@ -684,10 +160,206 @@
         <div class="mp-hint">样本来自采集库；作者名与采集库一致。提炼需调用 LLM（约 1-3 分钟），完成后自动切换为该文风。</div>
       </div>
     </div>
+
+    <!-- 模式：已发布内容看板 -->
+    <div class="mode-pane" id="pane-dashboard" hidden>
+      <div class="card">
+        <h2><span class="badge">◈</span>数据快照</h2>
+        <div class="dash-src-line" id="dashSrcLine">快照文件：<b>-</b><br>抓取时间：-</div>
+        <button class="btn primary btn-model" id="btnDashRefresh" style="width:100%">↻ 从知乎刷新</button>
+        <div class="dash-progress" id="dashRefreshHint" hidden>
+          <div class="dp-bar"><i class="dp-fill" id="dpFill"></i></div>
+          <div class="dp-text" id="dpText"></div>
+        </div>
+        <button class="btn ghost btn-model" id="btnDashClean" style="width:100%;margin-top:8px">筛选待清理（久远 + 数据不佳）</button>
+      </div>
+
+      <div class="card">
+        <h2><span class="badge">⌕</span>筛选与排序</h2>
+        <div class="df-row">
+          <div class="df-label">关键词（标题 / 正文）</div>
+          <input type="text" id="dashQ" placeholder="输入后自动搜索…" style="width:100%">
+        </div>
+        <div class="df-row">
+          <div class="df-label">发布时间范围</div>
+          <div class="df-range">
+            <input type="date" id="dashStart">
+            <span>至</span>
+            <input type="date" id="dashEnd">
+          </div>
+        </div>
+        <div class="df-quick">
+          <button class="chip-btn" data-from="today-7">近7天</button>
+          <button class="chip-btn" data-from="today-30">近30天</button>
+          <button class="chip-btn" data-from="year">今年</button>
+          <button class="chip-btn sel" data-from="all">全部</button>
+        </div>
+        <div class="df-row">
+          <div class="df-label">数据门槛（≥，0 为不限）</div>
+          <div class="df-thresholds">
+            <label>赞同<input type="number" id="dashMinLikes" value="0" min="0"></label>
+            <label>阅读<input type="number" id="dashMinReads" value="0" min="0"></label>
+            <label>评论<input type="number" id="dashMinComments" value="0" min="0"></label>
+          </div>
+        </div>
+        <div class="df-row">
+          <div class="df-label">排序</div>
+          <div class="df-sortrow">
+            <select id="dashSort" style="width:100%">
+              <option value="newest">最新发布 · 新→旧</option>
+              <option value="oldest">最早发布 · 旧→新</option>
+              <option value="likes">赞同最多 · 降序</option>
+              <option value="reads">阅读最多 · 降序</option>
+              <option value="comments">评论最多 · 降序</option>
+              <option value="collects">收藏最多 · 降序</option>
+              <option value="favors">喜欢最多 · 降序</option>
+            </select>
+          </div>
+        </div>
+        <div class="set-row" style="margin-top:6px">
+          <button class="btn ghost btn-model" id="btnDashReset" style="flex:1">重置</button>
+          <button class="btn primary btn-model" id="btnDashApply" style="flex:1">应用筛选</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 模式：草稿箱素材 -->
+    <div class="mode-pane" id="pane-drafts" hidden>
+      <div class="card">
+        <h2><span class="badge">◈</span>草稿箱快照</h2>
+        <div class="dash-src-line" id="draftSrcLine">快照文件：<b>-</b><br>抓取时间：-</div>
+        <button class="btn primary btn-model" id="btnDraftsRefresh" style="width:100%">↻ 从知乎刷新草稿箱</button>
+        <div class="dash-progress" id="draftRefreshHint" hidden>
+          <div class="dp-bar"><i class="dp-fill" id="drfFill"></i></div>
+          <div class="dp-text" id="drfText"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="badge">⌕</span>草稿筛选</h2>
+        <div class="df-row">
+          <div class="df-label">关键词（标题 / 正文）</div>
+          <input type="text" id="draftQ" placeholder="输入后自动搜索…" style="width:100%">
+        </div>
+        <div class="df-row">
+          <div class="df-label">更新时间范围</div>
+          <div class="df-range">
+            <input type="date" id="draftStart">
+            <span>至</span>
+            <input type="date" id="draftEnd">
+          </div>
+        </div>
+        <div class="df-quick">
+          <button class="chip-btn" data-from="today-7">近7天</button>
+          <button class="chip-btn" data-from="today-30">近30天</button>
+          <button class="chip-btn sel" data-from="all">全部</button>
+        </div>
+        <div class="df-row">
+          <div class="df-label">字数范围（0 为不限）</div>
+          <div class="df-thresholds">
+            <label>最少<input type="number" id="draftMinChars" value="0" min="0"></label>
+            <label>最多<input type="number" id="draftMaxChars" value="0" min="0"></label>
+          </div>
+        </div>
+        <div class="df-row">
+          <div class="df-label">排序</div>
+          <div class="df-sortrow">
+            <select id="draftSort" style="width:100%">
+              <option value="updated">最近更新 · 新→旧</option>
+              <option value="chars">字数最多 · 降序</option>
+            </select>
+          </div>
+        </div>
+        <div class="set-row" style="margin-top:6px">
+          <button class="btn ghost btn-model" id="btnDraftsReset" style="flex:1">重置</button>
+          <button class="btn primary btn-model" id="btnDraftsApply" style="flex:1">应用筛选</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 中列：日志 -->
   <div class="col log-col">
+    <div class="card dash-card" id="dashCard">
+      <div class="dash-head">
+        <h2><span class="badge">▦</span>已发布内容看板</h2>
+        <div class="dash-pills">
+          <span class="dash-pill" id="dashCount">加载中…</span>
+          <span class="dash-pill" id="dashSnap">快照 · -</span>
+          <button class="btn ghost sm" id="btnDashRefresh2" title="从知乎创作中心抓取最新已发布内容">↻ 刷新</button>
+          <button class="btn ghost sm" id="btnDashClean2" title="筛选时间久远 + 数据不佳的内容">筛选待清理</button>
+        </div>
+      </div>
+      <div class="dash-status" id="dashStatus"></div>
+      <div class="kpi-grid" id="dashKpis"></div>
+      <div class="dash-filterbar" id="dashFilterbar"></div>
+      <div class="dash-section" id="dashChartSection">
+        <div class="dash-section-head">
+          <div class="dash-section-title">数据分析（图表随筛选结果更新）</div>
+          <div class="chart-tabs" id="chartTabs">
+            <button class="chart-tab sel" data-tab="trend">发布趋势</button>
+            <button class="chart-tab" data-tab="dist">赞同分布</button>
+            <button class="chart-tab" data-tab="funnel">转化漏斗</button>
+            <button class="chart-tab" data-tab="scatter">阅读·赞同</button>
+            <button class="chart-tab" data-tab="top">Top 20</button>
+            <button class="chart-tab" data-tab="genre">题材分布</button>
+          </div>
+        </div>
+        <div class="dash-chart-pane">
+          <div class="dash-charts-empty" id="dashChartEmpty" hidden>📭 当前筛选暂无数据</div>
+          <div class="dash-chart" id="chartPane-trend"><div class="dash-chart-box" id="chartTrend"></div></div>
+          <div class="dash-chart" id="chartPane-dist" hidden><div class="dash-chart-box" id="chartDist"></div></div>
+          <div class="dash-chart" id="chartPane-funnel" hidden><div class="dash-chart-box" id="chartFunnel"></div></div>
+          <div class="dash-chart" id="chartPane-scatter" hidden><div class="dash-chart-box" id="chartScatter"></div></div>
+          <div class="dash-chart" id="chartPane-top" hidden><div class="dash-chart-box" id="chartTop"></div></div>
+          <div class="dash-chart" id="chartPane-genre" hidden><div class="dash-chart-box" id="chartGenre"></div></div>
+        </div>
+      </div>
+      <div class="dash-table-wrap">
+        <div class="table-toolbar">
+          <div class="tbl-info" id="dashTableInfo">加载中…</div>
+          <div class="tbl-page">
+            <select id="dashPageSize" title="每页条数">
+              <option value="20">20 条/页</option>
+              <option value="50" selected>50 条/页</option>
+              <option value="100">100 条/页</option>
+              <option value="200">200 条/页</option>
+            </select>
+            <button id="dashPrev" title="上一页">‹</button>
+            <span class="pg-no" id="dashPageNo">1/1</span>
+            <button id="dashNext" title="下一页">›</button>
+          </div>
+        </div>
+        <div class="dash-table-scroll" id="dashTable"><div class="dash-empty"><span class="em">⏳</span>加载中…</div></div>
+      </div>
+    </div>
+
+    <!-- 草稿箱素材列表 -->
+    <div class="card draft-card" id="draftCard">
+      <div class="dash-head">
+        <h2><span class="badge">✎</span>草稿箱素材</h2>
+        <div class="dash-pills">
+          <span class="dash-pill" id="draftCount">加载中…</span>
+          <span class="dash-pill" id="draftSnap">快照 · -</span>
+          <button class="btn ghost sm" id="btnDraftsRefresh2" title="从知乎创作中心刷新草稿箱">↻ 刷新</button>
+        </div>
+      </div>
+      <div class="dash-status" id="draftStatus"></div>
+      <div class="kpi-grid" id="draftKpis"></div>
+      <div class="dash-filterbar" id="draftFilterbar"></div>
+      <div class="dft-table-wrap">
+        <div class="dft-toolbar">
+          <div class="dft-info" id="draftTableInfo">加载中…</div>
+          <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+            <label class="autoscroll" style="font-size:12px"><input type="checkbox" id="draftSelAll"> 全选本页</label>
+            <span class="cl-status" id="draftSelStatus"></span>
+            <button class="btn danger btn-model" id="btnDraftsDelete" disabled>从知乎删除选中</button>
+          </div>
+        </div>
+        <div class="dft-scroll" id="draftList"><div class="dft-empty"><span class="em">⏳</span>加载中…</div></div>
+      </div>
+    </div>
+
     <div class="card log-card">
       <div class="log-head">
         <h2 style="margin-bottom:0"><span class="badge">◧</span>运行日志</h2>
@@ -865,1481 +537,54 @@
   </div>
 </div>
 
-<script>
-"use strict";
-
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
-  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-const STATE_TEXT = {
-  idle: "空闲", running: "运行中", stopping: "停止中",
-  done: "完成", error: "出错", stopped: "已停止", timeout: "超时",
-};
-
-const CFG_LABELS = {
-  LLM_MODE: "LLM 模式", LLM_PROVIDER: "提供商", LLM_MODEL: "模型",
-  QUESTION_SELECT_MODE: "选题模式",
-  QUESTION_SOURCE: "选题来源",
-  STORY_MATERIAL_MODE: "素材模式", AUTHOR_PROFILE: "作者风格",
-  ENABLE_FORMAT_RETRY: "格式重试", MIN_ANSWER_LENGTH: "最短回答",
-  MAX_TOPIC_RETRY: "选题重试",
-  ENABLE_STORY_FILTER: "故事过滤", ENABLE_MATERIAL_LIKES_GATE: "点赞门槛",
-  MATERIAL_MIN_LIKES: "最低点赞",
-  KB_ENABLE: "知识库",
-};
-
-let es = null;
-let currentMode = "extract";
-let genChars = 0;
-let formatScore = null;
-let genMode = null;
-let browserHeadless = false;
-let taskState = "idle";
-
-/* ---------- 状态 ---------- */
-
-function setState(state, message, guide) {
-  taskState = state;
-  const pill = $("statusPill");
-  pill.className = "status-pill " + (state === "running" ? "running" : state);
-  $("statusText").textContent = STATE_TEXT[state] || state;
-  if (message && state !== "running") $("statusText").textContent = STATE_TEXT[state] || state;
-  $("btnRun").disabled = (state === "running" || state === "stopping");
-  $("btnStop").disabled = !(state === "running" || state === "stopping");
-  if (state !== "running") {
-    stopTaskTimer();
-    $("progressWrap").classList.remove("show");
-  }
-  // 运行前检测失败（当前通道缺必要信息）：直接弹引导，不只看报错
-  if (state === "error" && guide) showSetupGuide(guide);
-}
-
-async function showSetupGuide(need) {
-  manualGuideOpen = true;
-  await loadSetupStatus();
-  // 按 need 对应的具体配置判断就绪，而非整体 allDone：用户可能已配好
-  // API Key 但切到 Web 未登录（整体配置「已完成」），此时仍须弹引导
-  const st = setupCache || {};
-  const ready = need === "api_key" ? !!st.llm_configured
-                                   : !!st.web_llm_logged_in;
-  if (ready) {
-    manualGuideOpen = false;
-    hideSetupWizard();  // loadSetupStatus 内部可能已显示引导窗，关掉
-    return;
-  }
-  // loadSetupStatus 可能已因整体配置完成而自动收尾关闭窗口——重新打开
-  manualGuideOpen = true;
-  $("setupMask").classList.add("show");
-  renderModeCardState(setupCache);
-  selectModeCard(setupCache);
-  showStStatus(need === "api_key"
-    ? "API 模式需要先配置 API Key（见引导窗口）"
-    : "Web 模式需要先登录 DeepSeek 网页版（见引导窗口）", "err");
-}
-
-/* ---------- 任务阶段进度（文风提炼等） ---------- */
-
-function applyTaskProgress(p) {
-  // SSE 顺序：state(done) 事件先于最后一条进度行到达，这里用本地状态
-  // 拦截过期进度，避免任务结束后进度条又被弹出来
-  if (taskState !== "running") return;
-  $("progressWrap").classList.add("show");
-  if (typeof p.pct === "number") {
-    stopTaskTimer();
-    $("progressFill").classList.remove("indeterminate");
-    $("progressFill").style.width = Math.min(100, p.pct) + "%";
-    $("progressText").textContent = p.text || "";
-  } else {
-    $("progressFill").classList.add("indeterminate");
-    $("progressFill").style.width = "100%";
-    startTaskTimer(p.text || "处理中…");
-  }
-}
-
-async function pollTaskProgress() {
-  // SSE 断连时（任务由命令行/其他页面触发）轮询 /api/status 兜底：
-  // 以服务端状态为准同步本地状态，并应用当前阶段进度
-  try {
-    const r = await fetch("/api/status");
-    const st = await r.json();
-    if (st.state !== taskState) {
-      setState(st.state, st.message, st.guide_needed);
-      if (st.state === "running") {
-        if (!es) connectSSE();
-      } else {
-        refreshStatus();
-        loadStories();
-        loadAuthors();
-        loadProfileSources();
-      }
-    }
-    if (st.state === "running" && st.progress) applyTaskProgress(st.progress);
-  } catch (e) { /* ignore */ }
-}
-
-setInterval(pollTaskProgress, 3000);
-
-/* ---------- 日志 ---------- */
-
-async function loadLogHistory() {
-  if (window.__logCleared) return;  // 用户已手动清空：不回放历史，只显示清空后的新日志
-  try {
-    const r = await fetch("/api/logs/latest?lines=150");
-    const d = await r.json();
-    if (d.path) $("logFile").textContent = "日志文件：" + d.path.split(/[\\/]/).pop();
-    (d.lines || []).forEach((ln) => {
-      if (ln.trim()) {
-        // 回放也按严重级高亮，方便快速定位历史错误
-        const cls = /\[ERROR\]/.test(ln) ? "error"
-          : /\[WARNING\]|失败|异常/.test(ln) ? "warn" : "muted";
-        addLog(ln, cls);
-      }
-    });
-  } catch (e) { /* ignore */ }
-}
-
-function addLog(text, cls) {
-  const box = $("logBox");
-  const ph = box.querySelector(".placeholder");
-  if (ph) ph.remove();
-  const line = document.createElement("div");
-  line.className = "log-line " + (cls || "");
-  line.textContent = text;
-  box.appendChild(line);
-  if ($("autoScroll").checked) box.scrollTop = box.scrollHeight;
-}
-
-function clearLog() {
-  const box = $("logBox");
-  box.innerHTML = '<div class="placeholder">日志已清空。点击「运行」开始，日志将实时显示在这里。</div>';
-  window.__logCleared = true;  // 本次会话内不再回放历史日志，新日志从头开始
-}
-
-function copyLog() {
-  const box = $("logBox");
-  const text = [...box.querySelectorAll(".log-line")].map((l) => l.textContent).join("\n");
-  if (!text) { showStStatus("日志为空", "err"); return; }
-  const lines = text.split("\n").length;
-  const ok = () => showStStatus(`日志已复制（${lines} 行）`, "ok");
-  const fail = () => showStStatus("复制失败：剪贴板不可用", "err");
-  // 主路径：Clipboard API（要求页面焦点）
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(ok, () => legacyCopy(text) ? ok() : fail());
-  } else {
-    legacyCopy(text) ? ok() : fail();
-  }
-}
-
-function legacyCopy(text) {
-  // 后备：execCommand 复制（无焦点/旧环境仍可用）
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    const done = document.execCommand("copy");
-    ta.remove();
-    return done;
-  } catch (e) { return false; }
-}
-
-$("btnLogClear").addEventListener("click", clearLog);
-$("btnLogCopy").addEventListener("click", copyLog);
-
-function handleLogEvent(ev, cls) {
-  const payload = JSON.parse(ev.data);
-  addLog(payload.raw || payload.text, cls);
-}
-
-/* ---------- 结果渲染 ---------- */
-
-function renderContext(ctx) {
-  if (!ctx) return;
-  if (ctx.title) {
-    $("extractCard").classList.add("show");
-    $("extractTitle").textContent = ctx.title;
-    $("extractUrl").textContent = ctx.url || "";
-    const chips = [];
-    if (ctx.answer) chips.push(`回答 ${ctx.answer.length} 字`);
-    const f = ctx.footer || {};
-    if (f.likes) chips.push(`赞 ${f.likes}`);
-    if (f.comments) chips.push(`评 ${f.comments}`);
-    if (f.favorites) chips.push(`藏 ${f.favorites}`);
-    if (f.thanks) chips.push(`喜 ${f.thanks}`);
-    if (f.time) chips.push(`发表 ${f.time}`);
-    $("extractChips").innerHTML = chips
-      .map((c) => `<span class="chip acc">${esc(c)}</span>`).join("");
-    $("answerBody").textContent = ctx.answer || "(无内容)";
-  }
-  if (ctx.sample_preview) {
-    $("samplePreview").textContent = ctx.sample_preview;
-    $("sampleDetail").style.display = "";
-  } else {
-    $("sampleDetail").style.display = "none";
-  }
-  if (ctx.collect) {
-    $("collectCard").classList.add("show");
-    $("collectTitle").textContent = ctx.collect.title || "故事采集";
-    $("collectSummary").textContent = ctx.collect.summary || "";
-  }
-  if (ctx.profile) {
-    $("profileCard").classList.add("show");
-    $("profileTitle").textContent = ctx.profile.title || "文风签名";
-    $("profilePath").textContent = ctx.profile.path || "";
-    $("profileBody").textContent = ctx.profile.summary || "(无摘要)";
-  }
-}
-
-function renderStory(story, title) {
-  if (!story || !story.text) return;
-  $("storyCard").classList.add("show");
-  $("storyTitle").textContent = title || "已生成";
-  const meta = [`${story.chars} 字`];
-  if (story.md_path) meta.push(story.md_path);
-  if (formatScore !== null) meta.push(`格式检测 ${formatScore}/10`);
-  $("storyMeta").innerHTML = meta.map((m) => `<span class="chip acc">${esc(m)}</span>`).join("");
-  $("storyBody").textContent = story.text;
-}
-
-/* ---------- 历史故事 ---------- */
-
-const STORY_MAX_VISIBLE = 10;
-
-async function loadStories() {
-  try {
-    const r = await fetch("/api/stories");
-    const data = await r.json();
-    const list = $("storyList");
-    if (!data.stories.length) {
-      list.innerHTML = '<div class="empty-note">暂无故事（运行后自动生成）</div>';
-      return;
-    }
-    list.innerHTML = "";
-    const all = data.stories;
-    renderStoryItems(all.slice(0, STORY_MAX_VISIBLE));
-    if (all.length > STORY_MAX_VISIBLE) {
-      const btn = document.createElement("button");
-      btn.className = "story-more";
-      btn.textContent = `展开全部（共 ${all.length} 条）`;
-      btn.onclick = () => {
-        btn.remove();
-        renderStoryItems(all);
-      };
-      list.appendChild(btn);
-    }
-  } catch (e) {
-    $("storyList").innerHTML = '<div class="empty-note">加载失败</div>';
-  }
-}
-
-function renderStoryItems(stories) {
-  const list = $("storyList");
-  stories.forEach((s) => {
-    const item = document.createElement("div");
-    item.className = "story-item";
-    const d = new Date(s.mtime * 1000);
-    const time = `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-    item.innerHTML = `<span class="n">${esc(s.name)}</span><span class="s">${(s.size / 1024).toFixed(1)}k · ${time}</span>`;
-    item.onclick = () => openStory(s.name);
-    list.appendChild(item);
-  });
-}
-
-async function openStory(name) {
-  try {
-    const r = await fetch("/api/story?name=" + encodeURIComponent(name));
-    const data = await r.json();
-    $("modalName").textContent = data.name;
-    $("modalBody").textContent = data.text;
-    $("modalMask").classList.add("show");
-  } catch (e) { /* ignore */ }
-}
-
-/* ---------- 配置速览 ---------- */
-
-/* 选题参数：前端可修改（POST /api/config，持久化到 webui_model.json），在设置弹窗中编辑 */
-const TUNABLE_KEYS = new Set(["MAX_TOPIC_RETRY", "MIN_ANSWER_LENGTH", "MATERIAL_MIN_LIKES"]);
-const TUNABLE_HINTS = {
-  MAX_TOPIC_RETRY: "首答不合格时最多重试次数（默认 5）",
-  MIN_ANSWER_LENGTH: "首答最短字数，低于则重试（默认 500）",
-  MATERIAL_MIN_LIKES: "素材最低点赞门槛（默认 200）",
-};
-
-/* 设置操作状态条（顶栏下方）：设置项修改即自动提交，成败在此反馈 */
-let _stStatusTimer = null;
-function showStStatus(text, kind) {
-  const el = $("stStatus");
-  el.textContent = text;
-  el.className = "st-status show " + (kind || "ok");
-  if (_stStatusTimer) clearTimeout(_stStatusTimer);
-  _stStatusTimer = setTimeout(() => el.classList.remove("show"), 4000);
-}
-
-function initTunables() {
-  const box = $("tunableBox");
-  box.innerHTML = "";
-  TUNABLE_KEYS.forEach((k) => {
-    const row = document.createElement("div");
-    row.className = "tun-row";
-    row.innerHTML =
-      `<span class="tun-k">${esc(CFG_LABELS[k] || k)}</span>` +
-      `<input type="number" id="tun_${k}" min="0" title="修改后自动保存，下次启动保留">` +
-      `<span class="tun-hint">${esc(TUNABLE_HINTS[k] || "")}</span>`;
-    const input = row.querySelector("input");
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { saveTunable(k, input, null); input.blur(); }
-    });
-    input.addEventListener("blur", () => saveTunable(k, input, null));
-    box.appendChild(row);
-  });
-}
-
-async function saveTunable(key, input) {
-  const val = parseInt(input.value, 10);
-  if (!Number.isInteger(val)) { showStStatus("请输入整数", "err"); return; }
-  const prev = input.value;
-  input.disabled = true;
-  try {
-    const r = await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, value: val }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
-    const d = await r.json();
-    addLog(`选题参数 ${CFG_LABELS[key] || key} → ${d.value}`, "result");
-    showStStatus(`${CFG_LABELS[key] || key} → ${d.value}`, "ok");
-    loadConfig();
-  } catch (e) {
-    input.value = prev;
-    showStStatus("保存失败：" + e.message, "err");
-  } finally {
-    input.disabled = false;
-  }
-}
-
-async function loadConfig() {
-  try {
-    const r = await fetch("/api/config");
-    const cfg = await r.json();
-    const grid = $("cfgGrid");
-    grid.innerHTML = "";
-    Object.entries(CFG_LABELS).forEach(([k, label]) => {
-      if (!(k in cfg) || TUNABLE_KEYS.has(k)) return;  // 可调参数在设置弹窗中编辑
-      let v = cfg[k];
-      const cls = (typeof v === "boolean") ? (v ? "on" : "off") : "";
-      let txt = (typeof v === "boolean") ? (v ? "开" : "关") : String(v);
-      if (k === "QUESTION_SOURCE") txt = ({recommend: "推荐话题", invited: "邀请回答", custom: "自选问题"})[v] || txt;
-      const cell = document.createElement("div");
-      cell.className = "cfg-cell";
-      cell.innerHTML = `<div class="k">${esc(label)}</div><div class="v ${cls}">${esc(txt)}</div>`;
-      grid.appendChild(cell);
-    });
-    // 同步设置弹窗中的可调参数当前值
-    TUNABLE_KEYS.forEach((k) => {
-      if (!(k in cfg)) return;
-      const input = $("tun_" + k);
-      if (input) input.value = cfg[k];
-    });
-  } catch (e) {
-    $("cfgGrid").innerHTML = '<div class="empty-note">配置加载失败</div>';
-  }
-}
-
-/* ---------- 模型切换 ---------- */
-
-const providerSel = $("providerSel");
-const modelSel = $("modelSel");
-let modelProviders = [];
-let modelCurrent = null;
-let modelDirty = false;
-
-async function loadModels() {
-  try {
-    const r = await fetch("/api/models");
-    const data = await r.json();
-    modelProviders = data.providers;
-    modelCurrent = data.current;
-    if (!modelProviders.length) return;
-    $("modelRow").hidden = false;
-    providerSel.innerHTML = "";  // 重复加载（如保存 key 后）时先清空再填充
-    modelProviders.forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.name;
-      opt.textContent = p.name;
-      providerSel.appendChild(opt);
-    });
-    providerSel.value = modelCurrent.provider;
-    renderModelOptions();
-    modelSel.value = modelCurrent.model_id;
-  } catch (e) { /* 配置不可用时不显示选择器 */ }
-}
-
-function renderModelOptions() {
-  const p = modelProviders.find((x) => x.name === providerSel.value);
-  modelSel.innerHTML = "";
-  (p ? p.models : []).forEach((m) => {
-    const opt = document.createElement("option");
-    opt.value = m.id;
-    opt.textContent = m.id;
-    modelSel.appendChild(opt);
-  });
-  modelDirty = true;
-}
-
-/* 模型切换：修改即自动保存（切 provider 时自动选其默认模型一并提交） */
-let _modelSubmitTimer = null;
-async function applyModel() {
-  const r = await fetch("/api/model", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: providerSel.value, model_id: modelSel.value }),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.detail || r.status);
-  modelCurrent = data.effective;
-  loadConfig();
-  addLog(`模型已切换 → ${data.effective.provider} / ${data.effective.api_model}`, "result");
-  showStStatus(`模型已切换 → ${data.effective.api_model}`, "ok");
-}
-
-function queueModelSubmit() {
-  if (_modelSubmitTimer) clearTimeout(_modelSubmitTimer);
-  _modelSubmitTimer = setTimeout(() => {
-    _modelSubmitTimer = null;
-    const cur = modelCurrent;
-    const same = cur && cur.provider === providerSel.value && cur.model_id === modelSel.value;
-    if (same) return;  // 选择未实际变化（如重载后重建选项）不提交
-    applyModel().catch((e) => {
-      showStStatus("模型切换失败：" + e.message, "err");
-    });
-  }, 300);
-}
-
-providerSel.addEventListener("change", () => {
-  renderModelOptions();
-  queueModelSubmit();
-});
-modelSel.addEventListener("change", () => { queueModelSubmit(); });
-
-let _modeSubmitBusy = false;
-async function applyMode() {
-  if (_modeSubmitBusy) return;
-  const sel = document.querySelector('input[name="genMode"]:checked');
-  if (!sel || sel.value === genMode) return;
-  const target = sel.value;
-  _modeSubmitBusy = true;
-  try {
-    const r = await fetch("/api/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: target }),
-    });
-    if (!r.ok) {
-      // 还原选择（服务端拒绝，等配置完成后重新切换）
-      document.querySelectorAll('input[name="genMode"]').forEach((el) => {
-        el.checked = (el.value === genMode);
-      });
-      // 服务端闭环预检拒绝：detail 为 {detail, needs} → 弹对应引导
-      const body = await r.json().catch(() => null);
-      const d = body && body.detail;
-      if (d && typeof d === "object" && d.needs) {
-        showSetupGuide(d.needs);
-        return;
-      }
-      throw new Error(typeof d === "string" ? d : "切换失败");
-    }
-    const data = await r.json();
-    genMode = data.effective.mode;
-    loadConfig();
-    hideSetupWizard();
-    addLog(`生成通道已切换 → ${genMode === "web" ? "Web 网页版" : "API"}`, "result");
-    showStStatus(`生成通道 → ${genMode === "web" ? "Web 网页版" : "API"}`, "ok");
-  } catch (e) {
-    // 还原选择并提示
-    document.querySelectorAll('input[name="genMode"]').forEach((el) => {
-      el.checked = (el.value === genMode);
-    });
-    showStStatus("切换失败：" + e.message, "err");
-  } finally {
-    _modeSubmitBusy = false;
-  }
-}
-
-/* 生成通道：单选 change 即自动切换 */
-document.querySelectorAll('input[name="genMode"]').forEach((el) => {
-  el.addEventListener("change", applyMode);
-});
-
-async function loadMode() {
-  try {
-    const r = await fetch("/api/mode");
-    const data = await r.json();
-    genMode = data.mode;
-    document.querySelectorAll('input[name="genMode"]').forEach((el) => {
-      el.checked = (el.value === genMode);
-    });
-  } catch (e) { /* 旧服务无 /api/mode，保持默认 */ }
-}
-
-/* 生成通道状态（setup/status 查询结果缓存，首次切换引导用） */
-let setupCache = null;
-/* 引导窗是否为按需弹出（模式切换/运行检测失败触发）。
-   为 true 时轮询不得自动关闭窗口——首启引导完成后可自动收尾，
-   按需引导要等用户点「进入控制台」或主动操作完成。 */
-let manualGuideOpen = false;
-async function fetchSetupStatus() {
-  try {
-    const r = await fetch("/api/setup/status");
-    setupCache = await r.json();
-  } catch (e) { setupCache = null; }
-}
-
-
-let _browserSubmitBusy = false;
-async function applyBrowserMode() {
-  if (_browserSubmitBusy) return;
-  const sel = document.querySelector('input[name="browserMode"]:checked');
-  if (!sel || sel.value === String(browserHeadless)) return;
-  _browserSubmitBusy = true;
-  try {
-    const r = await fetch("/api/browser", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ headless: sel.value === "true" }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
-    const data = await r.json();
-    browserHeadless = data.effective.headless;
-    addLog(`浏览器模式已切换 → ${browserHeadless ? "无头（工作，下次任务生效）" : "前台（调试）"}`, "result");
-    showStStatus(`浏览器模式 → ${browserHeadless ? "无头" : "前台"}`, "ok");
-  } catch (e) {
-    document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
-      el.checked = (el.value === String(browserHeadless));
-    });
-    showStStatus("切换失败：" + e.message, "err");
-  } finally {
-    _browserSubmitBusy = false;
-  }
-}
-
-document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
-  el.addEventListener("change", applyBrowserMode);
-});
-
-async function loadBrowserMode() {
-  try {
-    const r = await fetch("/api/browser");
-    const data = await r.json();
-    browserHeadless = data.headless;
-    document.querySelectorAll('input[name="browserMode"]').forEach((el) => {
-      el.checked = (el.value === String(browserHeadless));
-    });
-  } catch (e) { /* 旧服务无 /api/browser，保持默认 */ }
-}
-
-/* ---------- 网页模式预设 ---------- */
-
-let webPreset = null;
-
-async function loadWebPreset() {
-  try {
-    const r = await fetch("/api/config");
-    const cfg = await r.json();
-    if (!cfg.WEB_PRESET) return;
-    const wp = cfg.WEB_PRESET;
-    $("webPresetRow").hidden = false;
-    webPreset = wp.preset;
-    $("webPresetSel").value = wp.preset;
-  } catch (e) { /* 旧服务无此配置 */ }
-}
-
-async function applyWebPreset() {
-  const val = $("webPresetSel").value;
-  if (val === webPreset) return;
-  try {
-    const r = await fetch("/api/web-preset", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ preset: val }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
-    const data = await r.json();
-    webPreset = data.effective.preset;
-    loadConfig();
-    addLog(`网页模式预设已切换 → ${webPreset === "expert" ? "专家 + 深度思考" : "快速 + 深度思考 + 智能搜索"}`, "result");
-    showStStatus(`网页预设 → ${webPreset === "expert" ? "专家" : "快速"}`, "ok");
-  } catch (e) {
-    $("webPresetSel").value = webPreset;
-    showStStatus("切换失败：" + e.message, "err");
-  }
-}
-
-$("webPresetSel").addEventListener("change", applyWebPreset);
-
-
-/* ---------- 选题来源 ---------- */
-
-let questionSource = "recommend";
-
-const QUESTION_SOURCE_LABELS = {recommend: "推荐话题", invited: "邀请回答", custom: "自选问题"};
-
-async function loadQuestionSource() {
-  try {
-    const r = await fetch("/api/question-source");
-    const data = await r.json();
-    questionSource = data.source;
-    $("questionSourceSel").value = data.source;
-    $("customUrlInput").value = data.custom_url || "";
-    $("customUrlRow").hidden = (data.source !== "custom");
-  } catch (e) { /* 旧服务无此端点 */ }
-}
-
-async function applyQuestionSource() {
-  const val = $("questionSourceSel").value;
-  if (val === questionSource) return;
-  try {
-    const r = await fetch("/api/question-source", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: val, custom_url: $("customUrlInput").value.trim() }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
-    const data = await r.json();
-    questionSource = data.effective.question_source;
-    $("customUrlRow").hidden = (questionSource !== "custom");
-    loadConfig();
-    addLog(`选题来源已切换 → ${QUESTION_SOURCE_LABELS[questionSource]}`, "result");
-    showStStatus(`选题来源 → ${QUESTION_SOURCE_LABELS[questionSource]}`, "ok");
-  } catch (e) {
-    $("questionSourceSel").value = questionSource;
-    showStStatus("切换失败：" + e.message, "err");
-  }
-}
-
-async function saveCustomUrl() {
-  const url = $("customUrlInput").value.trim();
-  try {
-    const r = await fetch("/api/question-source", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "custom", custom_url: url }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
-    const data = await r.json();
-    $("customUrlInput").value = data.effective.custom_question_url || "";
-    showStStatus("自选问题链接已保存", "ok");
-  } catch (e) {
-    showStStatus("保存失败：" + e.message, "err");
-  }
-}
-
-$("questionSourceSel").addEventListener("change", applyQuestionSource);
-$("customUrlInput").addEventListener("change", saveCustomUrl);
-
-
-/* ---------- 作者文风 ---------- */
-
-const authorSel = $("authorSel");
-
-async function loadAuthors() {
-  try {
-    const r = await fetch("/api/authors");
-    const data = await r.json();
-    authorSel.innerHTML = '<option value="">（不注入文风）</option>';
-    (data.authors || []).forEach((a) => {
-      const opt = document.createElement("option");
-      opt.value = a.name;
-      opt.textContent = `${a.general ? "通用" : a.name}（${a.stories_count} 篇样本）`;
-      authorSel.appendChild(opt);
-    });
-    const cur = data.current || "";
-    authorSel.value = (cur === "通用") ? "通用" : cur;
-    authorSel.dataset.current = authorSel.value;
-    authorSel.disabled = false;
-    // 提炼完成后自动把新文风加进下拉
-    window._authorsCache = data.authors || [];
-  } catch (e) { /* 旧服务无 /api/authors */ }
-}
-
-async function applyAuthorProfile() {
-  const name = authorSel.value;
-  const prev = authorSel.dataset.current || "";
-  if (name === prev) return;
-  try {
-    const r = await fetch("/api/author", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
-    const data = await r.json();
-    authorSel.dataset.current = data.effective.author_profile || "";
-    addLog(`作者文风已切换 → ${data.effective.author_profile || "（不注入）"}`, "result");
-    showStStatus(`作者文风 → ${data.effective.author_profile || "不注入"}`, "ok");
-    loadConfig();
-  } catch (e) {
-    authorSel.value = prev;
-    showStStatus("文风切换失败：" + e.message, "err");
-  }
-}
-
-authorSel.addEventListener("change", applyAuthorProfile);
-
-/* ---------- 任务进度计时器（剖析中无百分比 → 显示已等待秒数） ---------- */
-
-let taskTimer = null;
-let taskTimerBase = 0;
-let taskTimerText = "";
-
-function startTaskTimer(text) {
-  if (taskTimer && taskTimerText === text) return;  // 重复轮询不重置计时
-  stopTaskTimer();
-  taskTimerText = text;
-  taskTimerBase = Date.now();
-  const tick = () => {
-    const sec = Math.floor((Date.now() - taskTimerBase) / 1000);
-    const mm = String(Math.floor(sec / 60)).padStart(2, "0");
-    const ss = String(sec % 60).padStart(2, "0");
-    $("progressText").textContent = `${text} 已等待 ${mm}:${ss}（通常 1-3 分钟，可随时点停止）`;
-  };
-  tick();
-  taskTimer = setInterval(tick, 1000);
-}
-
-function stopTaskTimer() {
-  if (taskTimer) { clearInterval(taskTimer); taskTimer = null; }
-  taskTimerText = "";
-}
-
-/* ---------- 左列模式切换（扩展点：新增模式 = 加一项 + 对应 pane 容器） ---------- */
-
-const LEFT_MODES = [
-  { id: "workspace", name: "工作台",
-    desc: "故事生成主流程：选题、提取、生成、批量运行" },
-  { id: "distill", name: "作者蒸馏",
-    desc: "扩展模块：采集作者样本 → 提炼文风签名" },
-];
-let currentLeftMode = "workspace";
-
-function renderLeftMode() {
-  const sel = $("leftModeSel");
-  sel.innerHTML = "";
-  LEFT_MODES.forEach((m) => {
-    const opt = document.createElement("option");
-    opt.value = m.id;
-    opt.textContent = m.name;
-    sel.appendChild(opt);
-  });
-  sel.value = currentLeftMode;
-  applyLeftMode(currentLeftMode);
-}
-
-function applyLeftMode(id) {
-  currentLeftMode = id;
-  const mode = LEFT_MODES.find((m) => m.id === id);
-  $("leftModeDesc").textContent = mode ? mode.desc : "";
-  document.querySelectorAll(".mode-pane").forEach((p) => {
-    p.hidden = p.id !== "pane-" + id;
-  });
-}
-
-/* ---------- 文风提炼 ---------- */
-
-const profileSourceSel = $("profileSourceSel");
-const btnProfile = $("btnProfile");
-const btnGeneralProfile = $("btnGeneralProfile");
-
-async function loadProfileSources() {
-  try {
-    const r = await fetch("/api/profile-sources");
-    const data = await r.json();
-    const hint = $("profileLibHint");
-    if (!data.authors.length) {
-      profileSourceSel.innerHTML = '<option value="">（采集库为空）</option>';
-      if (hint) hint.textContent = '采集库为空，请先在上方「故事采集」添加样本';
-      return;
-    }
-    const total = data.authors.reduce((s, a) => s + (a.records || 0), 0);
-    if (hint) hint.textContent = `采集库现有 ${data.authors.length} 位作者、共 ${total} 篇样本`;
-    profileSourceSel.innerHTML = "";
-    data.authors.forEach((a) => {
-      const opt = document.createElement("option");
-      opt.value = a.name;
-      opt.textContent = `${a.name}（${a.records} 条记录）`;
-      profileSourceSel.appendChild(opt);
-    });
-    profileSourceSel.disabled = false;
-    btnProfile.disabled = false;
-  } catch (e) { /* ignore */ }
-}
-
-function runProfileMode(mode, author) {
-  const body = { mode };
-  if (author) body.author = author;
-  $("logBox").innerHTML = "";
-  genChars = 0;
-  formatScore = null;
-  fetch("/api/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }).then((r) => {
-    if (!r.ok) {
-      return r.json().catch(() => ({})).then((err) => {
-        addLog("启动失败：" + (err.detail || r.status), "error");
-        return null;
-      });
-    }
-    connectSSE();
-    return null;
-  }).catch((e) => addLog("无法连接服务：" + e, "error"));
-}
-
-btnProfile.addEventListener("click", () => {
-  if (profileSourceSel.disabled || !profileSourceSel.value) return;
-  runProfileMode("profile", profileSourceSel.value);
-});
-
-btnGeneralProfile.addEventListener("click", () => {
-  runProfileMode("general_profile");
-});
-
-/* ---------- 故事采集 ---------- */
-
-const btnCollect = $("btnCollect");
-
-function runCollect() {
-  const url = $("collectUrl").value.trim();
-  if (!url) {
-    alert("请输入作者回答列表 URL（形如 https://www.zhihu.com/people/xxx/answers）");
-    return;
-  }
-  if (!/^https?:\/\//.test(url)) {
-    alert("URL 须以 http(s):// 开头");
-    return;
-  }
-  const count = parseInt($("collectCount").value, 10) || 10;
-  const body = {
-    mode: "collect",
-    url,
-    count: Math.min(500, Math.max(1, count)),
-  };
-  $("logBox").innerHTML = "";
-  genChars = 0;
-  formatScore = null;
-  btnCollect.disabled = true;
-  btnCollect.textContent = "采集中…";
-  fetch("/api/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }).then((r) => {
-    if (!r.ok) {
-      return r.json().catch(() => ({})).then((err) => {
-        addLog("启动失败：" + (err.detail || r.status), "error");
-        return null;
-      });
-    }
-    connectSSE();
-    return null;
-  }).catch((e) => addLog("无法连接服务：" + e, "error"))
-    .finally(() => {
-      btnCollect.disabled = false;
-      btnCollect.textContent = "开始采集";
-    });
-}
-
-btnCollect.addEventListener("click", runCollect);
-
-/* ---------- 采集库管理 ---------- */
-
-const libMask = $("libMask");
-const libBody = $("libBody");
-let libAuthors = [];
-
-function escAttr(s) {
-  return String(s ?? "").replace(/"/g, "&quot;");
-}
-
-async function loadStoryLib() {
-  try {
-    const r = await fetch("/api/storylib");
-    const data = await r.json();
-    libAuthors = data.authors || [];
-    renderStoryLib();
-  } catch (e) {
-    libBody.innerHTML = '<div class="empty-note">采集库加载失败</div>';
-  }
-}
-
-function renderStoryLib() {
-  if (!libAuthors.length) {
-    libBody.innerHTML = '<div class="empty-note">采集库为空（还没有采集过任何故事）</div>';
-    return;
-  }
-  const total = libAuthors.reduce((n, a) => n + a.records, 0);
-  let html = `<div class="slib-total" style="margin-bottom:10px">共 ${libAuthors.length} 位作者，${total} 条记录。删除后不可恢复。</div>`;
-  libAuthors.forEach((a) => {
-    const hp = a.has_profile
-      ? `<div class="has-profile">⚠ 已有文风签名（data/authors/）——删除样本不会删签名，可另行处理</div>` : "";
-    html += `
-      <div class="slib-author" data-author="${escAttr(a.name)}">
-        <div class="info">
-          <div class="nm">${esc(a.name)}</div>
-          <div class="dt">${a.records} 条记录${hp ? "" : ""}</div>
-          ${hp}
-        </div>
-        <button class="btn-sm" data-act="toggle">展开</button>
-        <button class="btn-sm" data-act="del">删除全部</button>
-      </div>`;
-  });
-  libBody.innerHTML = html;
-}
-
-async function loadAuthorDetails(author) {
-  try {
-    const r = await fetch("/api/storylib?author=" + encodeURIComponent(author));
-    return (await r.json()).records || [];
-  } catch (e) { return []; }
-}
-
-libBody.addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-act]");
-  if (!btn) return;
-  const row = btn.closest(".slib-author");
-  const author = row.dataset.author;
-  const act = btn.dataset.act;
-
-  if (act === "toggle") {
-    const open = (btn.textContent === "收起");
-    btn.textContent = open ? "展开" : "收起";
-    const detail = row.querySelector(".slib-detail");
-    if (open) { if (detail) detail.remove(); return; }
-    const records = await loadAuthorDetails(author);
-    const items = records.map((rec) => `
-      <div class="slib-item" data-url="${escAttr(rec.answer_url)}">
-        <span class="t">${esc(rec.title)}</span>
-        <span class="m">${rec.chars} 字 · ${esc(rec.collected_at)}</span>
-        <button class="btn-sm" data-act="delOne">删除</button>
-      </div>`).join("");
-    const d = document.createElement("div");
-    d.className = "slib-detail";
-    d.innerHTML = items || '<div class="empty-note">（无记录）</div>';
-    row.appendChild(d);
-    return;
-  }
-
-  if (act === "del") {
-    const n = row.querySelector(".dt").textContent;
-    if (!confirm(`删除作者「${author}」的全部采集记录？\n（${n}，不可恢复）`)) return;
-    const r = await fetch("/api/storylib", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ author }),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      alert("删除失败：" + (err.detail || r.status));
-      return;
-    }
-    loadStoryLib();
-    loadProfileSources();
-    return;
-  }
-
-  if (act === "delOne") {
-    const url = btn.closest(".slib-item").dataset.url;
-    const t = btn.closest(".slib-item").querySelector(".t").textContent;
-    if (!confirm(`删除单条记录「${t}」？\n（不可恢复）`)) return;
-    const r = await fetch("/api/storylib", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      alert("删除失败：" + (err.detail || r.status));
-      return;
-    }
-    // 刷新列表 + 重新展开该作者详情
-    loadStoryLib();
-    loadProfileSources();
-    btn.closest(".slib-item").remove();
-    const left = row.querySelectorAll(".slib-item").length;
-    if (!left) { const d = row.querySelector(".slib-detail"); if (d) d.remove(); }
-    return;
-  }
-});
-
-$("btnManageLib").addEventListener("click", () => {
-  libMask.classList.add("show");
-  loadStoryLib();
-});
-$("libClose").addEventListener("click", () => libMask.classList.remove("show"));
-libMask.addEventListener("click", (e) => {
-  if (e.target === libMask) libMask.classList.remove("show");
-});
-
-/* ---------- 首启引导（Edge → API Key → 知乎登录） ---------- */
-
-let setupNeeded = false;
-let setupTimer = null;
-
-async function fillSetupProviders() {
-  try {
-    const r = await fetch("/api/models");
-    const data = await r.json();
-    const sel = $("setupProviderSel");
-    (data.providers || []).forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.name;
-      opt.textContent = p.name;
-      sel.appendChild(opt);
-    });
-    if (data.current) sel.value = data.current.provider;
-  } catch (e) { /* 服务不可用时保持空 */ }
-}
-
-async function setModeChoice(mode) {
-  try {
-    const r = await fetch("/api/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
-    });
-    if (!r.ok) return;
-    const data = await r.json();
-    genMode = data.effective.mode;
-    document.querySelectorAll('input[name="genMode"]').forEach((el) => {
-      el.checked = (el.value === genMode);
-    });
-    loadConfig();
-  } catch (e) { /* 旧服务无 /api/mode */ }
-}
-
-/* 用户手动点选的卡片（null=未点选，按后端状态取默认）。
-   轮询每 2.5s 重算默认选中，用户点选后不得被覆盖——
-   否则未配置 API 时刚点开的输入框会被轮询切走。 */
-let cardUserPick = null;
-
-/* 卡片选中状态：用户点选优先；否则默认选中已配置的一方；
-   都未配置时默认 Web（免费）。 */
-function selectModeCard(st) {
-  const mcApi = $("mcApi"), mcWeb = $("mcWeb");
-  if (cardUserPick === "api") {
-    mcApi.classList.add("sel"); mcWeb.classList.remove("sel");
-    return;
-  }
-  if (cardUserPick === "web") {
-    mcWeb.classList.add("sel"); mcApi.classList.remove("sel");
-    return;
-  }
-  mcApi.classList.toggle("sel", !!st.llm_configured && !st.web_llm_logged_in);
-  mcWeb.classList.toggle("sel", !mcApi.classList.contains("sel"));
-}
-
-function renderModeCardState(st) {
-  const mcApi = $("mcApi"), mcWeb = $("mcWeb");
-  mcApi.classList.toggle("done", !!st.llm_configured);
-  mcApi.querySelector(".mc-d").textContent =
-    st.llm_configured ? "✓ 已配置 API Key，可随时切换使用。" :
-    "付费、响应快。DeepSeek 开放平台申请 API Key。";
-  mcWeb.classList.toggle("done", !!st.web_llm_logged_in);
-  mcWeb.querySelector(".mc-d").textContent =
-    st.web_llm_logged_in ? "✓ 已登录 DeepSeek 网页版，可直接使用。" :
-    "免费。登录 chat.deepseek.com 后由浏览器自动操作。";
-  if (st.login_running && st.login_kind === "deepseek") {
-    const b = $("btnWebLogin");
-    b.disabled = true;
-    b.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
-    $("webErr").textContent = "";
-  } else {
-    $("btnWebLogin").disabled = false;
-    $("btnWebLogin").textContent = "打开 Edge 登录 DeepSeek";
-  }
-  if (st.login_error && st.login_kind === "deepseek") {
-    $("webErr").textContent = "登录未完成：" + st.login_error;
-  }
-}
-
-async function loadSetupStatus() {
-  try {
-    const r = await fetch("/api/setup/status");
-    const st = await r.json();
-    setupCache = st;
-    if (st.version) $("setupVersion").textContent = "v" + st.version;
-    setupNeeded = !!st.setup_needed;
-    if (!st.setup_needed && !manualGuideOpen) { hideSetupWizard(); return; }
-
-    const edge = $("stepEdge");
-    const mode = $("stepMode");
-    const zhihu = $("stepZhihu");
-
-    if (st.edge_ok) {
-      edge.classList.add("done");
-      edge.querySelector(".s-badge").textContent = "✓";
-      $("stepEdgeDesc").textContent = "已检测到 Microsoft Edge。";
-    } else {
-      edge.classList.remove("done");
-      edge.querySelector(".s-badge").textContent = "1";
-      $("stepEdgeDesc").innerHTML =
-        "未找到 Microsoft Edge。AutoQuill 需要 Edge 来操作知乎。<br>" +
-        "请安装：<a href=\"https://www.microsoft.com/edge\" target=\"_blank\" rel=\"noopener\">microsoft.com/edge</a>，安装完成后点「重新检测」。";
-    }
-    edge.style.display = "";
-
-    const modeDone = st.llm_configured || st.web_llm_logged_in;
-    mode.classList.toggle("done", modeDone);
-    mode.querySelector(".s-badge").textContent = modeDone ? "✓" : "2";
-    mode.style.display = "";
-    renderModeCardState(st);
-    selectModeCard(st);
-
-    if (st.zhihu_logged_in) {
-      zhihu.classList.add("done");
-      zhihu.querySelector(".s-badge").textContent = "✓";
-      $("stepZhihuDesc").textContent = "已保存知乎登录态。";
-      zhihu.querySelector(".s-ctl").style.display = "none";
-    } else {
-      zhihu.classList.remove("done");
-      zhihu.querySelector(".s-badge").textContent = "3";
-      zhihu.querySelector(".s-ctl").style.display = "";
-      $("stepZhihuDesc").innerHTML =
-        "用于采集素材与发布草稿。点击后弹出 Edge 窗口，扫码或短信登录即可，检测到登录会自动保存。";
-      if (st.login_running && st.login_kind === "zhihu") {
-        $("btnZhihuLogin").disabled = true;
-        $("btnZhihuLogin").textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
-      } else {
-        $("btnZhihuLogin").disabled = false;
-        $("btnZhihuLogin").textContent = "打开 Edge 登录知乎";
-      }
-      if (st.login_error && st.login_kind === "zhihu") {
-        $("zhihuErr").textContent = "登录未完成：" + st.login_error;
-      }
-    }
-    zhihu.style.display = "";
-
-    $("setupMask").classList.add("show");
-    const allDone = st.edge_ok && st.zhihu_logged_in
-      && (st.llm_configured || st.web_llm_logged_in);
-    // allDone 收尾只适用于首启引导；按需引导（manual）等用户点
-    // 「进入控制台」关闭——用户可能整体配置完成但当前模式仍缺配置
-    if (allDone && !manualGuideOpen) hideSetupWizard();
-    return st;
-  } catch (e) { /* 旧服务无 setup 端点 */ }
-}
-
-function hideSetupWizard() {
-  manualGuideOpen = false;
-  $("setupMask").classList.remove("show");
-  if (setupTimer) { clearInterval(setupTimer); setupTimer = null; }
-}
-
-async function pollSetupStatus() {
-  try {
-    const st = await loadSetupStatus();
-    if (st && st.setup_needed) {
-      if (!st.login_running) {
-        $("btnZhihuLogin").disabled = false;
-        $("btnZhihuLogin").textContent = "打开 Edge 登录知乎";
-      }
-    } else if (st && !st.setup_needed) {
-      if (!manualGuideOpen) hideSetupWizard();  // 按需引导窗由用户关闭
-    }
-  } catch (e) { /* ignore */ }
-}
-
-$("btnSetup").addEventListener("click", () => {
-  // 首次引导未完成 → 打开引导向导；已完成 → 打开设置弹窗
-  if (setupNeeded) { loadSetupStatus(); return; }
-  $("settingsMask").classList.add("show");
-  loadConfig(); loadMode(); loadBrowserMode(); loadWebPreset();
-  loadAuthors(); loadQuestionSource();
-});
-
-$("settingsClose").addEventListener("click", () => $("settingsMask").classList.remove("show"));
-$("settingsMask").addEventListener("click", (e) => {
-  if (e.target === $("settingsMask")) $("settingsMask").classList.remove("show");
-});
-
-$("btnSetupFinish").addEventListener("click", hideSetupWizard);
-
-$("mcApi").addEventListener("click", () => {
-  cardUserPick = "api";
-  selectModeCard(setupCache || {});
-  if (!$("setupApiKey").value && !$("mcApi").classList.contains("done")) {
-    $("setupApiKey").focus();
-  }
-});
-$("mcWeb").addEventListener("click", () => {
-  cardUserPick = "web";
-  selectModeCard(setupCache || {});
-  if (!$("mcWeb").classList.contains("done")) {
-    $("btnWebLogin").focus();
-  }
-});
-
-/* ---------- 检查更新 ---------- */
-
-async function checkUpdate() {
-  const btn = $("btnUpdate");
-  btn.disabled = true;
-  const orig = btn.textContent;
-  btn.textContent = "检查中…";
-  try {
-    const r = await fetch("/api/update/check");
-    const d = await r.json();
-    if (d.error) {
-      btn.textContent = orig;
-      alert("检查更新失败：" + d.error);
-      return;
-    }
-    if (d.has_update) {
-      btn.textContent = "有新版本";
-      if (confirm(`发现新版本 ${d.latest}（当前 ${d.current}）\n\n点击「确定」前往下载页。下载后运行安装包即可升级，数据会自动保留。`)) {
-        window.open(d.url, "_blank");
-      }
-    } else {
-      btn.textContent = "已是最新版本";
-      setTimeout(() => { btn.textContent = orig; }, 3000);
-    }
-  } catch (e) {
-    btn.textContent = orig;
-    alert("检查更新失败：" + e.message);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-$("btnUpdate").addEventListener("click", checkUpdate);
-
-$("btnEdgeOk").addEventListener("click", () => {
-  loadSetupStatus();
-});
-
-$("btnKeySave").addEventListener("click", async () => {
-  const key = $("setupApiKey").value.trim();
-  $("keyErr").textContent = "";
-  $("keyOk").textContent = "";
-  if (!key) { $("keyErr").textContent = "请粘贴 API Key"; return; }
-  const btn = $("btnKeySave");
-  btn.disabled = true;
-  btn.textContent = "保存中…";
-  try {
-    const r = await fetch("/api/setup/apikey", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: $("setupProviderSel").value, api_key: key }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
-    const t = await fetch("/api/setup/test-api", { method: "POST" });
-    const td = await t.json();
-    if (td.ok) {
-      $("keyOk").textContent = "已保存，连接测试成功：" + td.detail;
-      $("setupApiKey").value = "";
-      await setModeChoice("api");
-      loadSetupStatus();
-      loadModels(); loadConfig();
-    } else {
-      $("keyErr").textContent = "已保存，但连接测试未通过：" + td.detail;
-      loadSetupStatus();
-    }
-  } catch (e) {
-    $("keyErr").textContent = "保存失败：" + e.message;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "保存并测试连接";
-  }
-});
-
-$("btnWebLogin").addEventListener("click", async () => {
-  const btn = $("btnWebLogin");
-  btn.disabled = true;
-  btn.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
-  $("webErr").textContent = "";
-  $("webOk").textContent = "";
-  try {
-    const r = await fetch("/api/setup/web-login", { method: "POST" });
-    if (!r.ok) throw new Error((await r.json()).detail || "启动失败");
-    await setModeChoice("web");
-    if (setupTimer) clearInterval(setupTimer);
-    setupTimer = setInterval(pollSetupStatus, 2500);
-  } catch (e) {
-    $("webErr").textContent = e.message;
-    btn.disabled = false;
-    btn.textContent = "打开 Edge 登录 DeepSeek";
-  }
-});
-
-$("btnZhihuLogin").addEventListener("click", async () => {
-  const btn = $("btnZhihuLogin");
-  btn.disabled = true;
-  btn.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
-  $("zhihuErr").textContent = "";
-  $("zhihuOk").textContent = "";
-  try {
-    const r = await fetch("/api/setup/zhihu-login", { method: "POST" });
-    if (!r.ok) throw new Error((await r.json()).detail || "启动失败");
-    if (setupTimer) clearInterval(setupTimer);
-    setupTimer = setInterval(pollSetupStatus, 2500);
-  } catch (e) {
-    $("zhihuErr").textContent = e.message;
-    btn.disabled = false;
-    btn.textContent = "打开 Edge 登录知乎";
-  }
-});
-
-/* ---------- 任务运行 ---------- */
-
-function connectSSE() {
-  if (es) es.close();
-  es = new EventSource("/api/events");
-  es.addEventListener("stage", (e) => handleLogEvent(e, "stage"));
-  es.addEventListener("result", (e) => handleLogEvent(e, "result"));
-  es.addEventListener("error", (e) => handleLogEvent(e, "error"));
-  es.addEventListener("log", (e) => handleLogEvent(e, ""));
-  es.addEventListener("run_end", (e) => handleLogEvent(e, "run_end"));
-  es.addEventListener("progress", (e) => {
-    const p = JSON.parse(e.data);
-    if (p.task) {
-      // 阶段进度（文风提炼等）：pct 有值=定宽；无值=不确定（LLM 剖析中）
-      applyTaskProgress(p);
-      return;
-    }
-    $("progressWrap").classList.add("show");
-    if (p.think) {
-      // 思考阶段：无字数目标，用不确定动画 + 思考字符数
-      $("progressFill").classList.add("indeterminate");
-      $("progressText").textContent = `模型思考中… 已思考 ${p.chars} 字符`;
-      return;
-    }
-    genChars = p.chars;
-    const pct = Math.min(100, Math.round((genChars / 8000) * 100));
-    $("progressFill").classList.remove("indeterminate");
-    $("progressFill").style.width = pct + "%";
-    $("progressText").textContent = `故事生成中… 已生成 ${genChars} 字（估算目标 8000）`;
-    // 顺手从日志行里抓格式分
-    const m = (p.text || "").match(/格式检测[：:]\s*(\d+)\s*\/\s*10/);
-    if (m) formatScore = parseInt(m[1], 10);
-  });
-  es.addEventListener("state", (e) => {
-    const s = JSON.parse(e.data);
-    setState(s.state, s.message, s.guide_needed);
-    if (["done", "error", "stopped", "timeout"].includes(s.state)) {
-      genChars = 0;
-      refreshStatus();
-      loadStories();
-      loadAuthors();  // 文风提炼完成后下拉即时更新
-      loadProfileSources();  // 采集完成后来源下拉即时更新
-    }
-  });
-  es.onopen = () => {
-    addLog("已连接实时日志通道", "result");
-    if (!window.__logHistoryLoaded) {
-      window.__logHistoryLoaded = true;
-      loadLogHistory();  // 页面刷新后回放最近日志（SSE 不补历史）
-    }
-  };
-}
-
-async function refreshStatus() {
-  try {
-    const r = await fetch("/api/status");
-    const st = await r.json();
-    if (st.context && (st.context.title || st.context.profile || st.context.collect)) {
-      renderContext(st.context);
-    }
-    if (st.story && st.story.text) {
-      const ctx = st.context || {};
-      renderStory(st.story, ctx.title || null);
-    }
-  } catch (e) { /* ignore */ }
-}
-
-async function run() {
-  const body = { mode: currentMode };
-  if (currentMode === "batch") {
-    body.gen_count = parseInt($("genCount").value, 10) || 5;
-    body.publish_count = parseInt($("pubCount").value, 10) || 3;
-  }
-  $("logBox").innerHTML = "";
-  genChars = 0;
-  formatScore = null;
-  try {
-    const r = await fetch("/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      addLog("启动失败：" + (err.detail || r.status), "error");
-      return;
-    }
-    connectSSE();
-  } catch (e) {
-    addLog("无法连接服务：" + e, "error");
-  }
-}
-
-async function stop() {
-  try {
-    await fetch("/api/stop", { method: "POST" });
-    addLog("已发送停止请求…", "error");
-  } catch (e) { /* ignore */ }
-}
-
-/* ---------- 初始化 ---------- */
-
-document.querySelectorAll("#modeGroup input[name=mode]").forEach((el) => {
-  el.addEventListener("change", () => {
-    currentMode = el.value;
-    document.querySelectorAll(".mode-opt").forEach((o) =>
-      o.classList.toggle("sel", o.querySelector("input").checked));
-    $("batchParams").style.display = (currentMode === "batch") ? "" : "none";
-  });
-});
-
-$("btnRun").onclick = run;
-$("btnStop").onclick = stop;
-$("modalClose").onclick = () => $("modalMask").classList.remove("show");
-$("modalMask").addEventListener("click", (e) => {
-  if (e.target === $("modalMask")) $("modalMask").classList.remove("show");
-});
-
-(async () => {
-  renderLeftMode();
-  $("leftModeSel").addEventListener("change", (e) => applyLeftMode(e.target.value));
-  initTunables();
-  loadConfig();
-  loadModels();
-  loadMode();
-  loadBrowserMode();
-  loadWebPreset();
-  loadAuthors();
-  loadProfileSources();
-  loadStories();
-  loadLogHistory().then(() => { window.__logHistoryLoaded = true; });  // 页面加载即回放最近日志；标记防首次运行重复回放
-  fillSetupProviders();
-  loadSetupStatus();  // 首启引导（未配置时弹出遮罩）
-  try {
-    const r = await fetch("/api/status");
-    const st = await r.json();
-    setState(st.state, st.message);
-    if (st.state === "running") {
-      connectSSE();
-      if (st.progress) applyTaskProgress(st.progress);  // SSE 连接前的进度
-    }
-    else refreshStatus();  // 空闲时恢复上次运行的结果卡片
-  } catch (e) {
-    setState("error", "无法连接后端");
-  }
-})();
-</script>
+<!-- 已发布内容：筛选待清理 + 删除 -->
+<div class="modal-mask" id="dashClearMask">
+  <div class="modal" style="width:min(880px,100%)">
+    <div class="modal-head">
+      <span class="n">筛选待清理（时间久远 + 数据不佳）</span>
+      <button class="close" id="dashClearClose">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="st-title">判定条件（默认即「数据不佳」阈值，可调）</div>
+      <div class="cl-grid">
+        <div class="cl-field"><label>早于<input type="date" id="clBefore"></label><div class="st-d">只保留此前发布的；不填=不限「久远」</div></div>
+        <div class="cl-field"><label>赞同 ≤<input type="number" id="clLikes" value="5" min="0"></label><div class="st-d">默认 5</div></div>
+        <div class="cl-field"><label>阅读 ≤<input type="number" id="clReads" value="100" min="0"></label><div class="st-d">默认 100</div></div>
+        <div class="cl-field"><label>评论 ≤<input type="number" id="clComments" value="1" min="0"></label><div class="st-d">默认 1</div></div>
+        <div class="cl-field"><label>收藏 ≤<input type="number" id="clCollects" value="0" min="0"></label><div class="st-d">默认 0</div></div>
+        <div class="cl-field"><label>喜欢 ≤<input type="number" id="clFavors" value="0" min="0"></label><div class="st-d">默认 0</div></div>
+      </div>
+      <div class="cl-actions" style="margin-top:0">
+        <button class="btn primary btn-model" id="clFilterBtn">开始筛选</button>
+        <button class="btn ghost btn-model" id="clResetBtn">恢复默认</button>
+        <span class="cl-status" id="clStatus"></span>
+      </div>
+      <div class="st-title" style="margin:14px 0 8px;display:flex;align-items:center;gap:8px">
+        候选（勾选后操作）<span id="clCount" style="color:var(--muted);font-weight:400"></span>
+      </div>
+      <div class="cl-list" id="clList"><div class="empty-note">设置条件后点「开始筛选」查看候选</div></div>
+      <div class="cl-actions">
+        <button class="btn ghost sm" id="clAllBtn">全选</button>
+        <button class="btn ghost sm" id="clNoneBtn">全不选</button>
+        <div class="spacer"></div>
+        <button class="btn ghost btn-model" id="clPruneBtn" disabled>移除出看板（本地）</button>
+        <button class="btn danger btn-model" id="clDeleteZhihuBtn" disabled>从知乎删除（不可逆）</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 草稿预览弹窗 -->
+<div class="modal-mask" id="draftViewMask">
+  <div class="modal" style="width:min(860px,100%)">
+    <div class="modal-head">
+      <span class="n" id="draftViewTitle">草稿预览</span>
+      <button class="close" id="draftViewClose">关闭</button>
+    </div>
+    <div class="modal-body draft-view-body" id="draftViewBody"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
 </body>
 </html>

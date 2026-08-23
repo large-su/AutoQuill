@@ -39,6 +39,7 @@ __all__ = [
     "SCORE_STORY_HEAD_CHARS", "SCORE_STORY_TAIL_CHARS",
     "STORY_GENERATE_CONCURRENCY", "STORY_GENERATE_CONCURRENCY_AUTO",
     "STORY_GENERATE_CONCURRENCY_MIN", "STORY_GENERATE_CONCURRENCY_MAX",
+    "STORY_GENERATE_MAX_ATTEMPTS",
 ]
 
 # ============================================================
@@ -93,8 +94,11 @@ MAX_SELECT_SCREENS = 3
 # 页面加载在浏览器进程并行，单个问题页的等待不再串行累加。
 PARALLEL_EXTRACT_LIMIT = 5
 
-# 格式不合规时是否自动重试（False = 直接跳过，不浪费 token）
-ENABLE_FORMAT_RETRY = False
+# 格式不合规时是否自动重试。单轮/批量生成现已统一走
+# generate_story_with_retry（按 STORY_GENERATE_MAX_ATTEMPTS 带失败原因
+# 反馈重试），此开关主要控制批量模式阶段2.5 的格式补重试。
+# False = 直接跳过，不浪费 token；True = 对不合规文章再重试一次。
+ENABLE_FORMAT_RETRY = True
 
 # 故事创作素材模式：
 #   "sample"               参考文章采样（默认）：本地片段采样注入，零 LLM 提炼
@@ -194,3 +198,8 @@ STORY_GENERATE_CONCURRENCY = 10
 STORY_GENERATE_CONCURRENCY_AUTO = True
 STORY_GENERATE_CONCURRENCY_MIN = 3
 STORY_GENERATE_CONCURRENCY_MAX = 10
+
+# 故事生成最大尝试次数（含首次）。生成失败/过短/格式不合规时，会把
+# 上一次的具体失败原因（字数/章节/长段/引号等）反馈注入重试 prompt，
+# 带反馈重试的收敛率远高于同 prompt 盲目重试。值 >=1；1 = 不重试。
+STORY_GENERATE_MAX_ATTEMPTS = 3

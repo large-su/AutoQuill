@@ -428,20 +428,23 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
         self.assertIn(
             "title, answer, _footer, url = self.extract_content()", src)
 
-    def test_run_single_saves_draft_before_format_check(self):
-        # ★ 回归：故事生成后立即存盘 + on_story 回调（在格式校验前）。
-        #   曾因格式不合规被跳过时故事既没落盘也不回调 → Web 控制台
-        #   看不到生成结果，用户白白等 1-2 分钟。
+    def test_run_single_saves_draft_before_pass_decision(self):
+        # ★ 回归：故事在「判定是否达标」前就落盘 + on_story 回调。
+        #   格式校验已移入 generate_story_with_retry（反馈重试），但
+        #   契约不变：无论最终是否合格，生成结果都要先落盘并回调，
+        #   让 Web 控制台能看到（废稿也留档，用户不白等）。
         from workflows.base import WorkflowBase
         src = inspect.getsource(WorkflowBase.run_single)
-        # 存盘必须先于格式合规检测（废稿也要留档）
+        self.assertIn("generate_story_with_retry", src)
+        # 存盘与 on_story 回调都须先于「是否达标」判定（废稿也要进 UI）
         self.assertLess(
             src.index("md_path = self.save_story_file(story)"),
-            src.index("validate_story_format(story)"))
-        # on_story 回调在存盘后立即触发（不依赖发布成败）
+            src.index("if not _pass:"))
         self.assertLess(
             src.index("on_story(story, md_path)"),
-            src.index("validate_story_format(story)"))
+            src.index("if not _pass:"))
+        # 合格才发布；不合规走废稿分支（不发布）
+        self.assertIn("self.publish(story, title, url, md_path)", src)
 
     def test_run_single_publish_reuses_saved_md_path(self):
         # publish 复用已保存的 md_path，避免废稿/正稿重复落盘

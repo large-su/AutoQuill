@@ -92,6 +92,30 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _cleanup_old_logs(days=30, keep_recent=20):
+    from pathlib import Path
+    """清理 N 天前的 autoquill_*.log（保留最近若干份，防止日志无限累积）。"""
+    try:
+        log_dir = Path(_data_path("logs"))
+        files = sorted(log_dir.glob("autoquill_*.log"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        now = time.time()
+        removed = 0
+        for i, p in enumerate(files):
+            if i >= keep_recent and (now - p.stat().st_mtime) > days * 86400:
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        if removed:
+            log.info("清理历史日志 %d 个（%s）", removed, log_dir)
+    except Exception:
+        pass  # 清理失败不影响启动
+
+
+_cleanup_old_logs()
+
 # ============================================================
 # 交互辅助
 # ============================================================

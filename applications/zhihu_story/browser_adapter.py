@@ -333,25 +333,38 @@ class ZhihuBrowser:
             raise RuntimeError(
                 "未找到系统 Microsoft Edge！请安装 Edge 后重试"
                 "（或设置 AQ_EDGE_PATH 环境变量指向 msedge.exe）")
-        try:
-            launch_kwargs = dict(
-                user_data_dir=self.user_data_dir,
-                executable_path=EDGE_PATH,
-                headless=self.headless,
-                locale="zh-CN",
-                timeout=_LAUNCH_TIMEOUT_MS,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            if self.headless:
-                # 无头 UA 含 HeadlessChrome → 知乎不渲染作者列表，
-                # 用去掉 Headless 的正常 Edge UA 覆盖。
-                launch_kwargs["user_agent"] = _CLEAN_EDGE_UA
-            self.context = self._pw.chromium.launch_persistent_context(
-                **launch_kwargs)
-        except Exception:
-            # 启动失败：丢弃半初始化驱动，避免残留进程占住 profile 锁
+        launch_kwargs = dict(
+            user_data_dir=self.user_data_dir,
+            executable_path=EDGE_PATH,
+            headless=self.headless,
+            locale="zh-CN",
+            timeout=_LAUNCH_TIMEOUT_MS,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        if self.headless:
+            # 无头 UA 含 HeadlessChrome → 知乎不渲染作者列表，
+            # 用去掉 Headless 的正常 Edge UA 覆盖。
+            launch_kwargs["user_agent"] = _CLEAN_EDGE_UA
+
+        # 后台任务（删除/抓取）刚结束时，同一个持久化 profile 的 Edge
+        # 可能还没释放锁，导致新实例启动后立即被关闭。等待并自动重试。
+        last_exc = None
+        for attempt in range(1, 4):
+            try:
+                self.context = self._pw.chromium.launch_persistent_context(
+                    **launch_kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                log.warning(
+                    "browser_adapter: 浏览器启动失败（第 %d 次）：%s",
+                    attempt, exc)
+                if attempt < 3:
+                    time.sleep(2.5)
+        else:
+            # 全部失败：丢弃半初始化驱动，避免残留进程占住 profile 锁
             self._pw = None
-            raise
+            raise last_exc
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.load_storage_state()
         log.info("browser_adapter: 浏览器就绪（共 %.1fs）", time.time() - t0)
