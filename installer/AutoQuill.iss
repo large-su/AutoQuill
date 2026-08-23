@@ -1,5 +1,7 @@
 ; ============================================================
-; AutoQuill 4.5.0 安装器（Inno Setup 6）
+; AutoQuill 安装器（Inno Setup 6）
+; 版本号由 tools/build_release.py 构建时从 core/version.py 自动注入，
+; 请勿手工改这里的 MyAppVersion（改了也会被覆盖）。
 ;
 ; 设计原则：
 ;   - 用户目录安装（{localappdata}\Programs\AutoQuill），免管理员权限

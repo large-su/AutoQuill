@@ -88,10 +88,29 @@ def gate():
     # 产物必然来自当前源码（防旧包靠"重建"而非"比对"）。
 
 
+def _sync_iss_version():
+    """把 core/version.py 的版本号自动注入 installer/AutoQuill.iss，
+    避免「改了版本号、安装包还是旧版号」的硬编码问题。"""
+    import re as _re
+    iss = ROOT / "installer" / "AutoQuill.iss"
+    text = iss.read_text(encoding="utf-8")
+    ver = version()
+    new_text, n = _re.subn(
+        r'(#define\s+MyAppVersion\s+")[^"]+(")',
+        lambda m: m.group(1) + ver + m.group(2),
+        text, count=1)
+    if n != 1:
+        sys.exit("✗ installer/AutoQuill.iss 未找到 #define MyAppVersion，无法注入版本号")
+    if new_text != text:
+        iss.write_text(new_text, encoding="utf-8")
+    print(f"✓ 安装器版本号已同步：v{ver}")
+
+
 def main():
     skip_test = "--skip-test" in sys.argv
     skip_build = "--skip-build" in sys.argv
     gate()
+    _sync_iss_version()
 
     if not skip_test:
         print("\n--- 全量测试 ---")

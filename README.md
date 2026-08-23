@@ -246,4 +246,6 @@ A：控制台日志框实时显示；完整日志在 `%APPDATA%\AutoQuill\logs\`
 
 面向开发者的架构说明、CLI 命令、配置参考、扩展指南见 **[docs/DEVELOPER.md](docs/DEVELOPER.md)**。
 
+测试与质量流程（单测 / 自动回归 / AI 味检测 / 打包发布的工作流与脚本说明）见 **[docs/QA-PLAYBOOK.md](docs/QA-PLAYBOOK.md)**。
+
 源码运行方式：`python main.py --web`（需 Python 3.10+ 与 `pip install -r requirements.txt`）。
