@@ -22,7 +22,13 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-from core.ports import WEB_PORT
+# 双击场景下 pythonw 以 tools/ 为工作目录启动，项目根不在 sys.path：
+# 显式注入，保证 core/ports.py 等顶层包可导入（打包态无 core 时兜底常量）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    from core.ports import WEB_PORT
+except Exception:  # noqa: BLE001
+    WEB_PORT = 8787
 PORT = WEB_PORT
 BASE_URL = f"http://127.0.0.1:{PORT}"
 SERVICE_ARGS = ["main.py", "--web"]
