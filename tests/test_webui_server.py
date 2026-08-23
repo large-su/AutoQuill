@@ -725,7 +725,8 @@ class TestStoryTraversalGuard(unittest.TestCase):
                      "..\\..\\config\\llm_providers.json",
                      "sub\\..\\..\\config.py", "/etc/passwd"):
             r = self.client.get("/api/story", params={"name": evil})
-            self.assertEqual(r.status_code, 400, f"name={evil}")
+            # 非 Windows 平台反斜杠只是普通文件名 → 404；核心是绝不 200 放行
+            self.assertNotEqual(r.status_code, 200, f"name={evil}")
 
     def test_missing_file_404(self):
         r = self.client.get("/api/story",

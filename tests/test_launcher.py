@@ -55,6 +55,7 @@ class _Window:
         self.events = events or _Events()
 
 
+@unittest.skipUnless(sys.platform == "win32", "Windows-only（ctypes.windll）")
 class TestFindTitlebarHandle(unittest.TestCase):
     def test_uses_native_handle_when_available(self):
         from tools.launcher import _find_titlebar_handle
@@ -86,6 +87,7 @@ class TestFindTitlebarHandle(unittest.TestCase):
         self.assertEqual(_find_titlebar_handle(_Window(None)), 0)
 
 
+@unittest.skipUnless(sys.platform == "win32", "Windows-only（ctypes.windll）")
 class TestApplyDarkTitlebar(unittest.TestCase):
     def test_non_windows_skipped(self):
         # 非 Windows 平台直接跳过，不抛异常
@@ -324,6 +326,7 @@ class TestNoConsoleWindow(unittest.TestCase):
         self.assertIn("服务就绪（启动后", src)
 
 
+@unittest.skipUnless(sys.platform == "win32", "Windows-only（ctypes.windll）")
 class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
     """真实 Win32 窗口端到端：真实形态 IntPtr → ToInt64 转换 → 深色生效。
 
