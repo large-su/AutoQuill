@@ -45,6 +45,7 @@ class SlotState:
         self.status = SlotState.IDLE
         self.task_idx = None      # 当前任务的全局索引
         self.task_title = ""      # 日志显示用
+        self.last_session = None  # 上一任务的 session_id（同会话连续提问用）
 
         # 轮询状态（每次派发后重置，外部管理，不依赖 driver 实例变量）
         self.last_len = 0
@@ -131,14 +132,22 @@ class ParallelWebRunner:
                            for s in self.slots):
             for slot in self.slots:
                 if slot.status == SlotState.DEAD:
+                    # 页面损坏：还有排队任务且未达窗口上限时，开新窗口补位
+                    if queue and len(self.slots) < _MAX_SLOTS:
+                        self._replace_slot(slot)
                     continue
                 if slot.status == SlotState.IDLE and queue:
                     task_idx, (prompt, meta) = queue.pop(0)
                     slot.task_idx = task_idx
                     slot.task_title = str(getattr(meta, "get", lambda k, d=None: d)(
                         "title", ""))[:40] if meta else ""
-                    if not self._dispatch(slot, prompt, meta):
+                    session_id = meta.get("session_id") if isinstance(meta, dict) else None
+                    # 同一 session_id 的连续请求复用同窗口同会话，问题连贯
+                    cont = bool(session_id) and slot.last_session == session_id
+                    if not self._dispatch(slot, prompt, meta, continue_session=cont):
                         self._on_failure(slot)  # 派发失败计失败，结果留 None
+                    else:
+                        slot.last_session = session_id
                 elif slot.status == SlotState.GENERATING:
                     st = self._poll(slot)
                     if st == "DONE":
@@ -156,9 +165,16 @@ class ParallelWebRunner:
                     self._do_reset(slot)
 
             if queue and all(s.status == SlotState.DEAD for s in self.slots):
-                log.error("所有 slot 均不可用，剩余 %d 个任务标记失败",
-                          len(queue))
-                break
+                # 立即尝试补位一个窗口（下轮循环再派发）；仍全损坏才放弃
+                if len(self.slots) < _MAX_SLOTS:
+                    for slot in self.slots:
+                        if slot.status == SlotState.DEAD:
+                            self._replace_slot(slot)
+                            break
+                if all(s.status == SlotState.DEAD for s in self.slots):
+                    log.error("所有 slot 均不可用，剩余 %d 个任务标记失败",
+                              len(queue))
+                    break
 
             time.sleep(self.scan_interval)
 
@@ -168,18 +184,24 @@ class ParallelWebRunner:
     # 派发 / 轮询 / 收集
     # ============================================================
 
-    def _dispatch(self, slot, prompt, meta):
-        """派发任务：new_chat → setup → input → send。
+    def _dispatch(self, slot, prompt, meta, continue_session=False):
+        """派发任务：默认 new_chat → setup → input → send；
+        同 session 连续请求走 continue_chat（同一窗口同一会话，问题连贯）。
 
         同步但快速（约 1-3s，期间其他 slot 在浏览器后台继续生成）；
         绝不调用阻塞的 wait_complete。
         """
         drv = slot.driver
         try:
-            drv.new_chat()   # 全新对话：丢弃历史上下文（每任务必做）
-            drv.setup()
-            drv.input(prompt)
-            drv.send()
+            if continue_session:
+                # 复用当前会话继续提问：不重置历史、不新开窗口
+                log.info("[Slot %d] 同会话继续提问（窗口复用）", slot.slot_id)
+                drv.continue_chat(prompt)
+            else:
+                drv.new_chat()   # 全新对话：丢弃历史上下文（新任务/新会话）
+                drv.setup()
+                drv.input(prompt)
+                drv.send()
         except Exception as exc:
             log.error("[Slot %d] 派发异常：%s", slot.slot_id, exc)
             return False
@@ -280,6 +302,7 @@ class ParallelWebRunner:
         slot.status = SlotState.IDLE
         slot.task_idx = None
         slot.task_title = ""
+        # 保留 last_session：同 session 的下一个任务在同一窗口继续（上下文连贯）
         slot.last_len = 0
         slot.stable = 0
         slot.stop_seen = False
@@ -297,6 +320,29 @@ class ParallelWebRunner:
         else:
             self._release(slot)
 
+    def _replace_slot(self, slot):
+        """损坏的 slot 用新窗口（新标签页）补位，继续服务队列任务。"""
+        from web_drivers import create_driver
+        log.warning("[Slot %d] 页面损坏，开新窗口补位（当前 %d/上限 %d）",
+                    slot.slot_id, len(self.slots), _MAX_SLOTS)
+        try:
+            drv = create_driver()
+            drv.new_chat()
+            drv.setup()
+        except Exception as exc:
+            log.error("[Slot %d] 补位窗口初始化失败：%s", slot.slot_id, exc)
+            return
+        try:
+            slot.driver.close_session()
+        except Exception:
+            pass
+        slot.driver = drv
+        slot.last_session = None
+        slot.status = SlotState.IDLE
+        slot.consecutive_fails = 0
+        slot.reset_fails = 0
+        log.info("[Slot %d] 新窗口就绪，继续接收任务", slot.slot_id)
+
     def _do_reset(self, slot):
         """重建 slot 会话（对应旧版「关 tab 重建」）。"""
         drv = slot.driver
@@ -308,6 +354,7 @@ class ParallelWebRunner:
             drv.new_chat()
             drv.setup()
             slot.status = SlotState.IDLE
+            slot.last_session = None
             slot.consecutive_fails = 0
             slot.reset_fails = 0
         except Exception as exc:

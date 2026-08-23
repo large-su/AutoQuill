@@ -61,6 +61,32 @@ class WorkflowBase:
         """批量收集素材，返回 [{title, answer, url, index}, ...]"""
         raise NotImplementedError
 
+    def _ai_screen_questions(self, materials, target):
+        """大模型问题池筛选：排除不适合写故事/小说的候选，取最适合的。
+
+        在硬性规则收集之后、生成之前调用（API 模式生效；Web 模式 /
+        LLM 失败 / 开关关闭时均原样返回，不阻断流程）。
+        """
+        from config.story import QUESTION_AI_SCREEN
+        if not QUESTION_AI_SCREEN or len(materials) <= 1:
+            return materials
+        try:
+            from llm_api import screen_question_pool
+        except Exception:
+            return materials
+        log.info(f"\n{'─'*50}\n大模型问题池筛选（排除不适合写故事/小说的候选）\n{'─'*50}")
+        screened = screen_question_pool(materials)
+        if not screened:
+            log.warning("大模型筛选无结果，沿用原候选（可能 LLM 不可用）")
+            return materials
+        if len(screened) > target:
+            screened = screened[:target]
+        for i, m in enumerate(screened):
+            m["index"] = i + 1
+        for m in screened:
+            log.info(f"  保留 #{m['index']}: {m['title'][:50]}...")
+        return screened
+
     # ============================================================
     # 步骤3：生成故事（通用，API/Web 分发）
     # ============================================================
@@ -346,6 +372,9 @@ class WorkflowBase:
         if not materials:
             log.error("没有收集到任何素材！")
             return 0
+
+        # 大模型问题池筛选：先排除不适合写故事/小说的，再挑最适合的
+        materials = self._ai_screen_questions(materials, target)
 
         for i, m in enumerate(materials):
             m['index'] = i + 1

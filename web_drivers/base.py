@@ -92,6 +92,16 @@ class WebLLMDriver:
         """
         return self.open_session()
 
+    def continue_chat(self, prompt):
+        """在同一会话中继续提问（不重置对话历史，问题连贯）。
+
+        默认实现：直接写入输入框并发送（会话延续）。
+        用于同一链路的连续 LLM 请求 / 同一生成任务的修正追问，
+        让上下文连贯且不再新开页面。
+        """
+        self.input(prompt)
+        self.send()
+
     # ---------------- 有界页面交互 ----------------
 
     def _safe_evaluate(self, js, *args, timeout=_EVAL_TIMEOUT):

@@ -11,10 +11,85 @@ import json
 import logging
 import re
 
-from core.story_text import parse_score_json, strip_json_fences
+from core.story_text import parse_score_json, strip_json_fences, extract_json_block
 from llm_client import call_llm_non_streaming, resolve_kb_llm_config
 
 log = logging.getLogger(__name__)
+
+
+def screen_question_pool(candidates, keep_best_only=False):
+    """大模型筛选「问题+回答」候选池（硬性规则过滤后调用）。
+
+    candidates: [{index, title, answer}]
+    用 QUESTION_SCREEN_PROMPT 一次判定：排除不适合写故事/小说的，
+    并按故事潜力排序。返回过滤后的候选列表（保序：合适的在前，
+    best 置顶）；LLM 不可用/失败时原样返回（不阻断流程）。
+    """
+    from applications.zhihu_story.prompts import QUESTION_SCREEN_PROMPT
+    from config import LLM_MODE
+
+    if not candidates:
+        return []
+    if LLM_MODE != "api":
+        # Web 模式不额外占窗口：筛选交给入口侧或跳过（见 WorkflowBase）
+        log.info("问题池筛选：Web 模式跳过（生成阶段再判断），保留 %d 个", len(candidates))
+        return candidates
+
+    api_key, base_url, model, extra_body = resolve_kb_llm_config()
+    if not api_key:
+        log.warning("问题池筛选跳过（无 API Key）")
+        return candidates
+
+    preview = []
+    for c in candidates:
+        title = (c.get("title") or "")[:80]
+        answer = (c.get("answer") or "")[:400]
+        preview.append(f"[{c.get('index')}] 问题：{title}\n回答摘要：{answer}")
+    prompt = QUESTION_SCREEN_PROMPT + "\n\n--- 候选列表 ---\n" + "\n---\n".join(preview)
+
+    try:
+        reply, _elapsed, error = call_llm_non_streaming(
+            prompt, max_tokens=max(2000, len(candidates) * 120 + 200),
+            temperature=0.1, timeout=120,
+            api_key=api_key, base_url=base_url, model=model,
+            extra_body=extra_body)
+        if error:
+            log.warning("问题池筛选请求失败：%s（沿用原候选）", error[:120])
+            return candidates
+        data = extract_json_block(reply)
+        if not data:
+            log.warning("问题池筛选返回无法解析（沿用原候选）")
+            return candidates
+        items = {int(it.get("index")): it for it in data.get("items", [])}
+    except Exception as exc:
+        log.warning("问题池筛选异常：%s（沿用原候选）", exc)
+        return candidates
+
+    kept = []
+    dropped = 0
+    for c in candidates:
+        it = items.get(int(c.get("index") or -1)) or {}
+        if it.get("keep"):
+            it = dict(it)
+            it["candidate"] = c
+            kept.append(it)
+        else:
+            dropped += 1
+    kept.sort(key=lambda it: int(it.get("score") or 0), reverse=True)
+    best_index = data.get("best_index")
+    if best_index is not None and kept:
+        keep_idx = int(best_index)
+        pos = next((i for i, it in enumerate(kept) if int(it["candidate"]["index"]) == keep_idx), None)
+        if pos and pos > 0:
+            kept.insert(0, kept.pop(pos))
+
+    result = [it["candidate"] for it in kept]
+    log.info("问题池筛选：%d → 保留 %d（排除 %d）%s",
+             len(candidates), len(result), dropped,
+             (f"，最佳 #{best_index}") if best_index is not None and best_index != -1 else "")
+    if keep_best_only and result:
+        return [result[0]]
+    return result
 
 
 def score_stories(stories_data):

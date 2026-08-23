@@ -172,6 +172,11 @@ AUTHOR_PROFILE = "通用"
 DEFAULT_BATCH_GENERATE_COUNT = 20
 DEFAULT_BATCH_PUBLISH_COUNT = 12
 
+# 大模型问题池筛选：批量收集到的问题+回答候选，先由 LLM 排除
+# 不适合写知乎故事/小说的，再从剩余中挑最适合的（API 模式生效；
+# 失败/禁用时回退原硬性规则结果，不阻断流程）。
+QUESTION_AI_SCREEN = True
+
 # True：批量入口只询问发布数，生成/采集数按冗余比例自动计算
 # False：沿用旧模式，分别询问生成数和发布数
 BATCH_AUTO_GENERATE_COUNT = True
