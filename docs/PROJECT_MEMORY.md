@@ -1,7 +1,14 @@
 # AutoQuill 项目工作记忆（新会话速览）
 
 > 给新开窗口的 AI/开发者：本文件总结当前项目状态、架构、约定、已完成工作、待办与坑。
-> 配套阅读：README.md（用户视角）、docs/DEVELOPER.md（架构）、docs/QA-PLAYBOOK.md（测试与质量流程）。
+
+## 新会话必经三件套（进入角色 30 秒）
+
+1. 本文案（PROJECT_MEMORY.md）—— 项目是什么、架构地图、版本发布、已完成功能、待办
+2. docs/AGENT-OPERATING-NOTES.md —— Agent 操作守则与经验教训（工具调用方式、模板转义雷区、改代码/验证流程），**先读它可避免本轮大部分重复报错**
+3. docs/QA-PLAYBOOK.md —— 测试与质量流程（单测/回归/打包的命令与场景）
+
+再往下按需：README.md（用户视角）、docs/DEVELOPER.md（架构细节）。
 
 ## 1. 项目是什么
 
