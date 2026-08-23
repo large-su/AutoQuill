@@ -59,6 +59,15 @@
 - 新增能力必须配单测（本仓库单测成本极低）；
 - 验证要走“真实启动路径”（cmd 双击 / python tools/x.py vs import），而不只是 import 导入。
 
+### 6.5 上线 CI/自动化后必须立刻盯第一次运行结果
+
+实录：加入 GitHub Actions 后连续 11 次 push 全失败都没发现（用户先看到）。
+原因：CI 缺本地不入库的 config/llm_providers.json（config 导入连锁崩）+ 测试里 Windows 专用用例（ctypes.windll）在 Linux 失败 + 路径穿越断言跨平台语义差异。
+对策：
+- 新增 workflow 后第一次 push 立即 gh run watch 看结果，不绿不继续；
+- 测试要区分“平台无关”与“Windows-only”，Windows-only 加 skipUnless(win32)；
+- 本地不入库的配置（密钥）在 CI 准备步骤生成占位文件。
+
 ### 6. 对官方/既有流程的上游假设不足
 
 案例：第一次跑 build_release.py 时不知 installer/AutoQuill.iss 硬编码 4.3.0 → 门禁失败；该问题后已改为构建时自动注入版本。
