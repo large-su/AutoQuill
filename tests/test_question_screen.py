@@ -57,10 +57,17 @@ class QuestionScreenTest(unittest.TestCase):
         out = story_scoring.screen_question_pool(_cands())
         self.assertEqual(len(out), 4, "失败应原样返回")
 
-    def test_web_mode_skips(self):
+    def test_web_mode_falls_back_when_web_unavailable(self):
+        # Web 模式改走网页版大模型；网页版不可用（_web_llm_generate 返回
+        # None）时原样返回候选，不阻断链路。显式 mock 避免测试拉起真浏览器。
         self._patch_llm('{"items":[]}', mode="web")
-        out = story_scoring.screen_question_pool(_cands())
-        self.assertEqual(len(out), 4, "Web 模式应跳过筛选")
+        orig = story_scoring._web_llm_generate
+        story_scoring._web_llm_generate = lambda prompt, what="": None
+        try:
+            out = story_scoring.screen_question_pool(_cands())
+        finally:
+            story_scoring._web_llm_generate = orig
+        self.assertEqual(len(out), 4, "Web 模式不可用时原样返回")
 
     def test_keep_best_only(self):
         reply = '{"items": [{"index":2,"keep":true,"score":8},' \

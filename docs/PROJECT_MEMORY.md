@@ -22,7 +22,7 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 ## 2. 版本与发布
 
-- 版本唯一入口：core/version.py（当前 v4.5.0，tag v4.5.0 已发布）
+- 版本唯一入口：core/version.py（当前 v4.6.0，tag v4.6.0 已发布）
 - 打包：python tools/build_release.py —— 门禁（git 干净/main）→ 全量测试 → PyInstaller → Inno 安装包 → SHA256，版本号自动注入 installer/AutoQuill.iss（勿手工改 iss）
 - 发布：git tag vX.Y.Z && git push origin main --tags && gh release create（gh 已登录 large-su）；产物在 release/，dist/release/build 不入库
 
@@ -40,7 +40,9 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 - llm_client.py / story_generation.py / story_prompt.py / story_scoring.py：API 生成、提示词、评分、问题池筛选
 - 前端：webui/static/index.html（结构）+ style.css + app.js（已抽离）；四大模式：工作台 / 作者蒸馏 / 已发布内容看板 / 草稿箱素材
 
-## 4. 已完成的重大功能（截至 v4.5.0）
+## 4. 已完成的重大功能（截至 v4.6.0）
+
+v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎草稿卡改版 DOM（标题/时间/正文 div，时间「编辑于 …」相对文本）→ 字数改用服务端草稿全文统计（不再 200 字摘要）、相对时间换算日期、列表点击条目开浏览器、删除按真实 qid 匹配；Web 模式评分/问题池筛选改走网页版大模型（双头：API 只用 API、Web 只用 Web），失败自动回退不阻断。（详见 CHANGELOG.md）
 
 1. 草稿箱素材管理：预览/筛选/批量删除（从知乎删除，二次确认），不含发布；与看板共用快照层+互斥
 2. 去 AI 味体系：采样惩罚参数、行文守则+中文 AI 句式禁词、评分「自然度」维度与专项扣分、tools/ai_flavor_check.py 检测器（真人≈1/100 vs AI≈28/100）

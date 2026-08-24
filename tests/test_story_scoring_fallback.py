@@ -7,13 +7,19 @@ import config
 
 
 class ScoringFallbackTest(unittest.TestCase):
+    def setUp(self):
+        self._old_mode = config.LLM_MODE
+
     def tearDown(self):
         # 避免污染其他用例
         story_scoring.resolve_kb_llm_config = None  # noqa
         story_scoring.call_llm_non_streaming = None  # noqa
+        config.LLM_MODE = self._old_mode
 
     def _patch(self, kb_key="sk-kb-xxxxf344", root_key="sk-root-valid",
                first_error="HTTP 401: Authentication Fails, api key invalid"):
+        # 本组用例测 API 通道的 key 回退（Web 通道见 story_scoring 的 Web 分支）
+        config.LLM_MODE = "api"
         calls = []
 
         def fake_call(user_message, max_tokens, temperature=None, timeout=120,
@@ -53,6 +59,39 @@ class ScoringFallbackTest(unittest.TestCase):
         story_scoring.score_stories(
             [{"index": 1, "title": "t", "story": "正文" * 200}])
         self.assertEqual(len(calls), 1, "非鉴权错误不应重试")
+
+    def test_web_mode_scores_via_web_llm(self):
+        # Web 模式：评分应走网页版大模型（_web_llm_generate），不依赖 API Key
+        config.LLM_MODE = "web"
+        orig = story_scoring._web_llm_generate
+        seen = {}
+
+        def fake_web(prompt, what="请求"):
+            seen["what"] = what
+            return '[{"index":1,"hook":8,"plot":7,"emotion":9,' \
+                   '"authenticity":8,"natural":5,"ending":7,"format":8,' \
+                   '"total":47,"comment":"ok"}]'
+
+        story_scoring._web_llm_generate = fake_web
+        try:
+            out = story_scoring.score_stories(
+                [{"index": 1, "title": "t", "story": "正文" * 200}])
+        finally:
+            story_scoring._web_llm_generate = orig
+        self.assertEqual(seen.get("what"), "评分", "Web 模式应走网页版大模型")
+        self.assertTrue(out and "score" in out[0], "评分应合并进结果")
+
+    def test_web_mode_fallback_when_web_down(self):
+        # Web 通道不可用时回退原顺序（不抛错、不阻断）
+        config.LLM_MODE = "web"
+        orig = story_scoring._web_llm_generate
+        story_scoring._web_llm_generate = lambda prompt, what="": None
+        try:
+            out = story_scoring.score_stories(
+                [{"index": 1, "title": "t", "story": "正文" * 200}])
+        finally:
+            story_scoring._web_llm_generate = orig
+        self.assertTrue(out and "score" not in out[0], "失败应原样返回")
 
     def test_same_key_no_retry(self):
         calls = self._patch(kb_key="sk-same", root_key="sk-same")

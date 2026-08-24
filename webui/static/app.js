@@ -1562,9 +1562,10 @@ function renderDraftList() {
     const cb = draftSel.has(r.qid) ? " checked" : "";
     html += '<div class="dft-row' + (draftSel.has(r.qid) ? " sel" : "") + '" data-qid="' + esc(r.qid) + '">'
       + '<input type="checkbox" class="cb" data-qid="' + esc(r.qid) + '"' + cb + '>'
-      + '<div class="dft-main"><div class="dft-title">' + esc(r.title || "(无标题)") + '</div>'
+      + '<div class="dft-main"><div class="dft-title" title="点击在浏览器中打开知乎编辑页">' + esc(r.title || "(无标题)") + '</div>'
       + '<div class="dft-excerpt">' + esc((r.content || "").slice(0, 90)) + '</div></div>'
-      + '<div class="dft-meta"><span>' + esc(r.updated_date || "-") + "</span><span class='chars'>" + fmtNum(r.chars) + " 字</span></div>"
+      + '<div class="dft-meta"><span>' + esc(r.updated_date || "-") + "</span><span class='chars'>" + fmtNum(r.chars) + " 字</span>"
+      + '<button class="dft-view" type="button" title="查看本地全文">详情</button></div>'
       + "</div>";
   }
   wrap.innerHTML = html;
@@ -1580,7 +1581,15 @@ function onDraftListClick(e) {
     return;
   }
   const r = (draftData.rows || []).find((x) => x.qid === qid);
-  if (r) openDraftView(r);
+  if (!r) return;
+  if (e.target.closest(".dft-view")) {
+    openDraftView(r);
+    return;
+  }
+  // 点击条目 → 在浏览器新标签打开知乎对应草稿编辑页
+  if (r.url) {
+    window.open(r.url, "_blank");
+  }
 }
 
 function toggleDraftSel(qid, on) {

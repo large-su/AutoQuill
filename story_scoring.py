@@ -4,6 +4,13 @@
 # 职责：用 LLM 对多篇故事做知乎读者视角评分（6 维），
 #       附 KB 配置解析（评分用知识库模型）。
 #
+# 通道策略（与主链路「双头」一致）：
+#   - API 模式（LLM_MODE=api）：走服务商 API（KB Key / 生成 Key，
+#     401/403 自动回退重试一次）
+#   - Web 模式（LLM_MODE=web）：走 DeepSeek 网页版（共享浏览器），
+#     完全不依赖 API Key；网页版不可用（未登录/页面异常/前端改版）
+#     时回退原结果，绝不阻断流程
+#
 # 架构位置：Layer 0 (Tools) — 被 workflows/base 调用。
 # ============================================================
 
@@ -17,6 +24,22 @@ from llm_client import call_llm_non_streaming, resolve_kb_llm_config
 log = logging.getLogger(__name__)
 
 
+def _web_llm_generate(prompt, what="请求"):
+    """Web 模式：用共享浏览器里的网页版大模型生成一次回答。
+
+    与故事生成的 Web 通道共用 web_drivers.get_driver()，不依赖任何
+    API Key。失败（未登录 / 页面异常 / 前端改版）返回 None，调用方
+    按「回退原顺序 / 原候选」处理，不阻断链路。
+    """
+    try:
+        from web_drivers import get_driver
+        driver = get_driver()
+        return driver.generate(prompt)
+    except Exception as exc:
+        log.warning("Web 模式%s失败：%s（自动回退）", what, exc)
+        return None
+
+
 def screen_question_pool(candidates, keep_best_only=False):
     """大模型筛选「问题+回答」候选池（硬性规则过滤后调用）。
 
@@ -24,21 +47,14 @@ def screen_question_pool(candidates, keep_best_only=False):
     用 QUESTION_SCREEN_PROMPT 一次判定：排除不适合写故事/小说的，
     并按故事潜力排序。返回过滤后的候选列表（保序：合适的在前，
     best 置顶）；LLM 不可用/失败时原样返回（不阻断流程）。
+
+    通道：API 模式走服务商 API；Web 模式走网页版大模型（同一结果）。
     """
     from applications.zhihu_story.prompts import QUESTION_SCREEN_PROMPT
     from config import LLM_MODE
 
     if not candidates:
         return []
-    if LLM_MODE != "api":
-        # Web 模式不额外占窗口：筛选交给入口侧或跳过（见 WorkflowBase）
-        log.info("问题池筛选：Web 模式跳过（生成阶段再判断），保留 %d 个", len(candidates))
-        return candidates
-
-    api_key, base_url, model, extra_body = resolve_kb_llm_config()
-    if not api_key:
-        log.warning("问题池筛选跳过（无 API Key）")
-        return candidates
 
     preview = []
     for c in candidates:
@@ -47,22 +63,40 @@ def screen_question_pool(candidates, keep_best_only=False):
         preview.append(f"[{c.get('index')}] 问题：{title}\n回答摘要：{answer}")
     prompt = QUESTION_SCREEN_PROMPT + "\n\n--- 候选列表 ---\n" + "\n---\n".join(preview)
 
-    try:
-        reply, _elapsed, error = call_llm_non_streaming(
-            prompt, max_tokens=max(2000, len(candidates) * 120 + 200),
-            temperature=0.1, timeout=120,
-            api_key=api_key, base_url=base_url, model=model,
-            extra_body=extra_body)
-        if error:
-            log.warning("问题池筛选请求失败：%s（沿用原候选）", error[:120])
+    if LLM_MODE == "api":
+        api_key, base_url, model, extra_body = resolve_kb_llm_config()
+        if not api_key:
+            log.warning("问题池筛选跳过（无 API Key）")
             return candidates
+
+        try:
+            reply, _elapsed, error = call_llm_non_streaming(
+                prompt, max_tokens=max(2000, len(candidates) * 120 + 200),
+                temperature=0.1, timeout=120,
+                api_key=api_key, base_url=base_url, model=model,
+                extra_body=extra_body)
+            if error:
+                log.warning("问题池筛选请求失败：%s（沿用原候选）", error[:120])
+                return candidates
+        except Exception as exc:
+            log.warning("问题池筛选异常：%s（沿用原候选）", exc)
+            return candidates
+    else:
+        # Web 模式：用网页版大模型完成同一筛选（失败回退原候选）
+        log.info("问题池筛选（Web 模式：网页版大模型）...")
+        reply = _web_llm_generate(prompt, "问题池筛选")
+        if not reply:
+            log.warning("问题池筛选 Web 请求无结果（沿用原候选）")
+            return candidates
+
+    try:
         data = extract_json_block(reply)
         if not data:
             log.warning("问题池筛选返回无法解析（沿用原候选）")
             return candidates
         items = {int(it.get("index")): it for it in data.get("items", [])}
     except Exception as exc:
-        log.warning("问题池筛选异常：%s（沿用原候选）", exc)
+        log.warning("问题池筛选解析异常：%s（沿用原候选）", exc)
         return candidates
 
     kept = []
@@ -115,12 +149,17 @@ def score_stories(stories_data):
 
     返回：
         按总分降序排列的列表，每个元素增加 'score' 和 'score_detail' 字段
-    """
-    api_key, base_url, _MODEL, extra_body = resolve_kb_llm_config()
 
-    if not api_key or not stories_data:
-        log.warning("评分跳过（无 API Key 或无故事）")
+    通道：API 模式走服务商 API（含 KB Key 401/403 回退生成 Key）；
+    Web 模式走网页版大模型（不依赖 API Key），失败回退原顺序。
+    """
+    from config import LLM_MODE
+
+    if not stories_data:
+        log.warning("评分跳过（无故事）")
         return stories_data
+
+    is_web_mode = LLM_MODE == "web"
 
     log.info(f"=" * 50)
     log.info(f"文章质量评分（共 {len(stories_data)} 篇）")
@@ -153,85 +192,103 @@ def score_stories(stories_data):
         prompt += story_preview
         prompt += "\n"
 
-    from config import (KB_LLM_API_KEY as _kb_key,
-                         LLM_API_KEY as _root_key,
-                         LLM_API_BASE_URL as _root_url,
-                         LLM_API_MODEL as _root_model,
-                         LLM_API_EXTRA_BODY as _root_extra_body)
+    reply = None
+    error = None
+    elapsed = 0.0
 
-    def _auth_error(error):
-        return bool(error and re.search(
-            r"401|403|authentication|api ?key|invalid", error, re.I))
+    if is_web_mode:
+        # ---- Web 模式：网页版大模型，无 API Key 依赖 ----
+        log.info("发送评分请求（Web 模式：网页版大模型）...")
+        reply = _web_llm_generate(prompt, "评分")
+        if not reply:
+            log.warning("Web 评分无结果（可能 DeepSeek 网页版未登录/页面异常），"
+                        "将按生成顺序择优发布")
+            return stories_data
+    else:
+        # ---- API 模式：KB Key → 401/403 回退生成 Key ----
+        api_key, base_url, _MODEL, extra_body = resolve_kb_llm_config()
+        if not api_key:
+            log.warning("评分跳过（无 API Key）")
+            return stories_data
 
-    try:
-        log.info("发送评分请求...")
-        reply, elapsed, error = call_llm_non_streaming(
-            prompt, max_tokens=max(4000, len(stories_data) * 350 + 500),
-            temperature=0.3, timeout=120,
-            api_key=api_key, base_url=base_url, model=_MODEL,
-            extra_body=extra_body)
-        # 知识库评分 key 失效（无效/过期）时，自动回退故事生成 key 重试一次
-        if _auth_error(error) and _kb_key and _kb_key != _root_key:
-            log.warning("评分请求被拒（key 无效/过期）：%s", (error or "")[:120])
-            log.warning("知识库服务商 key 无效，改用故事生成服务商 key 重试一次")
+        from config import (KB_LLM_API_KEY as _kb_key,
+                             LLM_API_KEY as _root_key,
+                             LLM_API_BASE_URL as _root_url,
+                             LLM_API_MODEL as _root_model,
+                             LLM_API_EXTRA_BODY as _root_extra_body)
+
+        def _auth_error(error):
+            return bool(error and re.search(
+                r"401|403|authentication|api ?key|invalid", error, re.I))
+
+        try:
+            log.info("发送评分请求...")
             reply, elapsed, error = call_llm_non_streaming(
                 prompt, max_tokens=max(4000, len(stories_data) * 350 + 500),
                 temperature=0.3, timeout=120,
-                api_key=_root_key, base_url=_root_url, model=_root_model,
-                extra_body=dict(_root_extra_body or {}))
-        if error:
-            log.error("评分 API 失败：%s", error)
-            log.error("提示：评分走服务商 API，请在 设置→生成通道 检查 API Key，"
-                      "或检查 config/llm_providers.json 中对应服务商的 apiKey")
+                api_key=api_key, base_url=base_url, model=_MODEL,
+                extra_body=extra_body)
+            # 知识库评分 key 失效（无效/过期）时，自动回退故事生成 key 重试一次
+            if _auth_error(error) and _kb_key and _kb_key != _root_key:
+                log.warning("评分请求被拒（key 无效/过期）：%s", (error or "")[:120])
+                log.warning("知识库服务商 key 无效，改用故事生成服务商 key 重试一次")
+                reply, elapsed, error = call_llm_non_streaming(
+                    prompt, max_tokens=max(4000, len(stories_data) * 350 + 500),
+                    temperature=0.3, timeout=120,
+                    api_key=_root_key, base_url=_root_url, model=_root_model,
+                    extra_body=dict(_root_extra_body or {}))
+            if error:
+                log.error("评分 API 失败：%s", error)
+                log.error("提示：评分走服务商 API，请在 设置→生成通道 检查 API Key，"
+                          "或检查 config/llm_providers.json 中对应服务商的 apiKey")
+                return stories_data
+        except Exception as exc:
+            log.error(f"评分出错：{exc}")
             return stories_data
 
-        log.info(f"评分完成（{elapsed:.1f}s）")
+    log.info(f"评分完成（{'Web 模式' if is_web_mode else f'{elapsed:.1f}s'}）")
 
+    try:
         scores = parse_score_json(strip_json_fences(reply), len(stories_data))
-
-        # 将评分合并到 stories_data
-        score_map = {s['index']: s for s in scores}
-
-        for i, item in enumerate(stories_data):
-            idx = i + 1
-            if idx in score_map:
-                s = score_map[idx]
-                item['score'] = s.get('total', 0)
-                item['score_detail'] = {
-                    '开头冲击力': s.get('hook', 0),
-                    '情节节奏': s.get('plot', s.get('pacing', 0)),
-                    '情感共鸣': s.get('emotion', s.get('character', 0)),
-                    '真实感': s.get('authenticity', s.get('language', 0)),
-                    '自然度(去AI味)': s.get('natural', 0),
-                    '结尾余味': s.get('ending', 0),
-                    '格式体验': s.get('format', s.get('texture', 0)),
-                }
-                item['score_comment'] = s.get('comment', '')
-
-                detail = ' | '.join(f"{k}={v}" for k, v in item['score_detail'].items())
-                log.info(f"  故事 {idx}「{item['title'][:30]}...」")
-                log.info(f"    总分={item['score']} | {detail}")
-                log.info(f"    点评：{item['score_comment']}")
-            else:
-                item['score'] = 0
-                item['score_detail'] = {}
-                item['score_comment'] = '评分缺失'
-
-        # 按总分降序排列
-        stories_data.sort(key=lambda x: x.get('score', 0), reverse=True)
-
-        log.info(f"\n  排名：")
-        for rank, item in enumerate(stories_data):
-            log.info(f"  第{rank+1}名: [{item['score']}分] {item['title'][:40]}...")
-
-        return stories_data
-
-    except json.JSONDecodeError as e:
-        log.error(f"评分结果 JSON 解析失败：{e}")
+    except Exception as exc:
+        log.error(f"评分结果解析失败：{exc}")
         log.error(f"  原始回复（前 500 字）：{reply[:500]}")
         log.error(f"  原始回复（后 300 字）：{reply[-300:]}")
         return stories_data
 
-    except Exception as e:
-        log.error(f"评分出错：{e}")
-        return stories_data
+    # 将评分合并到 stories_data
+    score_map = {s['index']: s for s in scores}
+
+    for i, item in enumerate(stories_data):
+        idx = i + 1
+        if idx in score_map:
+            s = score_map[idx]
+            item['score'] = s.get('total', 0)
+            item['score_detail'] = {
+                '开头冲击力': s.get('hook', 0),
+                '情节节奏': s.get('plot', s.get('pacing', 0)),
+                '情感共鸣': s.get('emotion', s.get('character', 0)),
+                '真实感': s.get('authenticity', s.get('language', 0)),
+                '自然度(去AI味)': s.get('natural', 0),
+                '结尾余味': s.get('ending', 0),
+                '格式体验': s.get('format', s.get('texture', 0)),
+            }
+            item['score_comment'] = s.get('comment', '')
+
+            detail = ' | '.join(f"{k}={v}" for k, v in item['score_detail'].items())
+            log.info(f"  故事 {idx}「{item['title'][:30]}...」")
+            log.info(f"    总分={item['score']} | {detail}")
+            log.info(f"    点评：{item['score_comment']}")
+        else:
+            item['score'] = 0
+            item['score_detail'] = {}
+            item['score_comment'] = '评分缺失'
+
+    # 按总分降序排列
+    stories_data.sort(key=lambda x: x.get('score', 0), reverse=True)
+
+    log.info(f"\n  排名：")
+    for rank, item in enumerate(stories_data):
+        log.info(f"  第{rank+1}名: [{item['score']}分] {item['title'][:40]}...")
+
+    return stories_data

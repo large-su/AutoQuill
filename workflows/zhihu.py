@@ -494,7 +494,8 @@ class ZhihuWorkflow(WorkflowBase):
 
         good: [{q:{title,href}, answer, footer, ...}]
         返回候选 dict（_extract_parallel_top 用它取 best）；
-        开关关闭 / Web 模式 / LLM 失败时返回 None（调用方沿用点赞最高）。
+        开关关闭 / LLM 失败时返回 None（调用方沿用点赞最高）。
+        通道与主链路一致：API 模式走服务商 API，Web 模式走网页版大模型。
         """
         if len(good) <= 1:
             return None

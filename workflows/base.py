@@ -64,8 +64,8 @@ class WorkflowBase:
     def _ai_screen_questions(self, materials, target):
         """大模型问题池筛选：排除不适合写故事/小说的候选，取最适合的。
 
-        在硬性规则收集之后、生成之前调用（API 模式生效；Web 模式 /
-        LLM 失败 / 开关关闭时均原样返回，不阻断流程）。
+        在硬性规则收集之后、生成之前调用（API 模式走服务商 API，
+        Web 模式走网页版大模型；任一失败均原样返回，不阻断流程）。
         """
         from config.story import QUESTION_AI_SCREEN
         if not QUESTION_AI_SCREEN or len(materials) <= 1:
@@ -347,15 +347,22 @@ class WorkflowBase:
 
         need_scoring = publish_count < target
 
+        # 生成通道的实际并行标签（Web 模式 parallel_tabs>1 且任务>1 时并行）
+        from config import WEB_DRIVER_NAME, WEB_DRIVERS
+        _drv_cfg = WEB_DRIVERS.get(WEB_DRIVER_NAME, {})
+        gen_parallel = (LLM_MODE == "api"
+                        or (_drv_cfg.get("parallel_tabs", 1) > 1 and target > 1))
+        gen_mode_label = "并行" if gen_parallel else "串行"
+
         log.info(f"\n{'='*60}")
         log.info("流水线批量模式")
         if need_scoring:
             log.info(f"  目标：收集 {target} 份素材 → "
-                     f"{'并行' if LLM_MODE == 'api' else '串行'}生成 → "
+                     f"{gen_mode_label}生成 → "
                      f"评分 → 发布前 {publish_count} 篇")
         else:
             log.info(f"  目标：收集 {target} 份素材 → "
-                     f"{'并行' if LLM_MODE == 'api' else '串行'}生成 → "
+                     f"{gen_mode_label}生成 → "
                      f"全部发布（{target} 篇，不评分）")
         log.info(f"{'='*60}")
 
@@ -508,8 +515,12 @@ class WorkflowBase:
             log.info(f"{'─'*50}\n")
             scored = score_stories(generated)
             if scored and not any("score" in it for it in scored):
-                log.warning("⚠ 评分未生效（评分服务商 API Key 无效或请求失败），"
-                            "将按生成顺序择优发布；请在设置→生成通道检查 API Key")
+                if LLM_MODE == "web":
+                    log.warning("⚠ 评分未生效（DeepSeek 网页版不可用），"
+                                "将按生成顺序择优发布；请确认网页版大模型已登录")
+                else:
+                    log.warning("⚠ 评分未生效（评分服务商 API Key 无效或请求失败），"
+                                "将按生成顺序择优发布；请在设置→生成通道检查 API Key")
             to_publish = scored[:actual_publish]
             to_skip = scored[actual_publish:]
 
@@ -589,8 +600,7 @@ class WorkflowBase:
                  f"耗时 {time_phase1:.1f}s")
         if KB_ENABLE and any(m.get('recipe') for m in materials):
             log.info("  阶段1.5 配方提炼：现提现用")
-        log.info(f"  阶段2 "
-                 f"{'并行' if LLM_MODE == 'api' else '串行'}生成："
+        log.info(f"  阶段2 {gen_mode_label}生成："
                  f"{total_gen_before_filter} 篇    "
                  f"耗时 {total_gen_time:.1f}s")
         log.info(f"  阶段2.5 格式检测：{len(generated)} 篇合规"

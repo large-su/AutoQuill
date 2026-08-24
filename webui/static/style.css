@@ -490,6 +490,13 @@
   }
   .dft-meta { flex: none; text-align: right; font-size: 11px; color: var(--muted); line-height: 1.5; }
   .dft-meta .chars { color: var(--accent-2); }
+  .dft-title:hover { color: var(--accent-2); text-decoration: underline; }
+  .dft-view {
+    margin-left: 8px; padding: 2px 8px; font-size: 11px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: #fff; color: var(--muted); cursor: pointer;
+  }
+  .dft-view:hover { color: var(--accent-2); border-color: var(--accent); }
   .dft-empty { padding: 30px 12px; text-align: center; color: var(--muted); font-size: 12.5px; }
   .draft-view-body { white-space: pre-wrap; word-break: break-all; }
   .dash-chart { min-width: 0; }

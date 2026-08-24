@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """草稿箱数据层单测：归一化 / 加载与回退 / 筛选排序 / 统计。"""
 import json
+import re
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from webui import drafts
@@ -59,6 +61,46 @@ class DraftsDataLayerTest(unittest.TestCase):
         self.assertEqual(fr3[0]["qid"], "3")
         fr4 = drafts.filter_rows(rows, min_chars=200, max_chars=500)
         self.assertEqual([r["qid"] for r in fr4], ["3"])
+
+    def test_extract_js_qid_regex_valid(self):
+        # 回归（V4.5.0 实测事故）：草稿卡 qid 提取正则曾被写成
+        # /question/(d+)/ —— 斜杠未转义且 \d 丢失反斜杠，浏览器 evaluate
+        # 直接抛 SyntaxError，safe_evaluate 吞错返回 None → 草稿箱恒空。
+        js = drafts._EXTRACT_JS
+        self.assertIn('match(/question\\/(\\d+)/)', js)
+        self.assertNotIn('/question/(d+)', js)
+        hit = re.search(r'/question\/(\d+)',
+                         'https://www.zhihu.com/question/88888888#write')
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.group(1), '88888888')
+
+        # 知乎改版（2026-08）：标题/时间/正文均为 div，不再用 span 与 data-tooltip
+        self.assertIn('.CreationCardTitle-wrapper', js)
+        self.assertNotIn('.CreationCardTitle-wrapper span', js)
+        self.assertNotIn('[data-tooltip]', js)
+        self.assertIn('.CreationCardContent-text', js)
+        self.assertNotIn('.CreationCardContent-text span', js)
+
+    def test_rel_to_date(self):
+        now = datetime.now()
+        self.assertEqual(drafts._rel_to_date('昨天'),
+                         (now - timedelta(days=1)).strftime('%Y-%m-%d'))
+        self.assertEqual(drafts._rel_to_date('前天'),
+                         (now - timedelta(days=2)).strftime('%Y-%m-%d'))
+        self.assertEqual(drafts._rel_to_date('3 天前'),
+                         (now - timedelta(days=3)).strftime('%Y-%m-%d'))
+        d = drafts._rel_to_date('5 小时前')
+        self.assertTrue(d.startswith(now.strftime('%Y-%m')), d)
+        self.assertEqual(drafts._rel_to_date('2026-08-20 10:00'), '2026-08-20')
+        self.assertEqual(drafts._rel_to_date(''), '')
+        self.assertEqual(drafts._rel_to_date('无法识别'), '')
+
+    def test_draft_html_text(self):
+        self.assertEqual(drafts._draft_html_text('<p>你好</p><p>世界</p>'), '你好世界')
+        self.assertEqual(drafts._draft_html_text('&lt;b&gt;标签&lt;/b&gt; &amp; 实体'),
+                         '<b>标签</b> & 实体')
+        self.assertEqual(drafts._draft_html_text('<br />'), '')
+        self.assertEqual(drafts._draft_html_text(''), '')
 
     def test_summarize(self):
         rows = [drafts._normalize_row(r) for r in _rows()]

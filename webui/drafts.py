@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import html as _html
 import json
 import logging
 import re
@@ -29,15 +30,19 @@ _EXTRACT_JS = r"""
   const out = [];
   document.querySelectorAll('.CreationManage-CreationCard').forEach(card => {
     const editA = card.querySelector('a[href*="/question/"][href*="#write"]');
-    const qm = editA ? editA.href.match(/question/(d+)/) : null;
-    const titleEl = card.querySelector('.CreationCardTitle-wrapper span');
-    const timeEl = card.querySelector('[data-tooltip]');
-    const textEl = card.querySelector('.CreationCardContent-text span');
+    const qm = editA ? editA.href.match(/question\/(\d+)/) : null;
+    // 知乎改版（2026-08）：标题在 .CreationCardTitle-wrapper 下的 div 里，
+    // 时间为普通 div 文本「编辑于 …」（无 data-tooltip），正文直接写在
+    // .CreationCardContent-text 里（无 span）。
+    const titleEl = card.querySelector('.CreationCardTitle-wrapper');
+    const timeEl = Array.from(card.querySelectorAll('div'))
+      .find(d => /^编辑于/.test((d.innerText || '').trim()));
+    const textEl = card.querySelector('.CreationCardContent-text');
     out.push({
       qid: qm ? qm[1] : '',
       url: editA ? editA.href : '',
       title: titleEl ? (titleEl.innerText || '').trim() : '',
-      updated: timeEl ? (timeEl.getAttribute('data-tooltip') || '') : '',
+      updated: timeEl ? (timeEl.innerText || '').trim() : '',
       content: textEl ? (textEl.innerText || '').trim() : '',
     });
   });
@@ -46,18 +51,67 @@ _EXTRACT_JS = r"""
 """
 
 
+def _rel_to_date(s):
+    """把知乎卡片上的相对时间（「5 小时前/昨天/3 天前」）近似成 YYYY-MM-DD。
+
+    遇到过绝对时间（2026-08-22 14:47 / 08-22 14:47）时交给 _norm_date；
+    无法识别返回 ''（不影响主流程）。
+    """
+    s = (s or "").strip()
+    if not s or re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        return _norm_date(s)
+    # 相对时间常带时刻后缀：「昨天 20:21」「3 天前 12:00」
+    time_suffix = re.sub(r"\s+\d{1,2}:\d{2}$", "", s)
+    s = time_suffix
+    from datetime import timedelta
+    now = datetime.now()
+    m = re.match(r"^(\d+)\s*分钟前$", s)
+    if m:
+        return (now - timedelta(minutes=int(m.group(1)))).strftime("%Y-%m-%d")
+    m = re.match(r"^(\d+)\s*小时前$", s)
+    if m:
+        return (now - timedelta(hours=int(m.group(1)))).strftime("%Y-%m-%d")
+    if s == "昨天":
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    if s == "前天":
+        return (now - timedelta(days=2)).strftime("%Y-%m-%d")
+    m = re.match(r"^(\d+)\s*天前$", s)
+    if m:
+        return (now - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
+    m = re.match(r"^(\d+)\s*周前$", s)
+    if m:
+        return (now - timedelta(weeks=int(m.group(1)))).strftime("%Y-%m-%d")
+    m = re.match(r"^(\d+)\s*个月前$", s)
+    if m:
+        return (now - timedelta(days=30 * int(m.group(1)))).strftime("%Y-%m-%d")
+    if s in ("刚刚", "几分钟前"):
+        return now.strftime("%Y-%m-%d")
+    return ""
+
+
+def _draft_html_text(html_text):
+    """服务端草稿 HTML → 纯文本（剥标签 + 还原实体）。
+
+    草稿卡正文只是约 200 字的固定摘要，字数统计与全文查看必须用
+    /api/v4/questions/{qid}/draft 返回的完整 HTML。
+    """
+    if not html_text:
+        return ""
+    return _html.unescape(re.sub(r"<[^>]+>", "", html_text)).strip()
+
+
 def _normalize_row(r):
     title = (r.get("title") or "").strip()
     content = (r.get("content") or "").strip()
     updated = (r.get("updated") or "").strip()
-    # data-tooltip 形如「编辑于 08-22 14:47」/「编辑于 2026-08-22 14:47」
+    # 时间文本形如「编辑于 08-22 14:47」（旧版）或「编辑于 5 小时前」（新版）
     updated = re.sub(r"^编辑于\s*", "", updated)
     return {
         "qid": str(r.get("qid") or ""),
         "url": r.get("url") or "",
         "title": title,
         "updated": updated,
-        "updated_date": _norm_date(updated),
+        "updated_date": _rel_to_date(updated),
         "content": content,
         "chars": len(re.sub(r"\s+", "", content)),
     }
@@ -184,6 +238,28 @@ def scrape(progress=None, stop_flag=None):
             if progress:
                 progress("未抓取到草稿（可能未登录/页面改版），已保留上次快照", None)
             return []
+
+        # ★ 卡片正文只是固定长度摘要（约 200 字），字数统计/全文查看必须
+        # 取服务端草稿全文：逐个请求 /api/v4/questions/{qid}/draft
+        # （与发布确认同一接口，凭当前登录态；失败时保留卡片摘要不阻断）
+        full_ok = 0
+        for i, row in enumerate(dedup):
+            if stop_flag and stop_flag():
+                break
+            _check_cancel()
+            try:
+                draft_html = b.get_draft_content(row["qid"])
+            except Exception as exc:
+                log.warning("草稿全文获取失败 qid=%s：%s", row["qid"], exc)
+                draft_html = ""
+            full_text = _draft_html_text(draft_html)
+            if full_text:
+                row["content"] = _html.unescape(full_text)
+                row["chars"] = len(re.sub(r"\s+", "", row["content"]))
+                full_ok += 1
+            if progress and (i + 1) % 6 == 0:
+                progress(f"已获取全文 {i + 1}/{len(dedup)} 个…", None)
+        log.info("草稿全文获取完成：%d/%d 篇", full_ok, len(dedup))
 
         path = _DATA_DIR / f"drafts_{datetime.now():%Y-%m-%d}.json"
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
