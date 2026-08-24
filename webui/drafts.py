@@ -15,12 +15,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from core import paths
 from webui import _snapshot as _snap
 from webui.published import _norm_date
 
 log = logging.getLogger(__name__)
 
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# 用户数据目录：源码态=项目根/data，安装版=%APPDATA%/AutoQuill/data
+# （不能用 __file__ 相对路径——安装版会把快照写进 _internal 安装目录）
+_DATA_DIR = Path(paths.data("data"))
 _DRAFT_URL = "https://www.zhihu.com/creator/manage/creation/draft?type=answer"
 
 

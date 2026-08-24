@@ -862,6 +862,7 @@ function _showTaskStatus(elId, html, cls, autoHideMs) {
 function showDashStatus(html, cls, autoHideMs) { _showTaskStatus("dashStatus", html, cls, autoHideMs); }
 function hideDashStatus() { $("dashStatus").className = "dash-status"; }
 function showDraftStatus(html, cls, autoHideMs) { _showTaskStatus("draftStatus", html, cls, autoHideMs); }
+function hideDraftStatus() { const el = $("draftStatus"); if (el) el.className = "dash-status"; }
 
 const dashHideTimer = { current: null };
 const draftHideTimer = { current: null };
@@ -1467,6 +1468,8 @@ async function loadDrafts() {
       setDrfBar(rs.pct, rs.progress);
     } else if (rs.status === "error") {
       showDraftStatus("上次刷新失败：" + esc(rs.error), "err", 8000);
+    } else if (rs.status === "done") {
+      hideDraftStatus();
     }
     // refresh/delete 完成提示由各自流程的 showDraftStatus 负责保留并自动隐藏
   } catch (e) {
@@ -1648,6 +1651,7 @@ async function refreshDrafts() {
           setDrfBar(100, "刷新完成，共 " + (s.count || 0) + " 个", 8000);
           draftSel.clear();
           loadDrafts();
+          showDraftStatus("刷新完成，共 " + (s.count || 0) + " 个草稿", "ok", 6000);
         } else if (s.status === "error") {
           clearInterval(draftPollTimer); draftPollTimer = null;
           setDrfBar(null, "刷新失败：" + (s.error || ""));
