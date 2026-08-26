@@ -810,6 +810,8 @@ def render_general_section(profile):
             sentence_rhythm=sig.get("sentence_rhythm", "（未提炼）"),
             avoid="\n".join(
                 f"- {item}" for item in (sig.get("avoid") or [])),
+            engagement_mechanics="\n".join(
+                f"- {item}" for item in (sig.get("engagement_mechanics") or [])),
         )
     except Exception as exc:
         log.warning("author_profiler: 通用风格渲染失败，跳过：%s", exc)
@@ -871,6 +873,12 @@ def render_style_section(profile):
         tension_conflicts=bullets(sig.get("tension_conflicts")),
         cross_story_consistency=sig.get("cross_story_consistency", "（未提炼）"),
         avoid=bullets(sig.get("avoid")),
+        # ---- v4 "法"层字段（缺省优雅降级为"（未提炼）"） ----
+        voice_signature=sig.get("voice_signature", "（未提炼）"),
+        info_control=sig.get("info_control", "（未提炼）"),
+        satisfaction_mechanics=bullets(sig.get("satisfaction_mechanics")),
+        chapter_hooks=bullets(sig.get("chapter_hooks")),
+        reader_promises=sig.get("reader_promises", "（未提炼）"),
         excerpts=excerpt_text,
     )
 

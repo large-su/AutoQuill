@@ -715,6 +715,11 @@ class ZhihuBrowser:
             "() => document.body && document.body.innerText.includes('查看我的回答')")
         if has_answered:
             return False, "检测到「查看我的回答」——此问题下已发布过回答，跳过"
+        # ★ 关键修复：已有「编辑回答」（而非「写回答」）说明本账号已答过此题。
+        #   继续当新题会导致"反复回答同一问题"死循环，必须跳过。
+        has_edit = self._button_with_text("编辑回答")
+        if has_edit:
+            return False, "检测到「编辑回答」——此问题下已答过回答，不能重复发布，跳过"
         has_write = self._safe_evaluate("""(texts) =>
           Array.from(document.querySelectorAll('button'))
             .some(e => texts.includes(e.textContent
@@ -723,6 +728,17 @@ class ZhihuBrowser:
         if has_write:
             return True, "检测到可写入口（写回答/编辑回答），可回答"
         return True, "未检测到禁止信号，默认可回答"
+    def _button_with_text(self, text):
+        """当前页面是否存在文本恰好等于 text 的 <button>（去掉零宽字符）。
+
+        「写回答」「编辑回答」按精确文本区分：写回答=未答过、编辑回答=已答过。
+        """
+        return bool(self._safe_evaluate(
+            """(text) =>
+              Array.from(document.querySelectorAll('button'))
+                .some(e => e.textContent
+                    .replace(/[\\u200b-\\u200d\\ufeff]/g, '').trim() === text)""",
+            text))
 
     # ----------------------------------------------------------
     # 语义接口：发布（导入文档到编辑器）
