@@ -125,12 +125,12 @@ class TestBuildStoryPromptInjection(unittest.TestCase):
 
 class TestLoadAuthorProfileHelper(unittest.TestCase):
     def test_unknown_author_returns_none(self):
-        from llm_api import _load_author_profile_or_none
+        from story_generation import _load_author_profile_or_none
         self.assertIsNone(_load_author_profile_or_none("不存在的作者"))
 
     def test_roundtrip_load(self):
         from applications.zhihu_story.author_profiler import load_author_profile
-        from llm_api import _load_author_profile_or_none
+        from story_generation import _load_author_profile_or_none
 
         with tempfile.TemporaryDirectory() as tmp:
             import applications.zhihu_story.author_profiler as ap

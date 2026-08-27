@@ -58,7 +58,7 @@ def main():
     print(f"  作者：{args.author}（技能签名已加载，{profile['profiled_at']}）")
     print()
 
-    from llm_api import generate_story
+    from story_generation import generate_story
     story = generate_story(args.question, recipe=recipe, author=args.author)
 
     print()

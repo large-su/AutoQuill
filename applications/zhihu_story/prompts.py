@@ -14,7 +14,7 @@ from applications.zhihu_story.config import RECIPE_VERBOSE_MODE
 # ★ 提示词 1：问题领域筛选
 # ============================================================
 # 用途：判断推荐问题中哪些适合创作故事
-# 使用位置：llm_api.py → filter_story_questions()
+# 使用位置：story_scoring.screen_question_pool()
 
 FILTER_PROMPT = """你是一个知乎故事创作选题顾问。我要在推荐问题列表里挑出最适合写故事的问题。
 
@@ -101,7 +101,7 @@ STORY_SYSTEM_PROMPT = """你是一位知乎故事区的爆款创作者，精通�
 # ★ 提示词 3：文章质量评分
 # ============================================================
 # 用途：批量模式下对多篇故事进行综合评分
-# 使用位置：llm_api.py → score_stories()
+# 使用位置：story_scoring.score_stories()
 
 SCORE_PROMPT = """你是一位知乎故事区的资深读者，每天阅读大量故事回答，对什么样的故事能获得高赞有极其敏锐的直觉。
 

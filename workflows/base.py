@@ -71,7 +71,7 @@ class WorkflowBase:
         if not QUESTION_AI_SCREEN or len(materials) <= 1:
             return materials
         try:
-            from llm_api import screen_question_pool
+            from story_scoring import screen_question_pool
         except Exception:
             return materials
         log.info(f"\n{'─'*50}\n大模型问题池筛选（排除不适合写故事/小说的候选）\n{'─'*50}")
@@ -118,7 +118,7 @@ class WorkflowBase:
     def _generate_api(self, question_title, top_answer, recipe=None,
                       feedback=None):
         """API 模式：流式 HTTP 请求"""
-        from llm_api import generate_story
+        from story_generation import generate_story
 
         author = getattr(self, "author", None)
         story = generate_story(question_title, top_answer, recipe=recipe,
@@ -339,7 +339,8 @@ class WorkflowBase:
             KB_ENABLE,
         )
         from config import random_delay
-        from llm_api import generate_story_parallel, score_stories
+        from story_generation import generate_story_parallel
+        from story_scoring import score_stories
         from core.story_text import (
             validate_story_format, clean_story_output, fix_story_format
         )
@@ -639,7 +640,7 @@ class WorkflowBase:
         from concurrent.futures import (
             ThreadPoolExecutor, wait, FIRST_COMPLETED
         )
-        from llm_api import generate_story_parallel
+        from story_generation import generate_story_parallel
 
         base_workers = min(len(materials), self._get_gen_concurrency())
         from config.story import (
@@ -864,7 +865,7 @@ class WorkflowBase:
                          print_progress_fn, reset_progress_fn):
         """API 并行重试不合规文章"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from llm_api import generate_story_parallel
+        from story_generation import generate_story_parallel
         from core.story_text import validate_story_format
 
         retried_ok = 0

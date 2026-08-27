@@ -513,7 +513,7 @@ class ZhihuWorkflow(WorkflowBase):
             return None
         try:
             from config.story import QUESTION_AI_SCREEN
-            from llm_api import screen_question_pool
+            from story_scoring import screen_question_pool
             if not QUESTION_AI_SCREEN:
                 return None
             cands = [{"index": i + 1,

@@ -288,13 +288,13 @@ def main():
 
     # CLI 命令分发
     if '--test-api' in sys.argv:
-        from llm_api import test_api_connection
+        from llm_client import test_api_connection
         test_api_connection()
         return
 
     # API/Web 模式检查
     if LLM_MODE == "api":
-        from llm_api import test_api_connection
+        from llm_client import test_api_connection
         if not test_api_connection():
             print("\n  API 连接失败，请检查 config.py 中的 LLM_API_KEY")
             return
