@@ -215,13 +215,109 @@ def flavor_verdict(score):
         return "中（有一定AI味）"
     return "高（AI味明显）"
 
+
 # ============================================================
-# 注册表：id -> 检测函数。返回约定：quant_* 为 dict(flagged/reason…)；
-# ai_flavor 为 (metrics, score)/None——消费方按 id 解释。
+# ★ 检测器三：scene_dump（惰性环境空镜 / 死描写）
+#
+# 只抓"规则可判定的硬形态"，审美留给 prompt 守则：
+#   1) 空镜开场：正文前 ~200 字内 ≥2 个环境词且 0 个人物动作/对话
+#   2) 纯景清场段：某段 ≥3 个环境词且 0 动作/对话/人称代词
+# 环境词表与动作/人物排除表为规则近似，阈值取高防误伤。
+# ============================================================
+_ENV_WORDS = [
+    "阳光", "月光", "星光", "灯光", "烛光", "路灯", "晨光", "夕照", "余晖",
+    "窗外", "窗台", "窗帘", "窗纱", "落地窗", "玻璃", "门前", "门口", "走廊",
+    "墙角", "墙脚", "天花板", "墙壁", "白墙", "地板", "地毯", "客厅", "房间",
+    "屋子", "院子", "庭院", "街道", "马路", "路边", "街头", "巷子", "远处",
+    "天边", "天空", "夜色", "夜幕", "细雨", "雨丝", "雨声", "雨滴", "雷声",
+    "风声", "微风", "寒风", "树叶", "树影", "花坛", "尘埃", "光线", "光影",
+    "雾气", "薄雾", "云层", "云影", "暮色", "昏暗", "幽暗", "寂静", "安静地",
+    "空旷", "空荡荡", "冷清", "昏暗的", "明亮的", "金黄", "昏黄",
+]
+_ENV_ACT_SIGNS = [
+    "他说", "她说", "我说", "他道", "她道", "我道", "心里", "突然",
+    "猛地", "转身", "回头", "抬头", "低头", "推门", "进门", "下楼", "上楼",
+    "喊了一声", "叫住", "哭了出来", "笑了笑", "站起来", "坐下", "躺着",
+    "走进", "走出", "跑进", "跑出", "看了一眼", "望着", "盯着", "抓住",
+    "握住", "抱着", "拿起", "放下", "问道", "答道", "说着",
+    # 人物在场排除：空镜的本质是"没有人在场"，任何叙事主语都应阻断
+    "我" , "你", "他", "她" , "我们", "你们", "他们", "自己",
+]
+
+
+def check_scene_dump(text):
+    """检查"惰性环境空镜"（死描写）：空镜开场 / 纯景清场段。
+
+    返回 dict：
+        open_flagged:  空镜开场（前200字 ≥2 环境词 & 无人物动作/对话）
+        para_flagged:  存在纯景清场段（≥3 环境词 & 无动作/人称）
+        pure_para_n:   纯景段数量
+        flagged:       是否命中任一阈值
+        reason:        人类可读提示（details/重试反馈用）
+    """
+    import re
+    if not text or not text.strip():
+        return {"flagged": False, "open_flagged": False,
+                "para_flagged": False, "pure_para_n": 0, "reason": ""}
+    body_lines = [ln for ln in text.split(chr(10))
+                  if ln.strip() and not re.match(r"^#{1,3}\s", ln.strip())]
+    body = chr(10).join(body_lines)
+
+    def env_count(s):
+        return sum(1 for w in _ENV_WORDS if w in s)
+
+    def act_count(s):
+        return sum(1 for a in _ENV_ACT_SIGNS if a in s)
+
+    # 空镜开场：前 200 字内 ≥2 环境词 & 无动作/对话
+    head = body[:200]
+
+    punct = '\'.…。！？!?\'"“”「」'
+    head_text = re.sub(r"[\s%s]+" % punct, "", head)
+    open_flagged = (env_count(head_text) >= 2
+                    and act_count(head_text) == 0
+                    and '"' not in head and "「" not in head)
+    head_example = head[:40] if open_flagged else ""
+
+    # 纯景清场段：按行（段）统计，≥3 环境词 & 0 动作 & 无对话引号
+    pure_para_n = 0
+    examples = []
+    for p in body_lines:
+        p = p.strip()
+        if len(p) < 15:
+            continue
+        p_no_ws = re.sub(r"\s+", "", p)
+        if (env_count(p_no_ws) >= 3 and act_count(p_no_ws) == 0
+                and '"' not in p and "「" not in p):
+            pure_para_n += 1
+            if len(examples) < 3:
+                examples.append(p[:50])
+    para_flagged = pure_para_n >= 1
+
+    reasons = []
+    if open_flagged:
+        reasons.append("空镜开场：前200字纯景物铺垫（无人物/动作/对话）")
+    if para_flagged:
+        reasons.append(f"纯景清场段 {pure_para_n} 个（{pure_para_n}处连续景物无人物动作）")
+    return {
+        "open_flagged": open_flagged,
+        "para_flagged": para_flagged,
+        "pure_para_n": pure_para_n,
+        "flagged": bool(reasons),
+        "reason": "；".join(reasons),
+        "head_example": head_example,
+        "examples": examples,
+    }
+
+
+# ============================================================
+# 注册表：id -> 检测函数。返回约定：quant_* / scene_dump 为
+# dict(flagged/reason…)；ai_flavor 为 (metrics, score)/None。
 # ============================================================
 DETECTORS = {
     "quant_density": check_quant_density,
     "ai_flavor": check_ai_flavor,
+    "scene_dump": check_scene_dump,
 }
 
 # 提示词小节 <-> 检测器 对应表（生成侧约束与本地质检同源）
@@ -229,4 +325,5 @@ PROMPT_RULE_MAP = {
     "行文去AI味守则": ["ai_flavor"],
     "量化克制守则": ["quant_density"],
     "人物命名与出场守则": [],  # naming_burst 待中文分词方案落地
+    "环境与场景描写守则": ["scene_dump"],
 }

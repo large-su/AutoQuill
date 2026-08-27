@@ -27,9 +27,10 @@ log = logging.getLogger(__name__)
 PARA_LENGTH_THRESHOLD = 80
 
 
-# 量化密度检测已收敛至 core/detectors.py；此处保留兼容 re-export。
+# 检测器已收敛至 core/detectors.py；此处保留兼容 re-export。
 from core.detectors import (  # noqa: F401
     check_quant_density,
+    check_scene_dump,
     QUANT_DENSITY_ARAB,
     QUANT_DENSITY_CN,
     QUANT_STACK_RATIO,
@@ -403,6 +404,16 @@ def validate_story_format(text):
         else:
             score -= 1
             details["量化"] = f"{qd.get('reason', '')}(-1)"
+
+    # --- 7. 惰性环境空镜（死描写）：空镜开场/纯景段 → 软性减分 + 反馈 ---
+    sd = check_scene_dump(text)
+    if sd.get("flagged"):
+        if sd.get("open_flagged"):
+            score -= 2  # 空镜开场最劝退
+            details["环境空镜"] = f"{sd.get('reason', '')}(-2)"
+        else:
+            score -= 1
+            details["环境空镜"] = f"{sd.get('reason', '')}(-1)"
 
     score = max(score, 0)
     is_valid = score >= 6
