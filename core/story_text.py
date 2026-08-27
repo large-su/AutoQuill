@@ -28,6 +28,13 @@ PARA_LENGTH_THRESHOLD = 80
 
 
 # 量化密度检测已收敛至 core/detectors.py；此处保留兼容 re-export。
+from core.detectors import (  # noqa: F401
+    check_quant_density,
+    QUANT_DENSITY_ARAB,
+    QUANT_DENSITY_CN,
+    QUANT_STACK_RATIO,
+)
+
 # ============================================================
 # LLM 输出清洗
 # ============================================================

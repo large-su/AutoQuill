@@ -25,7 +25,9 @@ class TestParallelSourceOnly(unittest.TestCase):
             self.assertNotIn(banned, src, banned)
 
     def test_workflows_dispatch_wiring(self):
-        src = self._src("workflows/base.py")
+        # P0 拆分后：编排入口在 base.py，并行分发实现在 workflow_batch.py
+        src = (self._src("workflows/base.py")
+               + self._src("workflows/workflow_batch.py"))
         self.assertIn("web_drivers.parallel", src)
         self.assertIn("_batch_generate_web_parallel", src)
         self.assertIn("_batch_retry_web_parallel", src)
