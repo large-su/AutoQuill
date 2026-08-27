@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 from core.paths import data as _data_path
 from config.story import ZHIHU_RECOMMEND_URL
 
+from web_drivers.browser_pool import WorkflowCancelled, _check_cancel  # noqa: F401
+
 from .browser_utils import (
     _NAV_TIMEOUT,
     _RECOMMEND_QUESTIONS_JS,

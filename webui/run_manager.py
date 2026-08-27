@@ -18,6 +18,15 @@ from pydantic import BaseModel
 # run 线程最后一条日志时间戳（log_capture.emit 更新 / watchdog 消费）
 _last_log_ts = [0.0]
 
+# 卡死判定（从 server.py 迁入）：日志超过 STALL 秒无进展或总时长
+# 超过 OVERALL 秒 → 判定卡死。240s 而非 180s：慢速页面/首 token
+# 等待窗口可能较长，留足余量。
+STALL_LIMIT = 240.0
+OVERALL_LIMIT = 900.0
+# 批量模式（Web 通道）单篇需 3-5 分钟，10 篇两两并行约 20-25 分钟；
+# 若沿用 900s 一刀切总时长会被误杀（正常推进也会超时中断）。
+OVERALL_LIMIT_BATCH = 3600.0
+
 log = logging.getLogger(__name__)
 
 def _llm_configured():

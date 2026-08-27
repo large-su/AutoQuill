@@ -19,10 +19,14 @@ from .common import (_llm_configured, _require_llm_ready,
                      _require_zhihu_url, _current_log_file)
 from .run_manager import _RunSpec, runner
 from core import paths
+from webui import log_capture
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+def _sse(event, payload):
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 @router.post("/api/run")
 def api_run(spec: _RunSpec):
