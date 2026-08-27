@@ -243,7 +243,7 @@ GENRE_CLASSIFY_PROMPT = """你是一个知乎故事分类专家。请判断以�
 # ★ 提示词 5：配方提炼
 # ============================================================
 # 用途：从参考文章中提炼抽象创作配方
-# 使用位置：kb_manager.py → extract_recipes()
+# 使用位置：（已退役）archive/kb_manager.py → extract_recipes()
 
 _RECIPE_EXTRACT_HEAD = """你是一位故事创作技法分析师。请从以下知乎高赞故事中提炼【抽象创作配方】。
 

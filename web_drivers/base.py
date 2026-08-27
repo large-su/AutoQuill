@@ -61,19 +61,30 @@ class WebLLMDriver:
         return self._page
 
     def open_session(self):
-        """打开网页版 LLM 站点（导航到配置 URL）。"""
+        """打开网页版 LLM 站点（导航到配置 URL）。
+
+        ★ 导航内置重试：重试链路里每次 generate 都会重新 goto，网络
+        瞬时抖动曾让第 2 次尝试直接击穿整个任务（2026-08-27 日志：
+        首发 1456 字正常、重试时 goto 超时 → 全盘报错）。现在首试
+        20s + 重试 35s（慢站点放宽），两次都失败才抛错。
+        """
         from web_drivers.browser_pool import _check_cancel
         from config import WEB_DRIVERS, WEB_DRIVER_NAME
         url = WEB_DRIVERS[WEB_DRIVER_NAME]["url"]
-        _check_cancel()
+        attempts = [(20000, "domcontentloaded"), (35000, "domcontentloaded")]
         page = self._page_instance()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        except Exception as exc:
-            log.warning("web_drivers: 打开 %s 失败：%s", url, exc)
-            raise RuntimeError(f"网页版 LLM 站点打开失败：{url}") from exc
-        log.info("web_drivers: 已打开 %s", url)
-        return self
+        last_exc = None
+        for i, (timeout_ms, wait_until) in enumerate(attempts, 1):
+            _check_cancel()
+            try:
+                page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                log.info("web_drivers: 已打开 %s", url)
+                return self
+            except Exception as exc:
+                last_exc = exc
+                log.warning("web_drivers: 打开 %s 失败（第 %d/%d 次，%ds 超时）：%s",
+                            url, i, len(attempts), timeout_ms // 1000, exc)
+        raise RuntimeError(f"网页版 LLM 站点打开失败：{url}") from last_exc
 
     def close_session(self):
         """关闭本 driver 的独立页面（不关共享浏览器）。"""

@@ -197,10 +197,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             LLM_MODE,
             WAIT_BETWEEN_CYCLES,
         )
-        from config.story import (
-            DEFAULT_BATCH_PUBLISH_COUNT,
-            KB_ENABLE,
-        )
+        from config.story import DEFAULT_BATCH_PUBLISH_COUNT
         from config import random_delay
         from story_generation import generate_story_parallel
         from story_scoring import score_stories
@@ -271,9 +268,10 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         time_phase1 = time.time() - time_phase1_start
         log.info(f"  阶段1耗时：{time_phase1:.1f}s")
 
-        # 采样模式：参考文章片段直接注入（零 LLM 提炼），不再绑定配方
+        # 采样模式：参考文章片段直接注入（配方层已退役，
+        # generate_story(recipe=...) 参数保留为未来反馈闭环接口）
         for m in materials:
-            m["recipe"] = None
+            m.setdefault("recipe", None)
 
         # ===== 阶段2：生成故事 =====
         log.info(f"\n{'─'*50}")
@@ -472,8 +470,6 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         log.info(f"{'─'*60}")
         log.info(f"  阶段1 素材收集：{len(materials)} 份    "
                  f"耗时 {time_phase1:.1f}s")
-        if KB_ENABLE and any(m.get('recipe') for m in materials):
-            log.info("  阶段1.5 配方提炼：现提现用")
         log.info(f"  阶段2 {gen_mode_label}生成："
                  f"{total_gen_before_filter} 篇    "
                  f"耗时 {total_gen_time:.1f}s")

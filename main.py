@@ -269,21 +269,8 @@ def main():
     print(f"  选题：{QUESTION_SELECT_MODE} | LLM：{LLM_MODE} | "
           f"故事筛选：{filter_str}")
 
-    # 知识库状态
-    try:
-        from config.story import KB_ENABLE
-        if KB_ENABLE:
-            from kb_manager import load_kb
-            kb = load_kb()
-            kb_count = len(kb.get("recipes", []))
-            if kb_count > 0:
-                print(f"  知识库：✓ 已启用（{kb_count} 个配方）")
-            else:
-                print("  知识库：✓ 已启用（空，运行后自动积累）")
-        else:
-            print("  知识库：关闭（参考文章模式）")
-    except Exception:
-        print("  知识库：未配置")
+    # 知识库（kb_manager v2.1）已于 2026-08 退役；数据留存见
+    # data/knowledge_base.json，后续闭环接口见 core/feedback_loop.py
     print()
 
     # CLI 命令分发

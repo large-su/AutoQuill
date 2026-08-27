@@ -113,7 +113,9 @@ STORY_MATERIAL_MODE = "sample"
 
 KB_MAX_PER_GENRE = 30
 KB_MERGE_TRIGGER = 120
-KB_ENABLE = True
+# [2026-08 已退役] kb_manager 配方闭环停止维护（2404 配方零消费）；
+# 反馈闭环的后续形态见 core/feedback_loop.py。保留 False 以兼容旧读取。
+KB_ENABLE = False
 
 # 配方提炼详细模式开关（影响 RECIPE_EXTRACT_PROMPT 组装）
 RECIPE_VERBOSE_MODE = True

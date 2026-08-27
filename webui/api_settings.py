@@ -37,7 +37,7 @@ def api_config():
                   "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
                   "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES",
                   "MAX_TOPIC_RETRY", "STORY_GENERATE_MAX_ATTEMPTS",
-                  "KB_ENABLE"):
+                  ):
             cfg[k] = getattr(sconfig, k, None)
     except Exception as exc:
         cfg["_app_error"] = str(exc)
