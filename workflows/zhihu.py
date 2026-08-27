@@ -70,6 +70,18 @@ class ZhihuWorkflow(WorkflowBase):
         if QUESTION_SOURCE == "custom":
             return self._select_custom(browser)
 
+        # 跨轮去重：历史已发布问题并入 avoid（单次运行的 avoid 只覆盖
+        # 本轮重试；隔天再跑推荐页会再推同一题，生成完才发现已答过）
+        try:
+            from core import topic_ledger
+            seen_urls = topic_ledger.load_seen_urls()
+            if seen_urls:
+                avoid = set(avoid or set()) | seen_urls
+                log.info("  跨轮去重：%d 题历史发布记录加入排除集",
+                         len(seen_urls))
+        except Exception:
+            log.debug("topic_ledger 不可用，跳过跨轮去重", exc_info=True)
+
         log.info("=" * 50)
         log.info(f"步骤 1：选题（{QUESTION_SELECT_MODE}，DOM 通道）")
         log.info("=" * 50)

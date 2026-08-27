@@ -332,6 +332,20 @@ def set_runtime_custom_question_url(url, persist=True):
     return {"custom_question_url": story.CUSTOM_QUESTION_URL}
 
 
+def _runtime_overrides_enabled():
+    """是否应用本机运行时覆盖（webui_model.json）。
+
+    测试进程（unittest discover / 单测文件）默认读出厂默认值——
+    否则同一份代码在不同机器上测试基线不同（用户把 MAX_TOPIC_RETRY
+    改成 8 会让 assertEqual(...,5) 挂掉）。需要模拟真实用户状态时，
+    显式设环境变量 AUTOQUILL_ALLOW_RUNTIME_OVERRIDES=1 强制生效。
+    """
+    import sys as _sys
+    if _os.environ.get("AUTOQUILL_ALLOW_RUNTIME_OVERRIDES") == "1":
+        return True
+    return "unittest" not in _sys.modules
+
+
 def _apply_webui_model_override():
     """启动时恢复 Web 控制台上次选择的模型与生成通道（若存在且仍有效）。"""
     try:
@@ -380,4 +394,5 @@ def _apply_webui_model_override():
         pass  # 配置损坏/服务商被移除 → 保持默认
 
 
-_apply_webui_model_override()
+if _runtime_overrides_enabled():
+    _apply_webui_model_override()

@@ -302,6 +302,11 @@ class WorkflowBase:
             return False
 
         self.publish(story, title, url, md_path)
+        try:
+            from core import topic_ledger
+            topic_ledger.record(url, title)
+        except Exception:
+            log.debug("台账记录失败(不影响结果)", exc_info=True)
         log.info("本轮完成！")
         return True
 
@@ -437,7 +442,7 @@ class WorkflowBase:
         from config.story import ENABLE_PARAGRAPH_ANALYSIS
         if ENABLE_PARAGRAPH_ANALYSIS:
             try:
-                from core.story_text import plot_paragraph_distribution
+                from tools.story_plots import plot_paragraph_distribution
                 plot_paragraph_distribution(generated)
             except Exception as e:
                 log.warning(f"  段落分布分析出错（{e}），跳过")
@@ -569,6 +574,11 @@ class WorkflowBase:
                 self.publish(item['story'], item['title'], item['url'],
                              md_path=item.get('md_path'))
                 published += 1
+                try:
+                    from core import topic_ledger
+                    topic_ledger.record(item.get('url'), item.get('title'))
+                except Exception:
+                    pass
                 log.info("  ✓ 发布成功")
             except KeyboardInterrupt:
                 log.info("\n用户中断发布。")
