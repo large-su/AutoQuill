@@ -13,6 +13,10 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from webui import server
+from webui import api_setup as setup_mod
+from webui import api_settings as settings_mod
+from webui import common as common_mod
+from webui import api_library as library_mod
 
 
 class TestServerAPI(unittest.TestCase):
@@ -155,7 +159,7 @@ class TestServerAPI(unittest.TestCase):
         orig = config.LLM_MODE
         try:
             config.set_runtime_mode("api", persist=False)  # 起点非 web
-            with mock.patch.object(server, "_web_llm_logged_in_cached",
+            with mock.patch.object(settings_mod, "_web_llm_logged_in_cached",
                                    return_value=True):
                 r = self.client.post("/api/mode", json={"mode": "web"})
                 self.assertEqual(r.status_code, 200)
@@ -170,7 +174,7 @@ class TestServerAPI(unittest.TestCase):
         orig = config.LLM_MODE
         try:
             config.set_runtime_mode("api", persist=False)  # 起点非 web
-            with mock.patch.object(server, "_web_llm_logged_in_cached",
+            with mock.patch.object(settings_mod, "_web_llm_logged_in_cached",
                                    return_value=False):
                 r = self.client.post("/api/mode", json={"mode": "web"})
                 self.assertEqual(r.status_code, 400)
@@ -188,7 +192,7 @@ class TestServerAPI(unittest.TestCase):
         orig = config.LLM_MODE
         try:
             config.set_runtime_mode("api", persist=False)
-            server._web_llm_cache.update(ts=time.time(), ok=True)
+            setup_mod._web_llm_cache.update(ts=time.time(), ok=True)
             with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                    return_value=False) as m:
                 r = self.client.post("/api/mode", json={"mode": "web"})
@@ -444,7 +448,7 @@ class TestCollectUrlGuard(unittest.TestCase):
         for url in ("https://www.zhihu.com/people/x/answers",
                     "https://zhihu.com/people/x/answers",
                     "https://www.zhihu.com/people/x/answers?page=2"):
-            server._require_zhihu_url(url)
+            common_mod._require_zhihu_url(url)
 
 
 class TestAuthorEndpoints(unittest.TestCase):
@@ -704,15 +708,15 @@ class TestStoryTraversalGuard(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._orig_output = server.OUTPUT_DIR
-        server.OUTPUT_DIR = Path(tempfile.mkdtemp(prefix="webui_out_"))
-        (server.OUTPUT_DIR / "story_20260811_000001.md").write_text(
+        cls._orig_output = library_mod.OUTPUT_DIR
+        library_mod.OUTPUT_DIR = Path(tempfile.mkdtemp(prefix="webui_out_"))
+        (library_mod.OUTPUT_DIR / "story_20260811_000001.md").write_text(
             "测试故事内容", encoding="utf-8")
         cls.client = TestClient(server.app)
 
     @classmethod
     def tearDownClass(cls):
-        server.OUTPUT_DIR = cls._orig_output
+        library_mod.OUTPUT_DIR = cls._orig_output
 
     def test_read_existing(self):
         r = self.client.get("/api/story",
@@ -876,7 +880,7 @@ class TestSetupEndpoints(unittest.TestCase):
             json.dump(providers, f, ensure_ascii=False, indent=2)
         # Web 登录检查缓存：测试内固定为未登录（免真实拉起 Edge），
         # 需要登录语义的用例单独 patch
-        server._web_llm_cache.update(ts=time.time(), ok=False)
+        setup_mod._web_llm_cache.update(ts=time.time(), ok=False)
 
     @classmethod
     def tearDownClass(cls):
@@ -908,24 +912,24 @@ class TestSetupEndpoints(unittest.TestCase):
             with mock.patch.object(server.os.path, "exists",
                                    return_value=True):
                 with mock.patch.object(
-                        server, "_web_llm_logged_in_cached",
+                        setup_mod, "_web_llm_logged_in_cached",
                         return_value=False):
                     st = self.client.get("/api/setup/status").json()
                     self.assertTrue(st["setup_needed"])
                 with mock.patch.object(
-                        server, "_web_llm_logged_in_cached",
+                        setup_mod, "_web_llm_logged_in_cached",
                         return_value=True):
                     st = self.client.get("/api/setup/status").json()
                     self.assertFalse(st["setup_needed"])
 
     def test_web_login_cached_result_reused(self):
         # TTL 内重复调用不重复拉起浏览器（web_llm_logged_in 只调一次）
-        server._web_llm_cache.update(ts=0.0, ok=False)
+        setup_mod._web_llm_cache.update(ts=0.0, ok=False)
         import applications.zhihu_story.browser_adapter as ba
         with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                return_value=True) as m:
-            self.assertTrue(server._web_llm_logged_in_cached())
-            self.assertTrue(server._web_llm_logged_in_cached())
+            self.assertTrue(setup_mod._web_llm_logged_in_cached())
+            self.assertTrue(setup_mod._web_llm_logged_in_cached())
             self.assertEqual(m.call_count, 1)
 
     def test_web_login_cache_dedups_concurrent_calls(self):
@@ -933,7 +937,7 @@ class TestSetupEndpoints(unittest.TestCase):
         # 锁去重后 8 个并发调用只触发 1 次真实检测（首启轮询 2.5s 间隔
         # 会撞上检测期，原实现各自排队启动浏览器是「检测慢」的主因）
         import threading
-        server._web_llm_cache.update(ts=0.0, ok=False)
+        setup_mod._web_llm_cache.update(ts=0.0, ok=False)
         import applications.zhihu_story.browser_adapter as ba
         entered = threading.Event()
         release = threading.Event()
@@ -949,7 +953,7 @@ class TestSetupEndpoints(unittest.TestCase):
         with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                side_effect=_slow_check) as m:
             def _call():
-                results.append(server._web_llm_logged_in_cached())
+                results.append(setup_mod._web_llm_logged_in_cached())
 
             threads = [threading.Thread(target=_call) for _ in range(4)]
             for t in threads:
@@ -1040,8 +1044,8 @@ class TestSetupEndpoints(unittest.TestCase):
 
     def test_zhihu_login_starts_thread(self):
         import applications.zhihu_story.browser_adapter as ba
-        orig_thread = server._login_thread
-        server._login_thread = None
+        orig_thread = setup_mod._login_thread
+        setup_mod._login_thread = None
         try:
             with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
                 with mock.patch.object(
@@ -1052,28 +1056,28 @@ class TestSetupEndpoints(unittest.TestCase):
                     # 后台线程里执行了登录流程（等线程跑完）
                     import time
                     deadline = time.time() + 5
-                    while (server._login_thread
-                           and server._login_thread.is_alive()
+                    while (setup_mod._login_thread
+                           and setup_mod._login_thread.is_alive()
                            and time.time() < deadline):
                         time.sleep(0.05)
                     self.assertEqual(m.call_count, 1)
                     st = self.client.get("/api/setup/status").json()
                     self.assertFalse(st["login_running"])
         finally:
-            server._login_thread = orig_thread
+            setup_mod._login_thread = orig_thread
 
     def test_zhihu_login_duplicate_409(self):
         import applications.zhihu_story.browser_adapter as ba
         fake = mock.Mock()
         fake.is_alive.return_value = True
-        orig = server._login_thread
-        server._login_thread = fake
+        orig = setup_mod._login_thread
+        setup_mod._login_thread = fake
         try:
             with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
                 r = self.client.post("/api/setup/zhihu-login")
             self.assertEqual(r.status_code, 409)
         finally:
-            server._login_thread = orig
+            setup_mod._login_thread = orig
 
     def test_web_login_missing_edge_400(self):
         import applications.zhihu_story.browser_adapter as ba
@@ -1084,10 +1088,10 @@ class TestSetupEndpoints(unittest.TestCase):
 
     def test_web_login_starts_thread(self):
         import applications.zhihu_story.browser_adapter as ba
-        orig_thread = server._login_thread
-        orig_kind = server._login_kind
-        server._login_thread = None
-        server._login_kind = ""
+        orig_thread = setup_mod._login_thread
+        orig_kind = setup_mod._login_kind
+        setup_mod._login_thread = None
+        setup_mod._login_kind = ""
         try:
             with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
                 with mock.patch(
@@ -1096,34 +1100,34 @@ class TestSetupEndpoints(unittest.TestCase):
                     r = self.client.post("/api/setup/web-login")
                     self.assertEqual(r.status_code, 200)
                     deadline = time.time() + 5
-                    while (server._login_thread
-                           and server._login_thread.is_alive()
+                    while (setup_mod._login_thread
+                           and setup_mod._login_thread.is_alive()
                            and time.time() < deadline):
                         time.sleep(0.05)
                     self.assertEqual(m.call_count, 1)
         finally:
-            server._login_thread = orig_thread
-            server._login_kind = orig_kind
+            setup_mod._login_thread = orig_thread
+            setup_mod._login_kind = orig_kind
 
     def test_web_login_duplicate_409(self):
         import applications.zhihu_story.browser_adapter as ba
         fake = mock.Mock()
         fake.is_alive.return_value = True
-        orig = server._login_thread
-        server._login_thread = fake
+        orig = setup_mod._login_thread
+        setup_mod._login_thread = fake
         try:
             with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
                 r = self.client.post("/api/setup/web-login")
             self.assertEqual(r.status_code, 409)
         finally:
-            server._login_thread = orig
+            setup_mod._login_thread = orig
 
 
 class TestUpdateCheck(unittest.TestCase):
     """检查更新：有新版 / 已最新 / 网络失败。"""
 
     def setUp(self):
-        server._update_cache["data"] = None
+        setup_mod._update_cache["data"] = None
 
     def _fake_resp(self, tag_name):
         r = mock.Mock()
@@ -1136,20 +1140,20 @@ class TestUpdateCheck(unittest.TestCase):
         return r
 
     def test_latest_greater_than_current(self):
-        with mock.patch("webui.server.requests.get",
+        with mock.patch("webui.api_setup.requests.get",
                         return_value=self._fake_resp("v9.9.9")):
             d = self.client_get()
         self.assertTrue(d["has_update"])
         self.assertEqual(d["latest"], "9.9.9")
 
     def test_same_version_no_update(self):
-        with mock.patch("webui.server.requests.get",
+        with mock.patch("webui.api_setup.requests.get",
                         return_value=self._fake_resp("v4.0.0")):
             d = self.client_get()
         self.assertFalse(d["has_update"])
 
     def test_network_error_graceful(self):
-        with mock.patch("webui.server.requests.get",
+        with mock.patch("webui.api_setup.requests.get",
                         side_effect=Exception("boom")):
             d = self.client_get()
         self.assertIsNone(d["latest"])
