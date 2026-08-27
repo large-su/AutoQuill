@@ -25,6 +25,118 @@ PARA_LENGTH_THRESHOLD = 80
 
 
 # ============================================================
+# ★ 量化密度检测（防"数字堆砌"AI 味）
+# ============================================================
+# 人类作者基准（实测采集库：中文数字+量词约 8/千字、堆砌句少）：
+#   - 中文量化密度阈值：> 20/千字 才提示（人类 8-11，留足余量）
+#   - 病态堆砌专测：跨单位换算堆叠（一年，三百六十五天）或同句 ≥4 处数量罗列
+#   - 阿拉伯数量表达：> 12/千字 单独提示
+# 只做软性减分提示（进 details → 重试反馈），不否决格式合规。
+QUANT_CN_RE = re.compile(
+    r"[一二两三四五六七八九十百千万]+\s*(?:个|只|条|张|把|位|名|岁|次|回|遍|趟|人|桌|碗|杯|盘|瓶|盒|包|"
+    r"件|双|副|束|朵|棵|根|颗|粒|层|楼|间|户|页|份|笔|单|圈|步|米|公里|斤|克|毫升|元|角|分|天|日|夜|周|月|"
+    r"年|小时|分钟|秒|通|封|本|辆|架|台|部|套|组|批|对|种|家|店)")
+QUANT_ARAB_RE = re.compile(r"\d+\s*(?:个|只|条|张|把|位|名|岁|次|回|人|桌|碗|杯|件|双|元|块|天|年|小时|分钟|秒|层|斤)")
+QUANT_DENSITY_CN = 20.0      # 中文量化表达 每千字 阈值（人类约 8-11，20 才提示）
+QUANT_DENSITY_ARAB = 12.0    # 阿拉伯数量表达 每千字 阈值
+QUANT_STACK_RATIO = 0.02     # 堆砌句比例阈值（validate_story_format 减分用）
+# 病态堆砌专测（AI 特征，区别于正常单数使用）：
+#   1) 跨单位换算/并列堆叠：一年，三百六十五天 / 三千二百块，四十七斤
+#   2) 同句 ≥4 处量化（含量词）：数量罗列成清单
+# 序数先行剥离（第一名/第二次/第七层 不是数量堆砌）
+_QUANT_ORDINAL_RE = re.compile(r"第\s*[一二两三四五六七八九十百千万\d]+")
+# 同量词重复列举：X岁，X岁 / X次，X次 / X年，X年（紧凑相邻）
+QUANT_DUP_RE = re.compile(
+    r"(?:[一二两三四五六七八九十百千万]+|\d+)\s*(岁|年|天|次|回|个|只|块|元)\s*[，、,\s]+"
+    r"(?:[一二两三四五六七八九十百千万]+|\d+)\s*\1")
+# 跨单位换算/并列堆叠：一年，三百六十五天 / 三千二百块，四十七斤
+QUANT_CONVERT_RE = re.compile(
+    r"(?:[一二两三四五六七八九十百千万]+|\d+)\s*(?:年|天|小时|分钟|块|元)\s*[，、,]+"
+    r"(?:[一二两三四五六七八九十百千万]+|\d+)\s*(?:天|小时|分钟|秒|块|元)")
+# 同句 ≥4 处普通量化（数量罗列成清单）
+QUANT_TRIPLE_RE = re.compile(
+    r"(?:[一二两三四五六七八九十百千万]+|\d+)\s*(?:个|只|条|张|位|次|回|人|桌|碗|杯|件|双|元|块|天|年|"
+    r"小时|分钟|秒|层|斤|岁)")
+
+
+
+# ============================================================
+# ★ 人物命名密度检测（防"人名轰炸"——开头一堆名字的 AI 味）
+# ============================================================
+# 启发式：常用姓氏 + 1~2 字名 粗识别（噪声较大，仅用于"开头人名过载"
+# 与"一次性全名"两个保守信号，阈值取高避免误伤）。
+# 阈值（吸取人工抽查经验：人类开头 600 字通常 0~2 个真名）：
+#   - 开头 1500 字真名 > 5 个 → 提示（一眼压力大）
+#   - 全文出现 ≤2 次的全名占比 > 70% → 提示（一堆一次性名字）
+def check_quant_density(text):
+    """检查故事文本的"量化表达密度"（数字堆砌 AI 味信号）。
+
+    返回 dict：
+        quant_cn:        中文数字+量词 次数
+        quant_arab:      阿拉伯数字+量词 次数
+        density_cn:      中文量化 / 千字
+        density_arab:    阿拉伯量化 / 千字
+        stack_ratio:     含 ≥2 处量化表达的句子占比
+        flagged:         是否命中任一阈值（True 则需要提示重写）
+        reason:          人类可读的提示语（供 details/重试反馈）
+        examples:        最多 3 个堆砌句示例
+    """
+    if not text or not text.strip():
+        return {"flagged": False, "reason": "", "examples": []}
+    # 去章节标题行，避免 "## **1**" 的编号被计入
+    body_lines = [ln for ln in text.split("\n")
+                  if ln.strip() and not re.match(r"^#{1,3}\s", ln.strip())]
+    body = "\n".join(body_lines)
+    total = len(re.sub(r"\s+", "", body))
+    if total < 100:
+        return {"flagged": False, "reason": "", "examples": []}
+
+    # 逐句统计 + 病态堆砌专测
+    sents = [s for s in re.split(r"[。！？…\n]+", body) if s.strip()]
+    density_cn = len(QUANT_CN_RE.findall(body)) * 1000.0 / total
+    density_arab = len(QUANT_ARAB_RE.findall(body)) * 1000.0 / total
+
+    n_pair = 0
+    n_triple = 0
+    examples = []
+    for s in sents:
+        stripped = _QUANT_ORDINAL_RE.sub("", s)   # 先剥序数
+        if not stripped.strip():
+            continue
+        conv = QUANT_CONVERT_RE.search(stripped)   # 跨单位换算堆叠（AI 典型病）
+        triple = QUANT_TRIPLE_RE.findall(stripped) # 同句罗列（≥3 处）
+        if conv:
+            n_pair += 1
+            if len(examples) < 3:
+                examples.append(s[:50])
+        elif len(triple) >= 4:
+            n_triple += 1
+            if len(examples) < 3:
+                examples.append(s[:50])
+    stack_ratio = (n_pair + n_triple) / max(len(sents), 1)
+
+    reasons = []
+    if density_cn > QUANT_DENSITY_CN:
+        reasons.append(f"量化表达偏密（{density_cn:.1f}/千字）")
+    if density_arab > QUANT_DENSITY_ARAB:
+        reasons.append(f"阿拉伯数量表达偏多（{density_arab:.1f}/千字）")
+    if n_pair > 0 or n_triple > 0:
+        reasons.append(f"数字堆砌句 {n_pair + n_triple} 处"
+                       f"（重复列举/换算/罗列式量化）")
+
+    return {
+        "quant_cn": len(QUANT_CN_RE.findall(body)),
+        "quant_arab": len(QUANT_ARAB_RE.findall(body)),
+        "density_cn": round(density_cn, 1),
+        "density_arab": round(density_arab, 1),
+        "stack_ratio": round(stack_ratio, 2),
+        "flagged": bool(reasons),
+        "reason": "；".join(reasons),
+        "examples": examples,
+    }
+
+
+# ============================================================
 # 段落长度分布分析 + 绘图
 # ============================================================
 
@@ -554,6 +666,16 @@ def validate_story_format(text):
     if any(p in first_100 for p in ai_prefixes):
         score -= 2
         details["废话"] = "-2"
+
+    # --- 6. 量化密度（防数字堆砌 AI 味）：软性减分 + 反馈提示 ---
+    qd = check_quant_density(text)
+    if qd.get("flagged"):
+        if qd.get("stack_ratio", 0) > QUANT_STACK_RATIO:
+            score -= 2
+            details["量化"] = f"{qd.get('reason', '')}(-2)"
+        else:
+            score -= 1
+            details["量化"] = f"{qd.get('reason', '')}(-1)"
 
     score = max(score, 0)
     is_valid = score >= 6
