@@ -89,7 +89,28 @@ class DomReadMixin:
                 pass
             return self
         _check_cancel()
-        self.page.goto(target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT)
+        # ★ 导航重试：问题页脚本重，首载可能超过 20s 超时（2026-08-27
+        # 日志：选题正常、open_question 单次 goto 20s 超时直接击穿整轮
+        # 任务）。首试 _NAV_TIMEOUT，失败放宽至 2 倍再试一次。
+        last_exc = None
+        for _attempt in (1, 2):
+            _check_cancel()
+            try:
+                timeout = _NAV_TIMEOUT if _attempt == 1 else _NAV_TIMEOUT * 2
+                self.page.goto(target, wait_until="domcontentloaded",
+                               timeout=_NAV_TIMEOUT if _attempt == 1
+                               else timeout)
+                last_exc = None
+                break
+            except WorkflowCancelled:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                log.warning("browser_adapter: 打开问题页 %s 失败（第 %d 次，%ds）: %s",
+                            target, _attempt,
+                            (_NAV_TIMEOUT if _attempt == 1 else _NAV_TIMEOUT * 2) // 1000, exc)
+        if last_exc:
+            raise RuntimeError(f"打开问题页失败：{target}") from last_exc
         try:
             if not self._wait_answer_container(timeout=8):
                 log.warning("browser_adapter: 问题页正文容器未在 8s 内出现，继续")

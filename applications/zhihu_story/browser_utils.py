@@ -62,7 +62,9 @@ _ZHIHU_HOME = "https://www.zhihu.com/"
 # 历史事故：风控页/加载中页面会让 evaluate 无限阻塞（进程挂死数
 # 分钟无日志），任何交互都不允许无界等待。
 _EVAL_TIMEOUT = 15000
-_NAV_TIMEOUT = 20000
+# 知乎问题页脚本较重，20s 常不够（2026-08-27 两次真实运行均在
+# open_question goto 20s 超时击穿任务）；提到 35s + 调用处双重试。
+_NAV_TIMEOUT = 35000
 # 浏览器进程启动超时（毫秒）。启动无日志是历史卡死事故的高发段：
 # playwright 驱动或 Edge 拉起失败时无任何输出，必须显式超时。
 _LAUNCH_TIMEOUT_MS = 60000
