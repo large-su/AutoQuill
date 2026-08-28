@@ -351,7 +351,30 @@ def validate_story_format(text):
     score = 10
     details = {}
 
-    # --- 1. 章节标题检测 ---
+    # --- 0. 引言存在性（先于章节检测：第一节之前必须有独立引言段）---
+    # 判定极简（用户要求）：只看第一个非空行。它是正文故事文字 → 有引言；
+    # 它是章节标题（## **N**）、'引言/引子'标签、或分割线 → 缺引言。
+    # 不限制长度/句数——模型产出 1-2 句干脆开场即算达标。
+    intro_ok = False
+    intro_reason = None
+    for line in text.split(chr(10)):
+        s = line.strip()
+        if not s:
+            continue  # 跳过前导空行
+        if re.match(r'^#{1,6}\s*\*{0,2}\d+\*{0,2}\s*$', s):
+            intro_reason = "第一段直接是章节标题"
+        elif s.startswith(("引言", "引子")) and len(s) < 12:
+            intro_reason = "第一段是'引言/引子'标签而非正文"
+        elif re.match(r'^[\-\*_]{3,}\s*$', s):
+            intro_reason = "第一段是分割线"
+        else:
+            intro_ok = True  # 第一个非空行是正文 → 有引言
+        break
+    if not intro_ok:
+        score -= 2
+        details["引言"] = f"{intro_reason or '正文第一段缺失'}(-2)"
+
+    # --- 1. 章节标题检测 ---    # --- 1. 章节标题检测 ---
     chapter_count = len(re.findall(r'##\s*\*\*\d+\*\*', text))
     if chapter_count < 6:
         penalty = min(6 - chapter_count, 4)  # 封顶减 4 分

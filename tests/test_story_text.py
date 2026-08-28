@@ -143,14 +143,30 @@ class TestValidateStoryFormat(unittest.TestCase):
         self.assertFalse(valid)
 
     def test_well_formatted_story_passes(self):
-        # 8 章 × 15 段 × ~42 字/段 ≈ 5000 字，段落都低于长段阈值
+        # 引言段 + 8 章 × 15 段 × ~42 字/段 ≈ 5000 字，段落都低于长段阈值
         para = "这是正文内容。" * 7  # 42 字
+        intro = "那是入冬后的第一场雪。"  # 独立引言段
         chapters = [f"## **{i}**\n\n" + (para + "\n\n") * 14 + para for i in range(1, 9)]
-        body = "\n\n".join(chapters)
+        body = intro + "\n\n" + "\n\n".join(chapters)
         self.assertGreaterEqual(len(body), 4000)
         score, valid, details = validate_story_format(body)
         self.assertTrue(valid, details)
         self.assertGreaterEqual(score, 6)
+
+    def test_missing_intro_penalized(self):
+        # 第一行直接是章节标题 → 缺引言 -2 分且 details 带 引言 键
+        para = "这是正文内容。" * 7
+        chapters = [f"## **{i}**\n\n" + (para + "\n\n") * 14 + para for i in range(1, 9)]
+        body = "\n\n".join(chapters)
+        score, valid, details = validate_story_format(body)
+        self.assertIn("引言", details)
+        self.assertGreaterEqual(details["引言"] if isinstance(details["引言"], str) else "", "")
+
+    def test_first_line_story_text_is_intro(self):
+        # 第一行是短句正文 → 有引言，不扣分（用户诉求：任一正文开头即达标）
+        body = "我死了。\n\n## **1**\n\n" + "这是正文。" * 600
+        score, valid, details = validate_story_format(body)
+        self.assertNotIn("引言", details)
 
     def test_missing_chapters_penalized(self):
         body = "## **1**\n\n" + "这是正文。" * 500 + "\n\n## **2**\n\n" + "这是正文。" * 500
