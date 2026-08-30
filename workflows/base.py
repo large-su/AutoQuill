@@ -166,10 +166,11 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
 
         self.publish(story, title, url, md_path)
         try:
-            from core import topic_ledger
-            topic_ledger.record(url, title)
+            from core import feedback_loop
+            feedback_loop.record_story_published(
+                url, title, {"story_file": md_path})
         except Exception:
-            log.debug("台账记录失败(不影响结果)", exc_info=True)
+            log.debug("反馈闭环落账失败(不影响结果)", exc_info=True)
         log.info("本轮完成！")
         return True
 
@@ -437,8 +438,10 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                              md_path=item.get('md_path'))
                 published += 1
                 try:
-                    from core import topic_ledger
-                    topic_ledger.record(item.get('url'), item.get('title'))
+                    from core import feedback_loop
+                    feedback_loop.record_story_published(
+                        item.get('url'), item.get('title'),
+                        {"story_file": item.get('md_path')})
                 except Exception:
                     pass
                 log.info("  ✓ 发布成功")

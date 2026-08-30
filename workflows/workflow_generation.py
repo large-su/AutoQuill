@@ -34,8 +34,10 @@ class GenerationMixin:
             return self._generate_api(question_title, top_answer, recipe,
                                       feedback=feedback)
         else:
-            return self._generate_web(question_title, top_answer, recipe,
-                                      feedback=feedback)
+            # Web 通道带断路器与 API 自动降级（P1：8/29 DeepSeek 前端
+            # 改版 3 连败教训；同任务内连续失败 N 次后跳过 Web 直走 API）
+            return self._generate_web_with_failover(
+                question_title, top_answer, recipe, feedback=feedback)
 
     def _generate_api(self, question_title, top_answer, recipe=None,
                       feedback=None):
@@ -63,6 +65,45 @@ class GenerationMixin:
         return self._generate_web_short_form(
             question_title, top_answer, recipe, feedback=feedback
         )
+
+    _WEB_BREAK_HINTS = (
+        "找不到", "输入框", "前端可能改版", "站点打开失败",
+        "发送失败", "页面状态", "可能需要人工介入",
+    )
+
+    def _generate_web_with_failover(self, question_title, top_answer,
+                                    recipe=None, feedback=None):
+        """Web 生成，带「前端改版/输入框丢失」类故障的自动降级。
+
+        - 单次失败：告警并立即用 API 通道补跑本轮（需已配置 API Key）
+        - 连续失败 >= WEB_FAILOVER_MAX_CONSECUTIVE：本轮剩余尝试跳过
+          Web 直走 API（断路器），避免每次尝试都白等页面重试
+        - 非故障类异常（风控/超时等）照旧抛出，不吞错误
+        """
+        from config.story import (WEB_FAILOVER_TO_API,
+                                  WEB_FAILOVER_MAX_CONSECUTIVE)
+        fails = getattr(self, "_web_fail_consecutive", 0)
+        if fails >= WEB_FAILOVER_MAX_CONSECUTIVE:
+            log.warning("Web 通道已连续失败 %d 次，本轮剩余尝试"
+                        "自动降级到 API 通道", fails)
+            return self._generate_api(question_title, top_answer, recipe,
+                                      feedback=feedback)
+        try:
+            story = self._generate_web(question_title, top_answer, recipe,
+                                       feedback=feedback)
+            self._web_fail_consecutive = 0
+            return story
+        except RuntimeError as exc:
+            msg = str(exc)
+            is_break = any(h in msg for h in self._WEB_BREAK_HINTS)
+            if WEB_FAILOVER_TO_API and is_break:
+                self._web_fail_consecutive = fails + 1
+                log.warning(
+                    "Web 通道故障（%s…），自动降级到 API 通道"
+                    "（连续第 %d 次）", msg[:70], self._web_fail_consecutive)
+                return self._generate_api(question_title, top_answer,
+                                          recipe, feedback=feedback)
+            raise
 
     def _generate_web_short_form(self, question_title, top_answer, recipe=None,
                                  feedback=None):
@@ -119,6 +160,7 @@ class GenerationMixin:
         best = None            # 兜底：多次失败时返回更高分版本
         best_score = -1
         last_reason = None     # 上一轮失败原因（重试反馈）
+        self._web_fail_consecutive = 0  # 每轮任务重置 Web 断路器计数
 
         for attempt in range(max_attempts):
             story = self.generate_story(title, answer, feedback=last_reason)

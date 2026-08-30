@@ -23,6 +23,16 @@ __all__ = [
     # reader_score
     "READER_SCORE_W_LIKES", "READER_SCORE_W_COMMENTS", "READER_SCORE_W_COLLECTS",
     "READER_SCORE_W_HEARTS", "READER_SCORE_REF_AGE_DAYS", "READER_SCORE_DECAY_EXPONENT",
+    # 反馈闭环（core/feedback_loop）
+    "FEEDBACK_LOOP_ENABLE", "TOPIC_GENRE_PRIOR_ENABLE",
+    "TOPIC_GENRE_PRIOR_WEIGHT", "TOPIC_GENRE_BOOST_MIN",
+    "TOPIC_GENRE_BOOST_MAX",
+    # P1 质量与可靠性：守则前置已内置于 prompt（story_prompt 常量）；
+    # Web 降级 / 提取自适应为以下配置
+    "WEB_FAILOVER_TO_API", "WEB_FAILOVER_MAX_CONSECUTIVE",
+    "EXTRACT_ADAPTIVE_RELAX", "EXTRACT_LENGTH_FACTORS",
+    "EXTRACT_LIKES_FACTORS", "EXTRACT_MIN_LENGTH_FLOOR",
+    "EXTRACT_MIN_LIKES_FLOOR",
     # URL
     "ZHIHU_RECOMMEND_URL", "ZHIHU_INVITED_URL",
     # 自动选题与提取
@@ -130,6 +140,53 @@ READER_SCORE_W_COLLECTS = 2.5
 READER_SCORE_W_HEARTS   = 2.0
 READER_SCORE_REF_AGE_DAYS = 90
 READER_SCORE_DECAY_EXPONENT = 0.5
+
+# ============================================================
+# 反馈闭环（core/feedback_loop.py）
+# ============================================================
+
+# 是否启用发布数据反馈闭环（落账/表现观测/题材先验）。
+# False = 关闭后：发布只走 topic_ledger 原有台账，选题不做题材加权，
+# 看板抓取不再自动入账（历史快照仍可用 seed_from_snapshots 手动回填）。
+FEEDBACK_LOOP_ENABLE = True
+
+# 选题打分是否叠加「题材读者先验」乘数（P0-B）。
+TOPIC_GENRE_PRIOR_ENABLE = True
+
+# 先验乘数的干预强度：boost = 1 + W × (题材分/全局分 - 1)。
+# 0.5 = 题材分是全局 2 倍时乘 1.5 倍分；0 关闭。
+TOPIC_GENRE_PRIOR_WEIGHT = 0.5
+
+# 乘数上下限（防止口碑题材垄断选题 / 冷门题材被完全排除）。
+TOPIC_GENRE_BOOST_MIN = 0.5
+TOPIC_GENRE_BOOST_MAX = 2.0
+
+# ============================================================
+# Web 通道自动降级（P1：8/29 曾因 DeepSeek 前端改版 3 连败）
+# ============================================================
+
+# Web 生成通道遇「前端改版/输入框丢失」类错误时，自动降级到 API 通道
+# 完成本轮剩余尝试（需已配置 API Key；未配置则照旧报错并提示）。
+WEB_FAILOVER_TO_API = True
+
+# 同一次生成任务内连续失败多少次后，跳过 Web 直接走 API（断路器）。
+WEB_FAILOVER_MAX_CONSECUTIVE = 2
+
+# ============================================================
+# 提取门槛自适应（P1：消灭「重试 9 次仍无合格首答」的整轮空转）
+# ============================================================
+
+# 首轮按 MIN_ANSWER_LENGTH / MATERIAL_MIN_LIKES 原值筛选；之后每轮
+# 按下方因子逐级放宽（并受地板约束），并在日志中明示放宽幅度。
+EXTRACT_ADAPTIVE_RELAX = True
+
+# 长度门槛逐级系数（第 0 轮 1.0 → 第 1 轮 ×0.8 → 第 2 轮及以后 ×0.6）
+EXTRACT_LENGTH_FACTORS = (1.0, 0.8, 0.6)
+# 点赞门槛逐级系数（第 0 轮 1.0 → 第 1 轮 ×0.6 → 第 2 轮及以后 ×0.3）
+EXTRACT_LIKES_FACTORS = (1.0, 0.6, 0.3)
+# 放宽地板（避免把低质素材放进来）
+EXTRACT_MIN_LENGTH_FLOOR = 250
+EXTRACT_MIN_LIKES_FLOOR = 20
 
 # ============================================================
 # URL

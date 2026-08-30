@@ -119,19 +119,76 @@ class ZhihuWorkflow(WorkflowBase):
             time.sleep(3)
         return None, None, None
 
+    # ============================================================
+    # 提取门槛自适应（P1）：首轮按原门槛，之后逐轮放宽并打日志，
+    # 消灭「重试 N 次仍无合格首答」的整轮空转
+    # ============================================================
+
+    @staticmethod
+    def _adaptive_min_length(attempt):
+        """按尝试轮次放宽首答长度门槛；返回放宽后的值。"""
+        from config.story import (EXTRACT_ADAPTIVE_RELAX,
+                                  EXTRACT_LENGTH_FACTORS,
+                                  EXTRACT_MIN_LENGTH_FLOOR,
+                                  MIN_ANSWER_LENGTH)
+        if not EXTRACT_ADAPTIVE_RELAX:
+            return MIN_ANSWER_LENGTH
+        idx = min(max(attempt, 0), len(EXTRACT_LENGTH_FACTORS) - 1)
+        return max(EXTRACT_MIN_LENGTH_FLOOR,
+                   int(MIN_ANSWER_LENGTH * EXTRACT_LENGTH_FACTORS[idx]))
+
+    @staticmethod
+    def _adaptive_min_likes(attempt):
+        """按尝试轮次放宽点赞门槛；返回放宽后的值。"""
+        from config.story import (EXTRACT_ADAPTIVE_RELAX,
+                                  EXTRACT_LIKES_FACTORS,
+                                  EXTRACT_MIN_LIKES_FLOOR,
+                                  MATERIAL_MIN_LIKES)
+        if not EXTRACT_ADAPTIVE_RELAX:
+            return MATERIAL_MIN_LIKES
+        idx = min(max(attempt, 0), len(EXTRACT_LIKES_FACTORS) - 1)
+        return max(EXTRACT_MIN_LIKES_FLOOR,
+                   int(MATERIAL_MIN_LIKES * EXTRACT_LIKES_FACTORS[idx]))
+
+    def _log_gate_relax(self, attempt, length_used, likes_used,
+                        base_length, base_likes):
+        """放宽发生（attempt>0 且与原值不同）时记一条醒目日志。"""
+        if attempt > 0 and (length_used != base_length
+                            or likes_used != base_likes):
+            log.warning("⚠ 首轮未获合格素材，第 %d 轮放宽提取门槛："
+                        "长度 %d → %d，点赞 %d → %d",
+                        attempt + 1, base_length, length_used,
+                        base_likes, likes_used)
+
     @staticmethod
     def _dom_score(q):
-        """DOM 卡片评分：主信号×(次信号+1)，热度标签 ×2。
+        """DOM 卡片评分：主信号×(次信号+1)，热度标签 ×2，题材口碑加权。
 
         两种候选页信号不同，自适应：
           - 创作中心推荐页：关注/回答（followers/answers）
           - 首页推荐流：赞/评论（likes/comments）
-        含义一致——互动越强越优先。"""
+        含义一致——互动越强越优先。随后按题目题材叠加读者先验乘数
+        （feedback_loop.topic_genre_multiplier；无数据/失败时恒等于 1.0，
+        不改变原打分行为）。"""
         main = q.get("likes") or q.get("followers") or 0
         sec = q.get("comments") or q.get("answers") or 0
         score = main * (sec + 1)
         if q.get("is_hot"):
             score *= 2
+        if q.get("title"):
+            try:
+                from config.story import (TOPIC_GENRE_PRIOR_ENABLE,
+                                          TOPIC_GENRE_PRIOR_WEIGHT,
+                                          TOPIC_GENRE_BOOST_MIN,
+                                          TOPIC_GENRE_BOOST_MAX)
+                if TOPIC_GENRE_PRIOR_ENABLE:
+                    from core.feedback_loop import topic_genre_multiplier
+                    score *= topic_genre_multiplier(
+                        q["title"], weight=TOPIC_GENRE_PRIOR_WEIGHT,
+                        min_boost=TOPIC_GENRE_BOOST_MIN,
+                        max_boost=TOPIC_GENRE_BOOST_MAX)
+            except Exception:
+                pass
         return score
 
     def _select_auto(self, browser, avoid=None):
@@ -534,7 +591,7 @@ class ZhihuWorkflow(WorkflowBase):
             log.warning("大模型筛选不可用（沿用点赞最高）：%s", exc)
             return None
 
-    def _extract_auto_parallel(self, browser, attempted):
+    def _extract_auto_parallel(self, browser, attempted, attempt=0):
         """全自动选题并行提取一批候选，取点赞最高的合格者。
 
         一批 PARALLEL_EXTRACT_LIMIT 个候选并行提取；过短/不可回答/
@@ -543,10 +600,12 @@ class ZhihuWorkflow(WorkflowBase):
         gate_reject_count)（调用方累加拒绝统计后整批重选，attempted
         已累计排除）。
         """
-        from config.story import (
-            MIN_ANSWER_LENGTH, MATERIAL_MIN_LIKES, PARALLEL_EXTRACT_LIMIT)
+        from config.story import PARALLEL_EXTRACT_LIMIT
         from applications.zhihu_story.browser_adapter import (
             normalize_question_url)
+
+        length_limit = self._adaptive_min_length(attempt)
+        likes_limit = self._adaptive_min_likes(attempt)
 
         candidates = self._select_batch(browser, avoid=attempted,
                                         count=PARALLEL_EXTRACT_LIMIT)
@@ -557,11 +616,11 @@ class ZhihuWorkflow(WorkflowBase):
         good = []
         for r in results:
             answer = r.get("answer") or ""
-            if not (r["can_answer"] and len(answer) >= MIN_ANSWER_LENGTH):
+            if not (r["can_answer"] and len(answer) >= length_limit):
                 continue
             footer = r.get("footer") or {}
             pass_likes, like_reason = self._material_likes_pass(
-                footer.get("likes"), MATERIAL_MIN_LIKES)
+                footer.get("likes"), likes_limit)
             if not pass_likes:
                 gate_reject_count += 1
                 log.warning(f"  ✗ {r['q']['title'][:30]}...："
@@ -627,7 +686,13 @@ class ZhihuWorkflow(WorkflowBase):
                 if attempt > 0:
                     log.warning(f"  本批候选均不合格，重新批量选题"
                                 f"（第 {attempt}/{MAX_TOPIC_RETRY} 批）")
-                result = self._extract_auto_parallel(browser, attempted)
+                self._log_gate_relax(attempt,
+                                     self._adaptive_min_length(attempt),
+                                     self._adaptive_min_likes(attempt),
+                                     self._adaptive_min_length(0),
+                                     self._adaptive_min_likes(0))
+                result = self._extract_auto_parallel(browser, attempted,
+                                                     attempt=attempt)
                 if result is not None:
                     if result[0] is None:
                         # 整批全败：_extract_auto_parallel 返回
@@ -667,15 +732,18 @@ class ZhihuWorkflow(WorkflowBase):
                     log.warning(f"  DOM 提取异常：{exc}，重新选题")
                     continue
                 answer = (data or {}).get("answer") or ""
-                if len(answer) >= MIN_ANSWER_LENGTH:
+                length_limit = self._adaptive_min_length(attempt)
+                likes_limit = self._adaptive_min_likes(attempt)
+                self._log_gate_relax(attempt, length_limit, likes_limit,
+                                     self._adaptive_min_length(0),
+                                     self._adaptive_min_likes(0))
+                if len(answer) >= length_limit:
                     title = (data or {}).get("title") or ""
                     footer = (data or {}).get("footer") or {}
                     # ★ 点赞门槛（与 batch 收集同一判定）：未达最低
                     # 赞同数的题目重新选题，避免 low-quality 素材入库
-                    from config.story import (
-                        MATERIAL_MIN_LIKES)
                     pass_likes, like_reason = self._material_likes_pass(
-                        (footer or {}).get("likes"), MATERIAL_MIN_LIKES)
+                        (footer or {}).get("likes"), likes_limit)
                     if not pass_likes:
                         gate_reject_count += 1
                         log.warning(f"  点赞门槛未过：{like_reason}"
@@ -696,7 +764,7 @@ class ZhihuWorkflow(WorkflowBase):
                         log.info("  footer 未采集（不影响单条流程）")
                     return title, answer, footer, final_url
                 log.warning(f"  首答过短（{len(answer)} 字 < "
-                            f"{MIN_ANSWER_LENGTH}），尝试下一题")
+                            f"{length_limit}），尝试下一题")
             else:
                 # DOM 提取被显式关闭：纯 DOM 通道无降级，直接失败
                 raise RuntimeError(

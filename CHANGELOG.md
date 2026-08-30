@@ -2,6 +2,37 @@
 
 版本号以 core/version.py 为唯一事实来源（发布 tag 为 V<VERSION>）。
 
+## v4.7.2（2026-08-30）
+
+发布数据反馈闭环 + 稳定性保障 + 复盘自动化（P0/P1/P2 一次交付）。
+
+### P0：发布数据反馈闭环（core/feedback_loop.py 从预留桩变为完整实现）
+- core/feedback_loop.py 从预留桩变为完整实现：
+  - record_story_published(url, title, meta) 与 core/topic_ledger 合流，台账落账追加 version / aid / genre / story_file / session_id——复盘可按版本直接出账，不再靠日志时间戳反推
+  - attach_performance(...)：看板抓取时自动把每篇的阅读/赞/评/藏/喜欢写入 data/state/story_performance.jsonl（每条=一篇的一次观测，天然时间序列；幂等不重复）
+  - attach_snapshot_rows(...)：兼容新（扁平字段）/老（metrics 字典）两种快照格式
+  - seed_from_snapshots()：历史快照一键回填（tools/seed_feedback.py），本次已回填 813 篇、1576 条观测
+  - summarize(genre=None)：按题材聚合「发布后日均互动分」（沿用 READER_SCORE_* 权重：赞1/评3/藏2.5/喜欢2，90 天指数衰减），观测不足 2 篇的题材回落全局中位
+- 题材反馈加权选题（P0-B）：workflows/zhihu.py _dom_score 在热度分后叠加 topic_genre_multiplier（boost 钳制 0.5~2.0，默认权重 0.5；无数据/未知题材/失败时恒为 1.0，不改变原打分行为）
+- 题材分类下沉：GENRE_RULES / genre_of 移入 core/detectors.py（classify_genre），看板 /api/dashboard 语义不变（webui/published.py re-export）
+- 配置：config/story.py 新增 FEEDBACK_LOOP_ENABLE / TOPIC_GENRE_PRIOR_ENABLE / TOPIC_GENRE_PRIOR_WEIGHT / TOPIC_GENRE_BOOST_MIN/MAX（默认开启）
+- 工具：tools/seed_feedback.py 回填历史快照 + 打印题材先验摘要（幂等，可反复执行）
+
+### P1：生成-守则对齐 + 通道容错 + 提取自适应
+- **守则前置**：story_prompt.py 新增 FORMAT_SELF_CHECK_RULE「发布前自检」（引言/章节/量化克制/环境空镜/对话句式/篇幅六条，与 validate_story_format 扣分点一一对应），所有模式生成 prompt 末尾注入——让稿子一次过，减少 8/29 式废稿与重试
+- **Web 通道自动降级**：workflows 新增 _generate_web_with_failover——DeepSeek 前端改版/输入框丢失类故障自动降级到 API 通道补跑本轮；同任务连续失败 >= WEB_FAILOVER_MAX_CONSECUTIVE（默认 2）后跳过 Web 直走 API（断路器）；成功重置计数；非界面类异常（超时/风控）照常抛出
+- **提取门槛自适应**：workflows/zhihu.py 新增 _adaptive_min_length/_adaptive_min_likes——首轮按 MIN_ANSWER_LENGTH/MATERIAL_MIN_LIKES 原值，之后每轮按 EXTRACT_LENGTH_FACTORS/LIKES_FACTORS 逐级放宽（长度 500→400→300 地板 250；点赞 200→120→60 地板 20），放宽时日志明示，消灭「重试 9 次仍无合格首答」的整轮空转；EXTRACT_ADAPTIVE_RELAX 可整体关闭
+- 配置：config/story.py 新增 WEB_FAILOVER_TO_API / WEB_FAILOVER_MAX_CONSECUTIVE / EXTRACT_ADAPTIVE_RELAX / EXTRACT_LENGTH_FACTORS / EXTRACT_LIKES_FACTORS / EXTRACT_MIN_LENGTH_FLOOR / EXTRACT_MIN_LIKES_FLOOR
+
+### P2：复盘自动化
+- **tools/version_feedback_report.py**：每周一键复盘工具——日志事件解析（文件/标题/格式分/重试/废稿）→ git 提交时间线归因版本（新→旧自动处理，无版本号的开发提交按提交主题分组）→ 与最新知乎快照按标题归一化匹配（支持截断标题唯一前缀兜底）→ 按版本聚合发布率/格式合规/重试/废稿/互动中位 → 控制台摘要 + --write 落 docs/REVIEW-<日期>.md + 题材先验输出
+- **看板「日均赞」列**：webui/published.py 为每行计算 likes_per_day / reads_per_day / engagement_per_day（互动分=赞+3×评+2.5×藏+2×喜欢，与反馈闭环同口径），前端列表新增「日均赞（/天）」列，悬停显示日均互动分——反馈梯度在控制台直接可见
+- 工具已用真实数据运行：docs/REVIEW-2026-08-30.md（53 事件 / 356 快照 / 11 版本分组，与手工复盘完全一致）
+
+### 测试
+- 新增 tests/test_feedback_loop.py 10 例（落账版本/元数据、幂等观测、双格式回填、题材先验与乘数钳制、稀有题材回落、无数据时选题打分不变）+ tests/test_p1_quality_gates.py 11 例（自检清单注入、Web 降级/断路器/成功重置/非界面异常不吞、提取门槛步进与地板、看板日均指标）+ tests/test_version_report.py 12 例（日志解析、版本归因新→旧、标题归一匹配、截断前缀兜底、歧义不匹配、双格式快照）
+- 全量 tests/run_all.py：375 例，0 失败 0 错误（跳过浏览器依赖 2 例）
+
 ## v4.7.0（2026-08-26）
 
 本轮聚焦「让故事更有趣」的作者能力升级 + 单次链路可回答性死循环修复。

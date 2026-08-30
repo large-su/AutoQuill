@@ -123,29 +123,15 @@ def _norm_date(s):
     return ""
 
 
-# 题材规则（标题 + 正文开头命中即归入；未命中为「其他」）。
-# 与前端历史规则保持一致，改这里后 /api/dashboard 返回的 genre 同步生效。
-GENRE_RULES = [
-    ("双男主/耽美", re.compile(r"双男主|耽美|同性|bl|攻受", re.I)),
-    ("甜文", re.compile(r"甜|齁甜|高甜|甜宠", re.I)),
-    ("虐文/火葬场", re.compile(r"虐|追妻|火葬场|渣|破镜重圆|悔", re.I)),
-    ("古言", re.compile(r"古言|古代|古风|宫斗|宅斗|穿越|嫡|王爷|太子", re.I)),
-    ("悬疑/灵异", re.compile(r"悬疑|灵异|恐怖|鬼|惊悚|凶杀|连环杀|细思恐极", re.I)),
-    ("重生", re.compile(r"重生|重来一世|再来一世|重新活", re.I)),
-    ("仙侠/玄幻", re.compile(r"仙侠|玄幻|修仙|修真|御剑|师父|掌门", re.I)),
-    ("现言/霸总", re.compile(r"现言|霸总|总裁|豪门|恋爱|男友|老公|青梅", re.I)),
-    ("科幻/脑洞", re.compile(r"科幻|末日|未来|机器|外星|ai|丧尸|平行", re.I)),
-    ("微小说", re.compile(r"微小说|百字|100字|十个字|七个字|一个词|一句话", re.I)),
-]
+# 题材分类统一在 core/detectors.py（看板、反馈闭环、选题加权共用）。
+# 此处只保留 re-export，保证既有 import（含历史规则语义）不受影响。
+from core.detectors import GENRE_RULES, classify_genre  # noqa: F401
 
 
 def genre_of(r):
     """按标题 + 正文开头识别题材，返回规则名或「其他」。"""
-    text = ((r.get("title") or "") + " " + (r.get("content") or "")).strip()[:120]
-    for name, pattern in GENRE_RULES:
-        if pattern.search(text):
-            return name
-    return "其他"
+    return classify_genre(
+        (r.get("title") or "") + " " + (r.get("content") or ""))
 
 
 def _normalize_row(r):
@@ -185,6 +171,35 @@ def _coerce_row(r):
     return r
 
 
+def _engagement_rates(r):
+    """按发布天数归一互动（P2：看板新增'日均赞'列，与反馈闭环同口径）。
+
+    在原行上追加 likes_per_day / reads_per_day / engagement_per_day
+    （互动分 = 赞 + 3×评 + 2.5×藏 + 2×喜欢，/天数）；无法解析日期返回 0。
+    """
+    out = dict(r)
+    pd = r.get("publish_date") or ""
+    try:
+        y, mo, d = (int(x) for x in pd.split("-"))
+        age = max(1, (datetime.now() - datetime(y, mo, d)).days)
+    except (ValueError, TypeError):
+        age = None
+    if age is None:
+        out["likes_per_day"] = 0.0
+        out["reads_per_day"] = 0.0
+        out["engagement_per_day"] = 0.0
+        return out
+    likes = _to_number(r.get("likes"))
+    comments = _to_number(r.get("comments"))
+    collects = _to_number(r.get("collects"))
+    favors = _to_number(r.get("favors"))
+    out["likes_per_day"] = round(likes / age, 2)
+    out["reads_per_day"] = round(_to_number(r.get("reads")) / age, 2)
+    out["engagement_per_day"] = round(
+        (likes + 3.0 * comments + 2.5 * collects + 2.0 * favors) / age, 2)
+    return out
+
+
 def _engagement(rows):
     """快照互动合计，用于判断快照是否「有真实数据」（全 0 视为异常）。"""
     return sum(
@@ -198,10 +213,12 @@ def load() -> dict:
 
     返回 {rows(已归一化), total, generated_at, source_file}。
     """
-    return _snap.load_snapshot(
+    d = _snap.load_snapshot(
         _DATA_DIR, "published_answers_*.json",
         coerce_row=_coerce_row, id_keys=("aid",),
         quality_of=_engagement)
+    d["rows"] = [_engagement_rates(r) for r in d.get("rows", [])]
+    return d
 
 
 def filter_rows(rows: list[dict], q="", start="", end="", min_likes=0,
@@ -570,6 +587,13 @@ def scrape(progress=None, stop_flag=None):
         if progress:
             progress(f"已抓取 {len(dedup)} 条，已保存", 100)
         log.info("已发布内容抓取完成：%d 条 → %s", len(dedup), path)
+        try:
+            from core import feedback_loop
+            from config.story import FEEDBACK_LOOP_ENABLE
+            if FEEDBACK_LOOP_ENABLE:
+                feedback_loop.attach_snapshot_rows(dedup)
+        except Exception:
+            log.debug("反馈闭环入账失败（不影响快照）", exc_info=True)
         return dedup
     finally:
         b.close()

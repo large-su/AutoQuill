@@ -56,12 +56,26 @@ def load_seen_urls(max_age_days=_MAX_AGE_DAYS):
     return seen
 
 
-def record(url, title=""):
-    """追加一条发布记录；写失败仅告警不抛出（不影响发布结果）。"""
+def record(url, title="", meta=None):
+    """追加一条发布记录；写失败仅告警不抛出（不影响发布结果）。
+
+    meta 可选字段：aid / genre / story_file / session_id（有值才落账），
+    版本号自动注入（core.version.VERSION）——复盘可按版本直接出账。
+    """
     if not url:
         return
     rec = {"url": url, "title": title,
            "date": datetime.date.today().isoformat()}
+    if meta:
+        for key in ("aid", "genre", "story_file", "session_id"):
+            val = meta.get(key)
+            if val:
+                rec[key] = str(val)
+    try:
+        from core.version import VERSION
+        rec["version"] = VERSION
+    except Exception:
+        pass
     fp = _ledger_path()
     try:
         fp.parent.mkdir(parents=True, exist_ok=True)

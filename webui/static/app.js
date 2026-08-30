@@ -1048,6 +1048,7 @@ function renderDashTable(rows) {
     + "<th>标题</th><th>发布时间</th>"
     + '<th class="t-num">阅读</th><th class="t-num">赞同</th>'
     + '<th class="t-num">评论</th><th class="t-num">收藏</th><th class="t-num">喜欢</th>'
+    + '<th class="t-num" title="发布后日均赞同（互动分=赞+3×评+2.5×藏+2×喜欢）">日均赞</th>'
     + "</tr></thead><tbody>";
   for (const r of pageRows) {
     html += "<tr>"
@@ -1062,6 +1063,9 @@ function renderDashTable(rows) {
       + metricCell(r.comments, maxComments)
       + metricCell(r.collects, maxCollects)
       + metricCell(r.favors, maxFavors)
+      + '<td class="t-num"><span class="v">'
+      + (r.likes_per_day == null ? "0.00" : r.likes_per_day.toFixed(2))
+      + '</span><span class="rate-hint" title="日均互动 ' + (r.engagement_per_day || 0) + '">/天</span></td>'
       + "</tr>";
   }
   html += "</tbody></table>";
