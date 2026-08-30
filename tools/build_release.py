@@ -5,6 +5,7 @@
   python tools/build_release.py            # 门禁 + 构建 dist + 安装包 + sha256
   python tools/build_release.py --skip-test  # 跳过全量测试（危险，仅紧急修复用）
   python tools/build_release.py --skip-build # 只跑门禁与测试
+  python tools/build_release.py --skip-browser # 测试走 tests/run_all.py 统一入口（自动跳过真实浏览器用例）
 
 门禁（不满足直接失败退出）：
   1. git 工作区干净（未提交改动不发布）
@@ -113,9 +114,14 @@ def main():
     _sync_iss_version()
 
     if not skip_test:
-        print("\n--- 全量测试 ---")
-        _run([sys.executable, "-m", "unittest", "discover", "-s", "tests"])
-        print("✓ 全量测试通过")
+        if "--skip-browser" in sys.argv:
+            print("\n--- 全量测试（run_all 统一入口，跳过真实浏览器用例）---")
+            _run([sys.executable, str(ROOT / "tests" / "run_all.py")])
+            print("✓ 全量测试通过（run_all）")
+        else:
+            print("\n--- 全量测试 ---")
+            _run([sys.executable, "-m", "unittest", "discover", "-s", "tests"])
+            print("✓ 全量测试通过")
     if skip_build:
         print("（--skip-build：仅门禁+测试，不构建）")
         return 0
