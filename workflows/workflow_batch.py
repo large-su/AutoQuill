@@ -13,6 +13,134 @@ log = logging.getLogger(__name__)
 
 
 class BatchGenerationMixin:
+    # ============================================================
+    # 质量优先批量生成（v4.7.2 回顾：旧批量曾为效率牺牲质量；
+    # 本组方法与单轮链路同质：每篇走带失败原因反馈的重试循环）
+    # ============================================================
+
+    def _run_one_story_quality(self, mat):
+        """单篇生成：与单轮完整链路完全一致的口径。
+
+        内部走 generate_story_with_retry（最多 STORY_GENERATE_MAX_ATTEMPTS 次，
+        每轮注入上一版失败原因；无输出/过短/格式不合规都重试；
+        返回 (最高分版本, ok)）。Web 模式同样带前端改版自动降级 API。
+        """
+        from core.story_text import validate_story_format
+        story, ok = self.generate_story_with_retry(
+            mat['title'], mat['answer'])
+        if not story:
+            mat['story'] = None
+            mat['ok'] = False
+            return False
+        mat['story'] = story
+        mat['ok'] = ok
+        mat['md_path'] = self.save_story_file(story, mat['index'])
+        fmt_score, is_valid, _ = validate_story_format(story)
+        mat['format_score'] = fmt_score
+        return True
+
+    def _batch_generate_api_quality(self, materials, print_progress_fn,
+                                    reset_progress_fn):
+        """API 并行生成（质量优先版）：并发外壳 + 每篇单轮口径的反馈重试。
+
+        并发提交 generate_story_with_retry，保留不伤质量的效率点
+        （API 多线程并行；每篇重试 2-3 次的成本互不阻塞）。
+        """
+        from concurrent.futures import (ThreadPoolExecutor, wait,
+                                 FIRST_COMPLETED)
+        from config.story import (
+            STORY_GENERATE_CONCURRENCY, STORY_GENERATE_CONCURRENCY_MAX,
+            STORY_GENERATE_CONCURRENCY_MIN,
+        )
+
+        max_workers = min(len(materials), max(1, STORY_GENERATE_CONCURRENCY_MAX))
+        min_workers = min(max_workers, max(1, STORY_GENERATE_CONCURRENCY_MIN))
+        current_limit = min(max_workers,
+                            max(min_workers, min(len(materials),
+                                                STORY_GENERATE_CONCURRENCY)))
+        log.info(f"  质量优先·API 并行生成：并发 {current_limit}（每篇带反馈重试）")
+
+        progress = {}
+        reset_progress_fn()
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_mat = {}
+            next_index = 0
+
+            def _submit_until_capacity():
+                nonlocal next_index
+                while (next_index < len(materials)
+                       and len(future_to_mat) < current_limit):
+                    mat = materials[next_index]
+                    next_index += 1
+                    future_to_mat[pool.submit(
+                        self._run_one_story_quality, mat)] = mat
+
+            _submit_until_capacity()
+            while future_to_mat:
+                done, _ = wait(future_to_mat, timeout=2,
+                               return_when=FIRST_COMPLETED)
+                print_progress_fn(progress, len(materials))
+                if not done:
+                    continue
+                for future in done:
+                    mat = future_to_mat.pop(future)
+                    try:
+                        ok = future.result()
+                    except Exception as e:
+                        ok = False
+                        mat['story'] = None
+                        mat['ok'] = False
+                        log.error(f"  #{mat['index']} 生成异常：{e}")
+                    if ok:
+                        log.info(f"  ✓ #{mat['index']} 完成："
+                                 f"{mat['title'][:24]}...")
+                    else:
+                        log.warning(f"  ✗ #{mat['index']} 多次重试仍不合格"
+                                    f"（{mat['title'][:24]}...）")
+                _submit_until_capacity()
+        reset_progress_fn()
+        print()
+
+    def _batch_generate_web_quality(self, materials):
+        """Web 串行生成（质量优先版）：与单轮链路一字不差。
+
+        每篇走 generate_story_with_retry（含 Web 故障自动降级 API）。
+        刻意不用旧的多标签并行：反馈重试需要多次往返同一会话窗口，
+        串行优先保证质量（用户口径：质量第一，效率第二）。
+        """
+        for mat in materials:
+            log.info(f"  质量优先·Web 串行生成 #{mat['index']}："
+                     f"{mat['title'][:40]}...")
+            self._run_one_story_quality(mat)
+
+    @staticmethod
+    def _apply_prior_to_scores(scored):
+        """批量择优排序叠加账号题材先验（发布 top N 向口碑题材倾斜）。
+
+        乘数来自 feedback_loop.topic_genre_multiplier（题材先验/全局中位），
+        无数据/未知题材恒为 1.0；失败不阻断评分流程。
+        返回新排序后的列表。
+        """
+        from config.story import TOPIC_PRIOR_IN_SCORE
+        if not scored or not TOPIC_PRIOR_IN_SCORE:
+            return scored
+        try:
+            from core.feedback_loop import topic_genre_multiplier
+        except Exception:
+            return scored
+        for it in scored:
+            try:
+                boost = topic_genre_multiplier(it.get('title') or '')
+            except Exception:
+                boost = 1.0
+            it['prior_boost'] = round(boost, 3)
+            it['score_weighted'] = round(
+                (it.get('score') or 0) * boost, 2)
+        scored.sort(key=lambda it: it.get('score_weighted',
+                                       it.get('score') or 0),
+                    reverse=True)
+        return scored
+
     def _get_gen_concurrency():
         """读取故事并行生成的并发数配置。"""
         from config.story import STORY_GENERATE_CONCURRENCY

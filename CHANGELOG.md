@@ -2,6 +2,25 @@
 
 版本号以 core/version.py 为唯一事实来源（发布 tag 为 V<VERSION>）。
 
+## v4.7.3（开发中，未发版）
+
+批量运行改回「单轮链路循环 + 末尾筛选」的原设计（用户实测反馈：旧批量
+为效率做的并行化拉低了故事质量；口径改为质量第一、效率第二）。
+
+- BATCH_QUALITY_FIRST=True（默认）：
+  - 素材收集 = 逐轮走单轮链路的 extract_content（热度选题 → 并行 5 候选
+    取点赞最优 → LLM 问题池筛选），不再整页滚动取前 N 凑数；连续空轮上限
+    BATCH_COLLECT_MAX_EMPTY_ROUNDS 防死循环（旧 collect_materials_batch 保留可切回）
+  - 生成 = 每篇走 generate_story_with_retry（与单轮一字不差：带失败原因
+    反馈的重试循环，最多 STORY_GENERATE_MAX_ATTEMPTS 次，最高分版兜底；
+    Web 模式含前端改版自动降级 API）。API 模式保留多线程并行外壳（不伤质量）；
+    Web 模式质量优先改为串行（反馈重试需同会话往返，效率让位于质量）
+  - 阶段2.5 不再盲重试（生成已重试过），仍不合格者标记废稿不发布
+  - 评分择优排序乘账号题材先验 TOPIC_PRIOR_IN_SCORE（发布 top N 向口碑题材倾斜）
+- 新增 12 例 tests/test_batch_quality.py（分支锚点守护、单轮式精选去重/异常/空轮、
+  单篇质量生成、API 并行/Web 串行、题材先验排序）
+- 全量 tests/run_all.py：387 例，0 失败 0 错误
+
 ## v4.7.2（2026-08-30）
 
 发布数据反馈闭环 + 稳定性保障 + 复盘自动化（P0/P1/P2 一次交付）。

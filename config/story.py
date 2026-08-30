@@ -33,6 +33,8 @@ __all__ = [
     "EXTRACT_ADAPTIVE_RELAX", "EXTRACT_LENGTH_FACTORS",
     "EXTRACT_LIKES_FACTORS", "EXTRACT_MIN_LENGTH_FLOOR",
     "EXTRACT_MIN_LIKES_FLOOR",
+    "BATCH_QUALITY_FIRST", "BATCH_COLLECT_MAX_EMPTY_ROUNDS",
+    "TOPIC_PRIOR_IN_SCORE",
     # URL
     "ZHIHU_RECOMMEND_URL", "ZHIHU_INVITED_URL",
     # 自动选题与提取
@@ -187,6 +189,28 @@ EXTRACT_LIKES_FACTORS = (1.0, 0.6, 0.3)
 # 放宽地板（避免把低质素材放进来）
 EXTRACT_MIN_LENGTH_FLOOR = 250
 EXTRACT_MIN_LIKES_FLOOR = 20
+
+
+# ============================================================
+# 批量模式：质量优先（默认开启；想把效率摆在质量前面的旧模式可关闭）
+# ============================================================
+
+# True = 批量完全复用单轮链路语义：
+#   素材 = 逐轮「选题 → 并行 5 候选取最优 → LLM 筛选 → 提取」（extract_content），
+#         不再用整页滚动取前 N 凑数；
+#   生成 = 每篇走带失败原因反馈的重试循环（generate_story_with_retry，
+#         与单轮一致），格式不合格不再盲重试；
+#   发布 = 评分择优时乘账号题材先验（TOPIC_PRIOR_IN_SCORE）。
+# False = 旧批量（collect_materials_batch 整页滚动 + 无反馈生成 +
+#         单次盲重试）——仅当数量优先于质量时使用。
+BATCH_QUALITY_FIRST = True
+
+# 单轮式精选：连续多少轮拿不到新素材即停止（防推荐池枯竭死循环）
+BATCH_COLLECT_MAX_EMPTY_ROUNDS = 8
+
+# 批量评分排序是否乘以账号题材先验（feedback_loop 题材口碑，
+# 让发布 top N 向发过的同类题跑得赢的题材倾斜）
+TOPIC_PRIOR_IN_SCORE = True
 
 # ============================================================
 # URL

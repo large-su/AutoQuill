@@ -174,6 +174,52 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         log.info("本轮完成！")
         return True
 
+
+    def _collect_materials_single_style(self, target):
+        """单轮式素材精选：循环执行单轮链路的选题+提取，收集 target 份。
+
+        每轮走 extract_content()（与 run_single 完全同源）：
+          - 热度选题 → 并行开 5 个候选 → 点赞门槛 + 过短/不可回答过滤
+            → 取点赞最优 → LLM 问题池筛选挑最适合的 1 个
+          - 失败自动重选题（MAX_TOPIC_RETRY 级）
+        提取环节保留浏览器内 5 页并行的效率点；素材质量与单轮一致。
+        连续 BATCH_COLLECT_MAX_EMPTY_ROUNDS 轮无新素材即停止。
+        """
+        from config.story import BATCH_COLLECT_MAX_EMPTY_ROUNDS
+        materials = []
+        seen_urls = set()
+        seen_titles = set()
+        empty_rounds = 0
+        rounds = 0
+        while (len(materials) < target
+               and empty_rounds < BATCH_COLLECT_MAX_EMPTY_ROUNDS):
+            rounds += 1
+            try:
+                title, answer, footer, url = self.extract_content()
+            except Exception as exc:
+                empty_rounds += 1
+                log.warning(f"  第 {rounds} 轮精选未获素材：{exc}")
+                continue
+            if not (title and answer and url):
+                empty_rounds += 1
+                continue
+            if url in seen_urls or title in seen_titles:
+                log.warning(f"  第 {rounds} 轮命中已收集题目，跳过：",
+                            f"{title[:30]}...")
+                empty_rounds += 1
+                continue
+            seen_urls.add(url)
+            seen_titles.add(title)
+            materials.append({"title": title, "answer": answer,
+                              "footer": footer or {}, "url": url})
+            empty_rounds = 0
+            log.info(f"  已精选 {len(materials)}/{target} 份：",
+                     f"{title[:40]}...")
+        if len(materials) < target:
+            log.warning(f"  单轮式精选结束：{len(materials)}/{target}",
+                        f"（连续 {empty_rounds} 轮无新素材）")
+        return materials
+
     # ============================================================
     # 批量运行（流水线模式）
     # ============================================================
@@ -241,7 +287,14 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         log.info(f"阶段1：批量素材收集（目标 {target} 份）")
         log.info(f"{'─'*50}")
 
-        materials = self.collect_materials_batch(target)
+        from config.story import BATCH_QUALITY_FIRST
+        if BATCH_QUALITY_FIRST:
+            # 质量优先：素材 = 逐轮「选题→并行 5 候选取最优→LLM 筛选→提取」，
+            # 与单轮完整链路完全同源（不再整页滚动取前 N 凑数）
+            log.info(f"  单轮式素材精选（与单轮链路同质，目标 {target} 份）")
+            materials = self._collect_materials_single_style(target)
+        else:
+            materials = self.collect_materials_batch(target)
 
         if not materials:
             log.error("没有收集到任何素材！")
@@ -284,11 +337,19 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
 
         start_all = time.time()
 
+        from config.story import BATCH_QUALITY_FIRST
         if LLM_MODE == "api":
-            self._batch_generate_api(materials, print_progress,
-                                     reset_progress)
+            if BATCH_QUALITY_FIRST:
+                self._batch_generate_api_quality(materials, print_progress,
+                                                 reset_progress)
+            else:
+                self._batch_generate_api(materials, print_progress,
+                                         reset_progress)
         else:
-            self._batch_generate_web(materials)
+            if BATCH_QUALITY_FIRST:
+                self._batch_generate_web_quality(materials)
+            else:
+                self._batch_generate_web(materials)
 
         total_gen_time = time.time() - start_all
         generated = [m for m in materials if m.get('story')]
@@ -333,10 +394,12 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
 
         retried_ok = 0
         if non_compliant:
-            # ★ 检查是否启用格式重试
-            from config.story import ENABLE_FORMAT_RETRY
-
-            if not ENABLE_FORMAT_RETRY:
+            from config.story import ENABLE_FORMAT_RETRY, BATCH_QUALITY_FIRST
+            if BATCH_QUALITY_FIRST:
+                log.warning(f"  质量优先：{len(non_compliant)} 篇经带反馈重试仍不合格，标记废稿（不发布）")
+                for m in non_compliant:
+                    m["story"] = None
+            elif not ENABLE_FORMAT_RETRY:
                 log.info(f"  ENABLE_FORMAT_RETRY=False，"
                          f"跳过 {len(non_compliant)} 篇不合规文章的重试")
             else:
@@ -381,7 +444,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             # 评分择优
             log.info(f"阶段3：质量评分 + 择优发布前 {actual_publish} 篇")
             log.info(f"{'─'*50}\n")
-            scored = score_stories(generated)
+            scored = score_stories(generated) or []
+            scored = self._apply_prior_to_scores(scored)
             if scored and not any("score" in it for it in scored):
                 if LLM_MODE == "web":
                     log.warning("⚠ 评分未生效（DeepSeek 网页版不可用），"
