@@ -197,7 +197,8 @@ class TestParallelExtract(unittest.TestCase):
         self.assertIn("PARALLEL_EXTRACT_LIMIT", src)
         self.assertIn("attempted.update", src)
         self.assertIn("_material_likes_pass", src)
-        self.assertIn("MIN_ANSWER_LENGTH", src)
+        # P1 自适应门槛：并行提取按 attempt 级长度门槛筛选
+        self.assertIn("_adaptive_min_length(attempt)", src)
         # 合格候选取点赞最高者
         self.assertIn("reverse=True", src)
         self.assertIn('key=lambda r: (r.get("footer") or {}).get("likes")',
@@ -211,7 +212,8 @@ class TestParallelExtract(unittest.TestCase):
         src = inspect.getsource(self.wf.extract_content)
         self.assertIn("parallel_enabled", src)
         self.assertIn('QUESTION_SELECT_MODE == "auto"', src)
-        self.assertIn("_extract_auto_parallel(browser, attempted)", src)
+        self.assertIn("_extract_auto_parallel(browser, attempted,", src)
+        self.assertIn("attempt=attempt", src)
         self.assertIn("MAX_TOPIC_RETRY", src)
         self.assertIn("self.select_topic(avoid=attempted)", src)
         self.assertIn("browser.check_answerable()", src)
