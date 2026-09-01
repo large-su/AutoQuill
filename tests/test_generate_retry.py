@@ -17,9 +17,12 @@ from config import story as story_config
 
 
 def _valid_story():
-    """构造一段能通过 validate_story_format 的故事（≥6 章、≥4000 字、短段）。"""
+    """构造一段能通过 validate_story_format 的故事（引言 + ≥6 章、≥4000 字、短段）。
+
+    引言是硬性要求（一票否决）：第一行必须是故事正文，不能直接是章节标题。
+    """
     line = "这是第{ch}章的叙事句子，讲述一个具体的生活片段与人物内心抉择。"
-    paras = []
+    paras = ["事情要从那天夜里说起。", ""]  # 独立引言段（第一行是正文，非章节标题）
     for ch in range(1, 9):  # 8 章
         paras.append(f"## **{ch}**")
         paras.append("")

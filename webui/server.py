@@ -61,6 +61,7 @@ from .api_library import router as library_router
 from .api_runs import router as runs_router
 from .api_settings import router as settings_router
 from .api_setup import router as setup_router
+from .api_feedback import router as feedback_router
 from .run_manager import runner  # noqa: F401  (供存量扩展引用)
 
 
@@ -146,6 +147,7 @@ app.include_router(settings_router)
 app.include_router(setup_router)
 app.include_router(library_router)
 app.include_router(runs_router)
+app.include_router(feedback_router)
 
 # —— 兼容门面：历史调用方(tests/外部脚本)习惯 webui.server.X 直接取用
 from .api_library import *   # noqa: F401,F403

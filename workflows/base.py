@@ -71,7 +71,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         """大模型问题池筛选：排除不适合写故事/小说的候选，取最适合的。
 
         在硬性规则收集之后、生成之前调用（API 模式走服务商 API，
-        Web 模式走网页版大模型；任一失败均原样返回，不阻断流程）。
+        Web 模式走网页版大模型）。LLM 失败/禁用时原样返回不阻断流程；
+        LLM 判定全部不适合写故事时返回空列表（由调用方中止本批）。
         """
         from config.story import QUESTION_AI_SCREEN
         if not QUESTION_AI_SCREEN or len(materials) <= 1:
@@ -83,8 +84,10 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         log.info(f"\n{'─'*50}\n大模型问题池筛选（排除不适合写故事/小说的候选）\n{'─'*50}")
         screened = screen_question_pool(materials)
         if not screened:
-            log.warning("大模型筛选无结果，沿用原候选（可能 LLM 不可用）")
-            return materials
+            # 空列表 = 大模型成功判定全部 keep=false（都不适合写故事）。
+            # 失败时 screen_question_pool 原样返回非空 materials，不会走到这。
+            log.warning("大模型筛选判定全部候选均不适合写故事，排除全部")
+            return []
         if len(screened) > target:
             screened = screened[:target]
         for i, m in enumerate(screened):
@@ -204,8 +207,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                 empty_rounds += 1
                 continue
             if url in seen_urls or title in seen_titles:
-                log.warning(f"  第 {rounds} 轮命中已收集题目，跳过：",
-                            f"{title[:30]}...")
+                log.warning("  第 %d 轮命中已收集题目，跳过：%s...",
+                            rounds, title[:30])
                 empty_rounds += 1
                 continue
             seen_urls.add(url)
@@ -213,11 +216,11 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             materials.append({"title": title, "answer": answer,
                               "footer": footer or {}, "url": url})
             empty_rounds = 0
-            log.info(f"  已精选 {len(materials)}/{target} 份：",
-                     f"{title[:40]}...")
+            log.info("  已精选 %d/%d 份：%s...",
+                     len(materials), target, title[:40])
         if len(materials) < target:
-            log.warning(f"  单轮式精选结束：{len(materials)}/{target}",
-                        f"（连续 {empty_rounds} 轮无新素材）")
+            log.warning("  单轮式精选结束：%d/%d（连续 %d 轮无新素材）",
+                        len(materials), target, empty_rounds)
         return materials
 
     # ============================================================

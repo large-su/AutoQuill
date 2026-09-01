@@ -2542,3 +2542,57 @@ $("modalMask").addEventListener("click", (e) => {
     setState("error", "无法连接后端");
   }
 })();
+
+/* ---------- 意见反馈 ---------- */
+(function initFeedback() {
+  const mask = $("feedbackMask");
+  if (!mask) return;  // 旧版 HTML 无此元素时静默跳过
+
+  const cat = $("feedbackCat");
+  const text = $("feedbackText");
+  const ctx = $("feedbackContext");
+  const msg = $("feedbackMsg");
+  const submit = $("feedbackSubmit");
+
+  function open() {
+    msg.textContent = "";
+    mask.classList.add("show");
+    setTimeout(() => text.focus(), 30);
+  }
+  function close() { mask.classList.remove("show"); }
+
+  $("btnFeedback").addEventListener("click", open);
+  $("feedbackClose").addEventListener("click", close);
+  mask.addEventListener("click", (e) => { if (e.target === mask) close(); });
+
+  submit.addEventListener("click", async () => {
+    const t = text.value.trim();
+    if (!t) { msg.textContent = "请先填写问题描述"; text.focus(); return; }
+    submit.disabled = true;
+    msg.textContent = "提交中…";
+    try {
+      const r = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: t,
+          category: cat.value,
+          context: ctx.value.trim(),
+        }),
+      });
+      const d = await r.json();
+      if (d && d.ok) {
+        msg.textContent = "✓ 已记录，感谢反馈";
+        text.value = "";
+        ctx.value = "";
+        setTimeout(close, 900);
+      } else {
+        msg.textContent = "提交失败：" + ((d && d.error) || "未知错误");
+      }
+    } catch (e) {
+      msg.textContent = "提交失败：" + e.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+})();

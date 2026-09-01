@@ -337,7 +337,8 @@ def validate_story_format(text):
     """
     对故事文本做格式合规检测，返回 (score, is_valid, details)。
 
-    评分规则（基础分 10，及格线 >= 6）：
+    评分规则（基础分 10，及格线 >= 6；引言缺失一票否决，直接 is_valid=False）：
+    0. 引言：第一非空行必须是故事正文；是章节标题/标签/分割线则缺引言，减 4 分并强制不合格
     1. 章节标题 ## **N** 至少 6 个，少 1 个减 1 分，封顶减 4 分
     2. 长段落检测（阈值=PARA_LENGTH_THRESHOLD 字）：
        >5% 减 2 分，>10% 减 3 分，>20% 减 5 分
@@ -353,26 +354,36 @@ def validate_story_format(text):
 
     # --- 0. 引言存在性（先于章节检测：第一节之前必须有独立引言段）---
     # 判定极简（用户要求）：只看第一个非空行。它是正文故事文字 → 有引言；
-    # 它是章节标题（## **N**）、'引言/引子'标签、或分割线 → 缺引言。
+    # 它是章节标题（## **N** / 第一章…）、'引言/引子'标签、或分割线 → 缺引言。
     # 不限制长度/句数——模型产出 1-2 句干脆开场即算达标。
+    # ★ 引言缺失是一票否决项：上来就是章节标题的故事直接判不合格，
+    #   扣分之外还强制 is_valid=False，防止"其他项满分冲抵"放行。
     intro_ok = False
     intro_reason = None
+    _chapter_head_re = re.compile(
+        r'^(?:'
+        r'#{1,6}\s*\*{0,2}\d+\*{0,2}'                  # ## **1** / # 1
+        r'|#{1,6}\s*第[一二三四五六七八九十百千万\d]+[章节回]'  # # 第一章
+        r'|第[一二三四五六七八九十百千万\d]+[章节回]'            # 第一章（无#）
+        r')\s*$'
+    )
     for line in text.split(chr(10)):
         s = line.strip()
         if not s:
             continue  # 跳过前导空行
-        if re.match(r'^#{1,6}\s*\*{0,2}\d+\*{0,2}\s*$', s):
-            intro_reason = "第一段直接是章节标题"
+        if _chapter_head_re.match(s):
+            intro_reason = ("开头直接是章节标题、缺少引言段（请在正文最前面"
+                            "补 3-8 句、60-300 字的引言，先抛冲突/钩子再进入章节）")
         elif s.startswith(("引言", "引子")) and len(s) < 12:
-            intro_reason = "第一段是'引言/引子'标签而非正文"
+            intro_reason = "第一段是'引言/引子'标签而非正文（去掉标签，直接写引言正文）"
         elif re.match(r'^[\-\*_]{3,}\s*$', s):
-            intro_reason = "第一段是分割线"
+            intro_reason = "第一段是分割线、缺少引言正文"
         else:
             intro_ok = True  # 第一个非空行是正文 → 有引言
         break
     if not intro_ok:
-        score -= 2
-        details["引言"] = f"{intro_reason or '正文第一段缺失'}(-2)"
+        score -= 4
+        details["引言"] = f"{intro_reason or '正文第一段缺失'}(-4)"
 
     # --- 1. 章节标题检测 ---    # --- 1. 章节标题检测 ---
     chapter_count = len(re.findall(r'##\s*\*\*\d+\*\*', text))
@@ -439,7 +450,8 @@ def validate_story_format(text):
             details["环境空镜"] = f"{sd.get('reason', '')}(-1)"
 
     score = max(score, 0)
-    is_valid = score >= 6
+    # 引言缺失一票否决：其余项满分也不能放行（上来就是章节标题 = 不合格）
+    is_valid = score >= 6 and intro_ok
 
     log.info(f"  格式检测：{score}/10 {'✓合规' if is_valid else '✗不合规'}"
              f"{' (' + ', '.join(f'{k}:{v}' for k, v in details.items()) + ')' if details else ''}")

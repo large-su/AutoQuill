@@ -42,10 +42,23 @@ class ZhihuAiPickTest(unittest.TestCase):
                         side_effect=RuntimeError("boom")):
             self.assertIsNone(self.wf._ai_pick_best(_good()))
 
-    def test_single_candidate_skips(self):
+    @mock.patch("config.story.QUESTION_AI_SCREEN", True)
+    def test_single_candidate_is_screened(self):
+        # 单个候选也必须过 LLM：适合则返回该候选，而非跳过筛选
         with mock.patch("story_scoring.screen_question_pool") as scr:
-            self.assertIsNone(self.wf._ai_pick_best(_good()[:1]))
-        scr.assert_not_called()
+            scr.return_value = [{"index": 1, "_raw": _good()[0]}]
+            best = self.wf._ai_pick_best(_good()[:1])
+        scr.assert_called_once()
+        self.assertEqual(best["q"]["href"], "u1")
+
+    @mock.patch("config.story.QUESTION_AI_SCREEN", True)
+    def test_all_rejected_returns_sentinel(self):
+        # LLM 判定全部不适合写故事 → 返回哨兵（触发整批重选），而非 None
+        from workflows.zhihu import _AI_SCREEN_REJECT_ALL
+        with mock.patch("story_scoring.screen_question_pool") as scr:
+            scr.return_value = []
+            self.assertIs(self.wf._ai_pick_best(_good()),
+                          _AI_SCREEN_REJECT_ALL)
 
 
 if __name__ == "__main__":

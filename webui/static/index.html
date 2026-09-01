@@ -15,6 +15,7 @@
   <div class="top-right">
     <button class="btn ghost" id="btnSetup" title="设置（生成方式 / 模型 / 浏览器 / 参数 / 首启引导）">设置</button>
     <button class="btn ghost" id="btnUpdate" title="检查 GitHub 是否有新版本">检查更新</button>
+    <button class="btn ghost" id="btnFeedback" title="记录使用中遇到的问题（供后续迭代翻阅）">反馈</button>
     <div id="statusPill" class="status-pill"><span class="dot"></span><span id="statusText">空闲</span></div>
   </div>
 </header>
@@ -582,6 +583,40 @@
       <button class="close" id="draftViewClose">关闭</button>
     </div>
     <div class="modal-body draft-view-body" id="draftViewBody"></div>
+  </div>
+</div>
+
+<!-- 意见反馈弹层 -->
+<div class="modal-mask" id="feedbackMask">
+  <div class="modal" style="width:min(560px,100%)">
+    <div class="modal-head">
+      <span class="n">📝 意见反馈</span>
+      <button class="close" id="feedbackClose">关闭</button>
+    </div>
+    <div class="modal-body fb-body">
+      <div class="fb-row">
+        <label>分类</label>
+        <select id="feedbackCat">
+          <option>选题</option>
+          <option>生成</option>
+          <option>发布</option>
+          <option>界面</option>
+          <option selected>其他</option>
+        </select>
+      </div>
+      <div class="fb-row">
+        <label>问题描述</label>
+        <textarea id="feedbackText" rows="6" placeholder="记录你遇到的问题 / 想改进的点……"></textarea>
+      </div>
+      <div class="fb-row">
+        <label>上下文（可选）</label>
+        <input type="text" id="feedbackContext" placeholder="如：当前问题链接、所处环节、现象">
+      </div>
+      <div class="fb-foot">
+        <span class="fb-msg" id="feedbackMsg"></span>
+        <button class="btn primary" id="feedbackSubmit">提交</button>
+      </div>
+    </div>
   </div>
 </div>
 

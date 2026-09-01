@@ -29,6 +29,10 @@ from workflows.base import WorkflowBase
 
 log = logging.getLogger(__name__)
 
+# 模块级哨兵：_ai_pick_best 返回它表示「大模型判定候选全部不适合写故事」，
+# 与 None（大模型不可用，沿用点赞最高）区分开，调用方据此整批重新选题。
+_AI_SCREEN_REJECT_ALL = object()
+
 
 class ZhihuWorkflow(WorkflowBase):
     """知乎平台工作流：浏览器操作全部走 DOM 通道。"""
@@ -415,18 +419,25 @@ class ZhihuWorkflow(WorkflowBase):
         return True, ""
 
     def _apply_story_filter(self, questions):
-        """规则筛选：用关键词白名单过滤非故事类问题（替代 LLM 筛选）。"""
+        """规则筛选：关键词白名单 + 反例黑名单（替代 LLM 筛选）。
+
+        白名单命中且未命中黑名单才保留。黑名单用于拦下「求推荐/书单/
+        写作教学/变现」这类通过了白名单却写不出故事的问题（答案是书单
+        或方法论，不是故事体）。
+        """
         if not questions:
             return questions
         from config.story import (
-            ENABLE_STORY_FILTER, STORY_INCLUDE_KEYWORDS)
+            ENABLE_STORY_FILTER, STORY_INCLUDE_KEYWORDS,
+            STORY_EXCLUDE_KEYWORDS)
         if not ENABLE_STORY_FILTER:
             return questions
 
         filtered = []
         for q in questions:
             title = q.get("title", "")
-            if any(kw in title for kw in STORY_INCLUDE_KEYWORDS):
+            hit = any(kw in title for kw in STORY_INCLUDE_KEYWORDS)
+            if hit and not any(kw in title for kw in STORY_EXCLUDE_KEYWORDS):
                 q["is_story"] = True
                 filtered.append(q)
 
@@ -562,17 +573,18 @@ class ZhihuWorkflow(WorkflowBase):
         """大模型从合格候选中挑最适合写知乎故事/小说的 1 个。
 
         good: [{q:{title,href}, answer, footer, ...}]
-        返回候选 dict（_extract_parallel_top 用它取 best）；
-        开关关闭 / LLM 失败时返回 None（调用方沿用点赞最高）。
+        返回：
+          - 候选 dict：选中最适合写故事的 1 个（供调用方取 best）
+          - None：开关关闭 / LLM 不可用（调用方沿用点赞最高）
+          - _AI_SCREEN_REJECT_ALL：LLM 判定「全部都不适合写故事」
+            （调用方应整批重新选题，而非退而求其次选点赞最高）
         通道与主链路一致：API 模式走服务商 API，Web 模式走网页版大模型。
         """
-        if len(good) <= 1:
+        from config.story import QUESTION_AI_SCREEN
+        if not QUESTION_AI_SCREEN:
             return None
         try:
-            from config.story import QUESTION_AI_SCREEN
             from story_scoring import screen_question_pool
-            if not QUESTION_AI_SCREEN:
-                return None
             cands = [{"index": i + 1,
                       "title": r["q"]["title"],
                       "answer": r.get("answer") or "",
@@ -580,7 +592,9 @@ class ZhihuWorkflow(WorkflowBase):
                      for i, r in enumerate(good)]
             picked = screen_question_pool(cands, keep_best_only=True)
             if not picked:
-                return None
+                # 空列表 = LLM 成功判定全部 keep=false（不适合写故事）。
+                # 失败时 screen_question_pool 原样返回非空的 cands，不会到这里。
+                return _AI_SCREEN_REJECT_ALL
             best_raw = picked[0].get("_raw")
             if not best_raw:
                 return None
@@ -635,7 +649,13 @@ class ZhihuWorkflow(WorkflowBase):
         good.sort(key=lambda r: (r.get("footer") or {}).get("likes") or 0,
                   reverse=True)
         # 大模型筛选：排除不适合写故事的候选后，挑最适合的 1 个（API 模式）
-        best = self._ai_pick_best(good) or good[0]
+        best = self._ai_pick_best(good)
+        if best is _AI_SCREEN_REJECT_ALL:
+            # 大模型判定这批候选全部不适合写故事 → 整批重新选题，绝不
+            # 退而求其次用点赞最高的非故事题（正是「选题非故事」的痛点）
+            log.warning("  大模型判定本批候选均不适合写故事，整批重新选题")
+            return None, gate_reject_count
+        best = best or good[0]
         footer = best.get("footer") or {}
         final_url = (normalize_question_url(best["q"]["href"])
                      or best["q"]["href"])
