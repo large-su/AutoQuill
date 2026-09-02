@@ -24,6 +24,39 @@ from .browser_utils import (
 )
 
 
+
+
+def _kill_stale_profile_processes(user_data_dir):
+    """清理仍占用本 profile 的残留 Edge 进程（Windows，尽力而为）。
+
+    现象：任务被停止/进程被杀后，msedge.exe 可能还握着 user-data-dir
+    的 profile 锁；下次新实例启动立即以 exit 21 /
+    \"Target page, context or browser has been closed\" 退出，
+    并让 Web 通道预检误报「未登录 DeepSeek」。
+    只按命令行里的本 profile 路径匹配，绝不碰用户日常浏览器。
+    """
+    if not user_data_dir or os.name != "nt":
+        return
+    script = (
+        "Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.Name -eq 'msedge.exe' -and "
+        f"$_.CommandLine -like '*{user_data_dir}*' }} | "
+        "ForEach-Object { [int]$_.ProcessId }")
+    try:
+        from desktop_utils import run_process_silent
+        out = run_process_silent(
+            ["powershell", "-NoProfile", "-Command", script], text=True)
+        pids = [ln.strip() for ln in (out.stdout or "").splitlines()
+                if ln.strip().isdigit()]
+        if not pids:
+            return
+        log.warning("清理残留 Edge 进程（占用 profile 锁）: %s",
+                    ", ".join(pids))
+        run_process_silent(["taskkill", "/F", "/PID"] + pids)
+        time.sleep(0.8)   # 等锁释放
+    except Exception as exc:
+        log.debug("清理残留 Edge 进程失败(不影响启动重试): %s", exc)
+
 class SessionMixin:
 
     def start(self):
@@ -55,7 +88,9 @@ class SessionMixin:
             launch_kwargs["user_agent"] = _CLEAN_EDGE_UA
 
         # 后台任务（删除/抓取）刚结束时，同一个持久化 profile 的 Edge
-        # 可能还没释放锁，导致新实例启动后立即被关闭。等待并自动重试。
+        # 可能还没释放锁，导致新实例启动后立即被关闭。启动前先清残留
+        # 进程（任务被停止/进程被杀时最常残留），再进入自动重试。
+        _kill_stale_profile_processes(self.user_data_dir)
         last_exc = None
         for attempt in range(1, 4):
             try:
@@ -68,10 +103,18 @@ class SessionMixin:
                     "browser_adapter: 浏览器启动失败（第 %d 次）：%s",
                     attempt, exc)
                 if attempt < 3:
+                    # 每次重试前再清一次：上一次失败可能正是锁没释放
+                    _kill_stale_profile_processes(self.user_data_dir)
                     time.sleep(2.5)
         else:
             # 全部失败：丢弃半初始化驱动，避免残留进程占住 profile 锁
             self._pw = None
+            if last_exc and "browser has been closed" in str(last_exc):
+                log.error(
+                    "浏览器 3 次启动失败：很可能是有残留 msedge.exe 占用"
+                    " profile 锁（错误含 'Target page, context or browser "
+                    "has been closed'）。已自动清理仍失败，请关闭残留 Edge"
+                    " 进程或重启 AutoQuill 后重试")
             raise last_exc
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.load_storage_state()

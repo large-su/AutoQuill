@@ -177,6 +177,59 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         log.info("本轮完成！")
         return True
 
+    # ============================================================
+    # 纯净模式（工作台 · 完整链路）
+    # ============================================================
+
+    def run_clean(self, on_extracted=None, on_story=None):
+        """纯净模式：选题（有飙升选飙升、无则按关注量）→ 提取（仅赞门槛）
+        → 极简生成（风格学习 + 原创禁令）→ 洗稿/抄袭审核 → 发布草稿。
+
+        与 run_single 的差异（刻意去限制）：
+        - 选题：不做故事关键词/大模型体裁筛选，只按流量信号选
+        - 提取：不卡首答长度/体裁，只卡点赞门槛
+        - 生成：不套格式/字数/章节/去AI味守则，只剩风格学习与原创禁令
+        - 审核：对比参考高赞回答判定涉嫌抄袭/洗稿，通过才发布
+
+        on_extracted: 可选回调 fn(title, answer, footer, url)
+        on_story: 可选回调 fn(story_text, md_path, audit)
+        """
+        url = self.select_topic_clean()
+        title, answer, _footer, url = self.extract_content_clean()
+        if on_extracted:
+            try:
+                on_extracted(title, answer, _footer, url)
+            except Exception:
+                log.warning("on_extracted 回调失败", exc_info=True)
+
+        story, audit = self.generate_clean_with_retry(title, answer)
+
+        if not story:
+            log.error("纯净模式故事生成失败（模型无输出），本轮未完成")
+            return False
+
+        # 生成即存盘：即使审核未过，最终版本也要落盘供人工核对
+        md_path = self.save_story_file(story)
+        if on_story:
+            try:
+                on_story(story, md_path, audit)
+            except Exception:
+                log.warning("on_story 回调失败", exc_info=True)
+
+        if not audit or not audit.get("passed"):
+            log.warning("纯净模式原创审核未通过（%s），标记待人工核对，本轮未发布",
+                        (audit or {}).get("verdict", "未知"))
+            return False
+
+        self.publish(story, title, url, md_path)
+        try:
+            from core import feedback_loop
+            feedback_loop.record_story_published(
+                url, title, {"story_file": md_path})
+        except Exception:
+            log.debug("反馈闭环落账失败(不影响结果)", exc_info=True)
+        log.info("纯净模式本轮完成！")
+        return True
 
     def _collect_materials_single_style(self, target):
         """单轮式素材精选：循环执行单轮链路的选题+提取，收集 target 份。

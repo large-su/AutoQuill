@@ -52,6 +52,12 @@ __all__ = [
     "STORY_GENERATE_CONCURRENCY", "STORY_GENERATE_CONCURRENCY_AUTO",
     "STORY_GENERATE_CONCURRENCY_MIN", "STORY_GENERATE_CONCURRENCY_MAX",
     "STORY_GENERATE_MAX_ATTEMPTS",
+    # 纯净模式（工作台·完整链路）
+    "CLEAN_MAX_GEN_ATTEMPTS", "CLEAN_AUDIT_ENABLE",
+    "CLEAN_SELECT_SCREENS", "CLEAN_LIKES_RELAX_FACTORS", "CLEAN_MIN_LIKES_FLOOR",
+    # 纯净模式段落长度分布审核
+    "CLEAN_PARAGRAPH_AUDIT_ENABLE", "CLEAN_PARAGRAPH_BUCKET_DIFF_MAX",
+    "CLEAN_PARAGRAPH_AVG_MIN_RATIO",
 ]
 
 # ============================================================
@@ -299,3 +305,47 @@ STORY_GENERATE_CONCURRENCY_MAX = 10
 # 上一次的具体失败原因（字数/章节/长段/引号等）反馈注入重试 prompt，
 # 带反馈重试的收敛率远高于同 prompt 盲目重试。值 >=1；1 = 不重试。
 STORY_GENERATE_MAX_ATTEMPTS = 3
+
+# ============================================================
+# 纯净模式（工作台 · 完整链路）：只保留最少必要限制
+# ============================================================
+# 设计初衷：工作台主流程的选题规则筛选/大模型问题池筛选/长度门槛/
+# 格式硬校验等大量限制，压住了大模型自身能力。纯净模式刻意只留：
+#   选题：只按「有飙升选飙升、无飙升按关注量」选流量题（不做故事关键词过滤）
+#   提取：只卡点赞门槛，长度/体裁/领域不限
+#   生成：给定题目 + 学习高赞回答风格，只禁抄袭/洗稿（无格式硬约束）
+#   审核：对比参考高赞回答，判定是否涉嫌洗稿/抄袭；发布环节与单轮一致
+
+# 纯净模式提取素材的点赞门槛 = 设置里的「最低点赞」MATERIAL_MIN_LIKES
+# （Web 控制台 设置→选题参数 可调；纯净模式只限制这一项，不再另设私货）
+
+# 纯净模式「生成 + 原创审核」的最大尝试次数（含首次）。审核不过时
+# 会把审核意见注入重试 prompt 重新创作；值 >=1；1 = 不重试。
+CLEAN_MAX_GEN_ATTEMPTS = 3
+
+# 纯净模式是否启用「洗稿/抄袭对比审核」（False = 生成后直接发布，
+# 仅供需要完全零限制时关闭；默认开启以守住原创底线）
+CLEAN_AUDIT_ENABLE = True
+
+# 纯净模式选题滚动扩池屏数：候选不足或无飙升题时多滚几屏找更好的题。
+# 首次扫描后若候选池过小/无飙升，每增加 1 屏多一轮 PageDown 加载更多卡片。
+CLEAN_SELECT_SCREENS = 3
+
+# 纯净模式点赞门槛逐轮放宽系数（第 0 轮 1.0 → 第 1 轮 ×0.6 → 第 2 轮及以后 ×0.3）。
+# 推荐池常有「唯一飙升题已答过、其余题首答低赞」的场景，固定门槛会让整轮空转报错；
+# 放宽后仍无 ≥ floor 的素材时，回退取池内最高赞首答（带警告继续，不中断本轮）。
+CLEAN_LIKES_RELAX_FACTORS = (1.0, 0.6, 0.3)
+CLEAN_MIN_LIKES_FLOOR = 20
+
+# ============================================================
+# 纯净模式段落长度分布审核（生成后与参考回答做纯数学对比）
+# ============================================================
+# 参考回答的段落长短是「风格学习」里可量化的一部分：生成守则里已注入
+# 参考段落特征，审核阶段再实测生成文的段落分布，差异过大判不合格并重写。
+#   - bucket_diff：短(<50字)/中(50-150)/长(>150) 三段占比向量的 L1 距离/2，
+#     0=分布完全一致，1=完全相反；超过上限判不合格
+#   - avg_ratio：min(平均段长)/max(平均段长)；低于下限判不合格
+#     （如参考平均 30 字/段、生成平均 200 字/段 → avg_ratio≈0.15）
+CLEAN_PARAGRAPH_AUDIT_ENABLE = True
+CLEAN_PARAGRAPH_BUCKET_DIFF_MAX = 0.55
+CLEAN_PARAGRAPH_AVG_MIN_RATIO = 0.30

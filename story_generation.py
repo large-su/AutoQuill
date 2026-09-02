@@ -236,3 +236,66 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
     })
 
     return cleaned
+
+# ============================================================
+# 纯净模式生成（工作台 · 完整链路）
+# ============================================================
+
+def generate_story_clean(question_title, reference_answer=None, feedback=None):
+    """纯净模式：极简 prompt（风格学习 + 原创禁令），流式生成。
+
+    与 generate_story 的区别：刻意不套格式/字数/章节/去AI味等硬约束，
+    只做无侵入清洗（去 AI 废话前缀）；篇幅与结构交给模型按高赞回答
+    的风格自由发挥。原创性由生成后的审核环节（core/originality）把关。
+    """
+    from config import LLM_API_KEY, LLM_API_MAX_TOKENS, LLM_API_MODEL
+
+    if not LLM_API_KEY:
+        log.error("API Key 未配置！请在 config.py 中设置 LLM_API_KEY")
+        return None
+
+    from story_prompt import build_clean_prompt
+    user_message, mode_str = build_clean_prompt(
+        question_title, reference_answer, feedback=feedback)
+
+    log.info("纯净模式 API 流式调用开始")
+    log.info(f"  模型：{LLM_API_MODEL} | 模式：{mode_str}")
+    log.info(f"  问题：{question_title[:40]}...")
+    print()
+    print("  ── 生成内容开始 ──")
+
+    _heartbeat = {"n": 0, "total": 0}
+
+    def _on_chunk(c):
+        sys.stdout.write(c)
+        sys.stdout.flush()
+        _heartbeat["n"] += len(c)
+        _heartbeat["total"] += len(c)
+        if _heartbeat["n"] >= 400:
+            log.info("    生成中… 累计输出 %d 字符", _heartbeat["total"])
+            _heartbeat["n"] = 0
+
+    from llm_client import _call_llm_streaming
+    full_content, elapsed, error = _call_llm_streaming(
+        user_message,
+        max_tokens=LLM_API_MAX_TOKENS,
+        on_chunk=_on_chunk,
+        label=f"纯净模式 [{mode_str}]",
+    )
+
+    print()
+    print("  ── 生成内容结束 ──")
+    print()
+
+    if error and not full_content:
+        log.error(f"API 调用失败：{error}")
+        return None
+    if error and full_content:
+        log.warning(f"API 部分失败（{error}），使用已接收内容（{len(full_content)} 字符）")
+
+    # 只做无侵入清洗：去 AI 废话前缀；不做格式强制改写
+    cleaned = clean_story_output(full_content)
+    if len(cleaned) != len(full_content):
+        log.info(f"  清洗后：{len(cleaned)} 字符（原始 {len(full_content)} 字符）")
+    log.info(f"  ✓ 纯净模式生成完成！耗时 {elapsed:.1f}s | {len(cleaned)} 字符")
+    return cleaned

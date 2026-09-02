@@ -67,7 +67,7 @@ def record(url, title="", meta=None):
     rec = {"url": url, "title": title,
            "date": datetime.date.today().isoformat()}
     if meta:
-        for key in ("aid", "genre", "story_file", "session_id"):
+        for key in ("aid", "genre", "story_file", "session_id", "source"):
             val = meta.get(key)
             if val:
                 rec[key] = str(val)
@@ -83,3 +83,12 @@ def record(url, title="", meta=None):
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
         log.warning("已发布台账写入失败（不影响本次发布）", exc_info=True)
+
+
+def record_answered_elsewhere(url, title=""):
+    """记录「此问题本账号已发布过回答」（非 AutoQuill 发布，如手动/历史）。
+
+    选题落地后才发现的已答过问题，写入台账后跨轮/跨天选题即可跳过，
+    不再每次白白浪费一轮打开+提取。写失败仅告警不抛出。
+    """
+    record(url, title, meta={"source": "manual"})

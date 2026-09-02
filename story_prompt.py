@@ -11,6 +11,7 @@
 # ============================================================
 
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +136,28 @@ FORMAT_SELF_CHECK_RULE = """
    不要以"好的/收到/以下是"等 AI 废话开头。
 7. 篇幅：全篇达到 4000 字上下（不足 4000 字会被扣分）。
 """
+
+
+# ============================================================
+# 纯净模式 prompt（工作台 · 完整链路）：刻意去限制
+# ============================================================
+# 设计：不注入格式硬校验/章节/字数/命名/去AI味等守则——这些压住了
+# 大模型自身能力。只保留三件事：给定题目、学习高赞回答风格、
+# 严禁抄袭与洗稿（原创由 core/originality.py 的审核环节兜底）。
+CLEAN_SYSTEM_PROMPT = """你是一位知乎答主。请针对给定的「知乎问题」撰写一篇全新的回答。
+
+## 要求
+
+1. 学习参考高赞回答的风格：它的语气口吻、开头写法、叙事节奏、句子长短、
+   段落组织方式——把这些风格特点自然地用到你的新回答里（风格可以像，内容必须新）。
+2. 内容必须完全原创：情节、人物、经历、设定、台词都必须是你全新构思的。
+3. 严禁抄袭：不得复制参考回答的任何句子、段落，不得照搬其情节、人物、台词、设定。
+4. 严禁洗稿：不得把参考回答"换皮重写"（情节主线、人物关系、关键事件、结构顺序
+   照搬只是换了表述），洗稿同样违规。
+5. 段落长度向参考回答看齐：按下方「参考回答的段落特征」分段，段落不要太长，
+   分段习惯贴近参考回答（它是短句成段你就写短段，它长段铺陈才允许长段）。
+6. 直接输出回答正文，不要标题、不要前言、不要解释。"""
+
 
 
 
@@ -407,3 +430,71 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         user_message += _render_retry_feedback(feedback)
 
     return user_message, mode_str
+
+# ============================================================
+# 纯净模式 prompt 构建（工作台 · 完整链路）
+# ============================================================
+
+
+
+def _reference_paragraph_stats(reference_answer):
+    """从参考回答统计段落长度特征，返回一行中文描述（无参考时返回 None）。
+
+    统计逻辑与审核侧共用 core.story_text.paragraph_length_stats（单一事实源）。
+    """
+    from core.story_text import paragraph_length_stats
+    s = paragraph_length_stats(reference_answer)
+    if not s:
+        return None
+    total = s["count"]
+    short_n = int(round(s["short_ratio"] * total))
+    medium_n = int(round(s["mid_ratio"] * total))
+    long_n = int(round(s["long_ratio"] * total))
+    if long_n / total >= 0.5:
+        zone = f"以长段为主（>150 字，占 {long_n} 段）"
+    elif short_n / total >= 0.4:
+        zone = f"以短段为主（<50 字，占 {short_n} 段）"
+    elif medium_n / total >= 0.4:
+        zone = f"以中段为主（50-150 字，占 {medium_n} 段）"
+    else:
+        zone = "长短混排"
+    return (f"参考回答共 {total} 段：平均每段 {s['avg']:.0f} 字，"
+            f"中位 {s['median']} 字，最短 {s['min']}、最长 {s['max']}；{zone}。")
+
+def build_clean_prompt(question_title, reference_answer=None, feedback=None):
+    """纯净模式：极简 prompt（题目 + 高赞风格学习 + 原创禁令）。
+
+    刻意不注入格式/字数/章节/去AI味等守则——这些限制压住了模型的
+    自身能力；原创底线由 CLEAN_SYSTEM_PROMPT 的禁令 + 生成后的
+    core.originality.audit_originality 审核环节共同守住。
+
+    返回：(user_message, mode_str)
+    """
+    para_section = ""
+    para_stats = _reference_paragraph_stats(reference_answer)
+    if para_stats:
+        para_section = (
+            "\n## 参考回答的段落特征（请同样学习）\n\n"
+            + para_stats
+            + "\n\n新回答的段落长度要与该特征接近：段落不要太长，"
+              "按参考回答的分段习惯来（它是短句成段就写短段）。")
+
+    user_message = f"""{CLEAN_SYSTEM_PROMPT}
+
+## 知乎问题
+
+{question_title}
+
+## 参考高赞回答（仅供学习风格，严禁抄袭/洗稿）
+
+{reference_answer or '（无参考回答，按题目自由创作）'}
+{para_section}
+
+请撰写新的回答。"""
+
+    if feedback:
+        user_message += (
+            "\n\n## ⚠ 上一版原创审核未通过，请针对以下问题重新创作\n\n"
+            + str(feedback).strip()
+            + "\n\n请直接输出一篇完全原创的新回答正文，不要解释。")
+    return user_message, "纯净模式"

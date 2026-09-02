@@ -74,8 +74,10 @@ class _TimedHandler(logging.Handler):
 
 
 class _RunSpec(BaseModel):
-    mode: str  # select | extract | generate | single | batch | profile | general_profile | collect
+    mode: str  # select | extract | generate | single | clean | batch | profile | general_profile | collect
     gen_count: int = 5
+    # batch=发布数量；clean=纯净模式轮数（前端显式下发，UI 默认 1；
+    # 无显式字段时沿用本默认值，仅影响裸 API 调用方）
     publish_count: int = 3
     author: str = ""   # profile 模式：要提炼文风的作者名（collect 模式作者名自动识别）
     url: str = ""      # collect 模式：作者回答列表页 URL
@@ -156,17 +158,21 @@ class TaskRunner:
         # 此时任务浏览器尚未启动（首次 get_browser 在 _dispatch 里），
         # 独立检测实例可安全使用同一 profile；运行中浏览器已占用，
         # 该检测会锁冲突误报，故只在此处（运行前）检查一次。
-        if spec.mode in ("generate", "single", "batch",
+        if spec.mode in ("generate", "single", "clean", "batch",
                          "profile", "general_profile"):
             from config import LLM_MODE
             if LLM_MODE == "web":
                 from web_drivers.deepseek import web_llm_logged_in
                 if not web_llm_logged_in():
+                    # 预检失败 = 未登录 DeepSeek 或 无头 Edge 启动失败
+                    # （残留 msedge 占用 profile 锁时会误报未登录）
                     self._finish(
                         "error",
-                        "Web 通道需要先登录 DeepSeek 网页版："
-                        "请点右上角「设置」→ 引导窗口「打开 Edge 登录 "
-                        "DeepSeek」，完成后重新运行",
+                        "Web 通道预检未通过（无法确认已登录 DeepSeek 网页版）。"
+                        "若日志里出现「浏览器启动失败 … Target page, context or "
+                        "browser has been closed」则是残留 Edge 进程占用 profile，"
+                        "请重启 AutoQuill 或关闭残留 msedge 进程后重试；否则请点"
+                        "右上角「设置」→「打开 Edge 登录 DeepSeek」完成登录",
                         guide="deepseek_login")
                     return
             else:
@@ -260,6 +266,48 @@ class TaskRunner:
                 "chars": len(story),
             }
             return True
+
+        if mode == "clean":
+            # 纯净模式：流量选题 → 赞门槛提取 → 极简生成（风格学习+原创）
+            # → 洗稿/抄袭审核 → 发布草稿。publish_count=轮数（默认 1），
+            # >1 时把完整链路循环执行多轮，每轮独立选题/生成/审核/发布。
+            def _on_clean_extracted(title, answer, footer, url):
+                self.last_context = {
+                    "title": title, "answer": answer,
+                    "footer": footer or {}, "url": url or "",
+                }
+                from core.story_text import sample_reference_sections
+                self.last_context["sample_preview"] = \
+                    sample_reference_sections(answer) if answer else ""
+
+            def _on_clean_story(story, md_path, audit=None):
+                self.last_story = {
+                    "text": story,
+                    "md_path": str(md_path),
+                    "chars": len(story),
+                    "audit": audit or {},
+                }
+                for line in _audit_log_lines(audit):
+                    log.info("  " + line)
+
+            import time as _time
+            rounds = max(1, int(spec.publish_count or 1))
+            success = 0
+            for rnd in range(1, rounds + 1):
+                if rounds > 1:
+                    log.info("\n" + "=" * 50 + "\n纯净模式 · 第 " + str(rnd)
+                             + "/" + str(rounds) + " 轮\n" + "=" * 50)
+                try:
+                    if wf.run_clean(on_extracted=_on_clean_extracted,
+                                    on_story=_on_clean_story):
+                        success += 1
+                except Exception as exc:
+                    log.warning("纯净模式第 %d/%d 轮失败：%s",
+                                rnd, rounds, exc)
+                if rnd < rounds:
+                    _time.sleep(2)   # 轮间小憩，避免连续刷新推荐页
+            log.info(f"纯净模式 {rounds} 轮完成：成功 {success}/{rounds}")
+            return success > 0
 
         if mode == "single":
             # run_single 内部完成提取与发布，通过回调把结果回填到
@@ -389,7 +437,10 @@ class TaskRunner:
 
     def _watchdog(self, spec: _RunSpec):
         # 批量模式放宽总时长上限（避免正常推进被一刀切误杀）
-        overall = OVERALL_LIMIT_BATCH if spec.mode == "batch" else OVERALL_LIMIT
+        # 批量/多轮纯净模式：总时长上限放宽（每轮约 2-4 分钟，防误杀）
+        multi_clean = (spec.mode == "clean" and int(spec.publish_count or 1) > 1)
+        overall = OVERALL_LIMIT_BATCH if (spec.mode == "batch" or multi_clean) \
+            else OVERALL_LIMIT
         deadline = time.time() + overall
         # 文风提炼是一次性 LLM 剖析（非流式），调用期间无日志，
         # 单独放宽卡死阈值（剖析请求最长可达 10 分钟）
@@ -449,6 +500,21 @@ def _profile_summary(profile):
                  f"（{profile.get('profiled_at', '')}）")
     return "\n".join(lines)
 
+
+def _audit_log_lines(audit):
+    """把纯净模式原创审核结果渲染成日志行（供 clean 模式回填展示）。"""
+    audit = audit or {}
+    lines = [f"原创审核：{audit.get('verdict', '未知')}",
+             f"是否通过：{'是' if audit.get('passed') else '否'}"]
+    if audit.get("originality") is not None:
+        lines.append(f"LLM 原创度：{audit['originality']}/100")
+    para = audit.get("paragraph") or {}
+    if para.get("bucket_diff") is not None:
+        lines.append(
+            f"段落分布：长短差异度 {para['bucket_diff']:.0%} | "
+            f"平均段长比 {para['avg_ratio']:.0%}")
+    # 具体判定依据由 generate_clean_with_retry 统一打日志，这里不重复
+    return lines
 
 runner = TaskRunner()
 

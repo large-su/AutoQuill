@@ -743,6 +743,13 @@ class ZhihuWorkflow(WorkflowBase):
                 continue
             if not can_answer:
                 log.warning(f"  问题不可回答：{reason}")
+                if "已发布过回答" in reason:
+                    try:
+                        from core import topic_ledger
+                        topic_ledger.record_answered_elsewhere(url)
+                        log.info("  已把该题记入「已答过」台账，后续选题跳过")
+                    except Exception:
+                        log.debug("记录已答过题失败(不影响流程)", exc_info=True)
                 continue
 
             if ENABLE_DOM_ANSWER_EXTRACTION:
@@ -804,6 +811,238 @@ class ZhihuWorkflow(WorkflowBase):
             + (f"，其中 {gate_reject_count} 次被点赞门槛拒绝" if gate_reject_count
                else "")
             + "。可调低 config 中的 MIN_ANSWER_LENGTH / MATERIAL_MIN_LIKES 后重试")
+
+    # ============================================================
+    # 纯净模式：选题（只按流量/关注，无体裁规则）+ 提取（仅赞门槛）
+    # ============================================================
+
+    @staticmethod
+    def _attention_signal(q):
+        """纯净模式流量信号：创作中心关注量为主，首页流点赞兜底。"""
+        return q.get("followers") or q.get("likes") or 0
+
+    def select_topic_clean(self, avoid=None):
+        """纯净模式选题：有飙升选飙升，无飙升按问题关注量选。
+
+        刻意不做故事关键词白名单/大模型体裁筛选——这是对模型能力
+        限制最狠的一层，纯净模式只保留「流量/关注」这一个信号。
+        avoid：已尝试问题 href 集合（重试时避开）。
+        """
+        from config.story import QUESTION_SOURCE
+
+        browser = self._browser()
+        self._require_login(browser)
+
+        if QUESTION_SOURCE == "custom":
+            return self._select_custom(browser)
+
+        try:
+            from core import topic_ledger
+            seen_urls = topic_ledger.load_seen_urls()
+            if seen_urls:
+                avoid = set(avoid or set()) | seen_urls
+                log.info("  跨轮去重：%d 题历史发布记录加入排除集",
+                         len(seen_urls))
+        except Exception:
+            log.debug("topic_ledger 不可用，跳过跨轮去重", exc_info=True)
+
+        log.info("=" * 50)
+        log.info("步骤 1：纯净模式选题（有飙升选飙升 · 无则按关注量）")
+        log.info("=" * 50)
+
+        all_qs, hot_qs, normal_qs = self._scan_recommend(
+            browser, self._source_url())
+        if not all_qs:
+            raise RuntimeError(
+                "候选页 DOM 解析为空（登录态/网络/页面结构，可重试）")
+
+        avoid = avoid or set()
+
+        # 滚动扩池：首屏无飙升题或候选不足时，多滚几屏找流量更好的题
+        # （推荐池常见「唯一飙升题已答过、其余首答低赞」，扩池能显著提高命中率）
+        from config.story import CLEAN_SELECT_SCREENS
+        seen = {q["href"] for q in all_qs}
+        screen = 0
+        while screen + 1 < CLEAN_SELECT_SCREENS:
+            live = [q for q in all_qs if q["href"] not in avoid]
+            has_hot = any(q.get("is_hot") for q in live)
+            if has_hot and len(live) >= 10:
+                break
+            screen += 1
+            log.warning(f"  候选池不足或无飙升，滚动第 {screen}/"
+                        f"{CLEAN_SELECT_SCREENS - 1} 屏扩池…")
+            browser.scroll_feed()
+            fresh = [q for q in browser.get_recommend_questions(max_cards=60)
+                     if q.get("href") not in seen]
+            if not fresh:
+                break
+            seen.update(q["href"] for q in fresh)
+            all_qs = all_qs + fresh
+            hot_qs = hot_qs + [q for q in fresh if q.get("is_hot")]
+            normal_qs = normal_qs + [q for q in fresh if not q.get("is_hot")]
+
+        pool = [q for q in all_qs if q["href"] not in avoid]
+        if not pool:
+            raise RuntimeError(
+                f"候选 {len(all_qs)} 个均已尝试过/已发布（avoid="
+                f"{len(avoid)}），请更换选题来源或稍后重试")
+
+        log.info(f"  DOM 解析到 {len(all_qs)} 个问题"
+                 f"（飙升 {len(hot_qs)} / 普通 {len(normal_qs)}）")
+
+        hot_pool = [q for q in hot_qs if q["href"] not in avoid]
+        if hot_pool:
+            # 有飙升：飙升优先，其间按关注量排序（同一信号口径）
+            hot_pool.sort(key=self._attention_signal, reverse=True)
+            best = hot_pool[0]
+            log.info(f"  ✓ 有飙升题 {len(hot_pool)} 个，优先选择："
+                     f"{best['title'][:40]}..."
+                     f"（关注={self._attention_signal(best)}）")
+        else:
+            # 无飙升：整池按问题关注量降序选
+            pool.sort(key=self._attention_signal, reverse=True)
+            best = pool[0]
+            log.info(f"  ✓ 无飙升题，按问题关注量降序选择："
+                     f"{best['title'][:40]}..."
+                     f"（关注={self._attention_signal(best)}）")
+
+        log.info("")
+        log.info(f"✓ 纯净模式最终选择：{best['title'][:50]}...")
+        browser.open_question(best["href"])
+        return best["href"]
+
+    @staticmethod
+    def _clean_adaptive_min_likes(attempt):
+        """纯净模式点赞门槛逐轮放宽（防推荐池无高赞题整轮空转）。
+
+        基准 = 设置里的「最低点赞」MATERIAL_MIN_LIKES（Web 控制台可调），
+        地板 = min(CLEAN_MIN_LIKES_FLOOR, 基准)——用户把门槛调低时地板
+        跟随，绝不出现"设置 20 却按 200 卡"的错位。
+        """
+        from config.story import (CLEAN_LIKES_RELAX_FACTORS,
+                                  CLEAN_MIN_LIKES_FLOOR,
+                                  MATERIAL_MIN_LIKES)
+        base = int(MATERIAL_MIN_LIKES)
+        floor = min(int(CLEAN_MIN_LIKES_FLOOR), base)
+        idx = min(max(attempt, 0), len(CLEAN_LIKES_RELAX_FACTORS) - 1)
+        return max(floor, int(base * CLEAN_LIKES_RELAX_FACTORS[idx]))
+
+    def extract_content_clean(self):
+        """纯净模式提取：长度底线 + 点赞门槛（逐轮放宽），不限体裁领域。
+
+        保留 check_answerable（可回答性检测）——这是「这道题还能不能
+        写回答」的技术性前置，不是内容限制。两道内容门槛：
+          - 最短回答长度 ≥ MIN_ANSWER_LENGTH（设置里「最短回答」可调，
+            防止太离谱的题目/一句话回答被当参考素材）；
+          - 点赞门槛按轮次自适应放宽（CLEAN_LIKES_RELAX_FACTORS → CLEAN_
+            MIN_LIKES_FLOOR），重试耗尽仍无合格时回退取整轮所见最高赞
+            （且长度已达标的）首答，尽量不空转报错。
+        """
+        from config.story import (CLEAN_MIN_LIKES_FLOOR,
+                                  MATERIAL_MIN_LIKES, MAX_TOPIC_RETRY,
+                                  MIN_ANSWER_LENGTH)
+        from applications.zhihu_story.browser_adapter import (
+            normalize_question_url)
+
+        base_likes = int(MATERIAL_MIN_LIKES)
+        floor_likes = min(int(CLEAN_MIN_LIKES_FLOOR), base_likes)
+        min_len = int(MIN_ANSWER_LENGTH)
+        log.info("=" * 50)
+        log.info(f"步骤 2：纯净模式提取（长度 ≥ {min_len}；初始点赞 ≥ "
+                 f"{base_likes}，逐轮放宽至 ≥ {floor_likes}）")
+        log.info("=" * 50)
+
+        browser = self._browser()
+        attempted = set()
+        length_reject_count = 0
+        likes_reject_count = 0
+        best_candidate = None   # 兜底：整轮所见「长度达标」的最高赞首答
+
+        for attempt in range(MAX_TOPIC_RETRY + 1):
+            likes_limit = self._clean_adaptive_min_likes(attempt)
+            if attempt > 0:
+                log.warning("  纯净模式：长度/点赞门槛未过或不可回答，"
+                            f"重新纯净选题（第 {attempt}/{MAX_TOPIC_RETRY}"
+                            f" 次，当前点赞门槛 {likes_limit}）")
+            url = self.select_topic_clean(avoid=attempted)
+            attempted.add(url)
+            browser.open_question(url)
+
+            try:
+                can_answer, reason = browser.check_answerable()
+            except Exception as exc:
+                log.warning(f"  可回答性检测异常：{exc}")
+                continue
+            if not can_answer:
+                log.warning(f"  问题不可回答：{reason}")
+                if "已发布过回答" in reason:
+                    try:
+                        from core import topic_ledger
+                        topic_ledger.record_answered_elsewhere(url)
+                        log.info("  已把该题记入「已答过」台账，后续选题跳过")
+                    except Exception:
+                        log.debug("记录已答过题失败(不影响流程)", exc_info=True)
+                continue
+
+            try:
+                data = browser.get_primary_answer(min_length=1)
+            except Exception as exc:
+                log.warning(f"  DOM 提取异常：{exc}，重新选题")
+                continue
+            answer = (data or {}).get("answer") or ""
+            if not answer.strip():
+                log.warning("  首答提取为空，重新选题")
+                continue
+
+            title = (data or {}).get("title") or ""
+            footer = (data or {}).get("footer") or {}
+            final_url = normalize_question_url(browser.page.url) or url
+            likes = footer.get("likes")
+
+            # ① 最短回答长度底线（先判长度，再判点赞）
+            if len(answer) < min_len:
+                length_reject_count += 1
+                log.warning(f"  首答过短（{len(answer)} 字 < {min_len}），"
+                            f"重新选题")
+                continue
+
+            # ② 记录「长度达标」的最高赞（兜底用；likes 未识别不参与排序）
+            if likes is not None:
+                if (best_candidate is None
+                        or likes > best_candidate["_likes"]):
+                    best_candidate = {
+                        "title": title, "answer": answer,
+                        "footer": footer, "url": final_url, "_likes": likes,
+                    }
+
+            # ③ 点赞门槛（逐轮放宽）
+            pass_likes, like_reason = self._material_likes_pass(
+                likes, likes_limit)
+            if not pass_likes:
+                likes_reject_count += 1
+                log.warning(f"  点赞门槛未过：{like_reason}"
+                            f"（当前门槛 {likes_limit}），重新选题")
+                continue
+
+            log.info(f"纯净模式提取成功！标题：{title[:50]}... | "
+                     f"回答：{len(answer)}字符 | 赞={likes}")
+            return title, answer, footer, final_url
+
+        if best_candidate:
+            log.warning(
+                "  纯净模式：重试耗尽仍无 ≥%d 赞的首答，回退取池内"
+                "「长度达标且最高赞」素材「%s」（赞=%d；长度被拒 %d 次、"
+                "点赞被拒 %d 次）",
+                CLEAN_MIN_LIKES_FLOOR, best_candidate["title"][:40],
+                best_candidate["_likes"], length_reject_count,
+                likes_reject_count)
+            return (best_candidate["title"], best_candidate["answer"],
+                    best_candidate["footer"], best_candidate["url"])
+
+        raise RuntimeError(
+            f"纯净模式提取失败：重试 {MAX_TOPIC_RETRY + 1} 次未取得合格首答"
+            f"（长度被拒 {length_reject_count} 次、点赞被拒 "
+            f"{likes_reject_count} 次，最短回答要求 {min_len} 字）")
 
     # ============================================================
     # 步骤4：发布到知乎（DOM）

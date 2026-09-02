@@ -460,6 +460,44 @@ def validate_story_format(text):
 
 
 # ============================================================
+# 段落长度统计（纯净模式 prompt 注入 + 审核对比共用）
+# ============================================================
+
+def paragraph_length_stats(text):
+    """统计正文段落长度（跳过章节标题/分隔线），返回 dict 或 None。
+
+    段落按空行分隔；不含正文段落（纯标题/分隔线/空文本）时返回 None，
+    调用方据此跳过段落维度的判定。
+    """
+    if not text or not str(text).strip():
+        return None
+    paras = []
+    for block in re.split(r"\n\s*\n", str(text)):
+        p = block.strip()
+        if not p or len(p) < 2:
+            continue
+        if re.match(r"^#{1,6}\s", p):
+            continue
+        if re.match(r"^[-*_~=]{3,}$", p):
+            continue
+        paras.append(len(p))
+    if not paras:
+        return None
+    paras.sort()
+    total = len(paras)
+    return {
+        "count": total,
+        "avg": sum(paras) / total,
+        "median": paras[total // 2],
+        "min": paras[0],
+        "max": paras[-1],
+        "short_ratio": sum(1 for p in paras if p < 50) / total,
+        "mid_ratio": sum(1 for p in paras if 50 <= p <= 150) / total,
+        "long_ratio": sum(1 for p in paras if p > 150) / total,
+    }
+
+
+# ============================================================
 # 参考文章片段采样（采样模式素材）
 # ============================================================
 

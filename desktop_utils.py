@@ -21,6 +21,25 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 
+def run_process_silent(args, timeout=15, **kwargs):
+    """无控制台弹窗运行外部命令（PowerShell/taskkill 等）。
+
+    不带 CREATE_NO_WINDOW 时，subprocess 会为每个控制台程序弹出
+    一闪而过的黑色终端框——运行链路里多次调用 = 多次闪框
+    （打开软件/跑链路时最常见的「黑框一闪」来源）。
+    返回 subprocess.CompletedProcess（同 subprocess.run）。
+    """
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+    return subprocess.run(args, capture_output=True, timeout=timeout,
+                          creationflags=flags, startupinfo=startupinfo,
+                          **kwargs)
+
+
 def take_screenshot(name="debug"):
     """保存全屏截图到 screenshots/ 目录（PowerShell，无第三方依赖）。"""
     os.makedirs("screenshots", exist_ok=True)
@@ -34,8 +53,7 @@ def take_screenshot(name="debug"):
         f"$img.Save('{os.path.abspath(fn)}');"
     )
     try:
-        subprocess.run(['powershell', '-EP', 'Bypass', '-C', ps],
-                       capture_output=True, timeout=15)
+        run_process_silent(['powershell', '-EP', 'Bypass', '-C', ps])
     except Exception as e:
         log.warning("截图失败：%s", e)
 
@@ -71,10 +89,8 @@ def focus_edge():
         if($p -and $p.MainWindowHandle -ne 0){{ $h=$p.MainWindowHandle; if([W]::IsIconic($h)){{[W]::ShowWindow($h,9)}}; [W]::SetForegroundWindow($h); Write-Output 'OK' }}
         '''
         try:
-            result = subprocess.run(
-                ['powershell', '-EP', 'Bypass', '-C', ps],
-                capture_output=True, text=True, timeout=5
-            )
+            result = run_process_silent(
+                ['powershell', '-EP', 'Bypass', '-C', ps], text=True)
             if 'OK' in (result.stdout or ''):
                 time.sleep(0.3)
                 return True
@@ -96,10 +112,8 @@ def focus_edge():
     if($p){ $h=$p.MainWindowHandle; if([W]::IsIconic($h)){[W]::ShowWindow($h,9)}; [W]::SetForegroundWindow($h); Write-Output 'OK' }
     '''
     try:
-        result = subprocess.run(
-            ['powershell', '-EP', 'Bypass', '-C', ps],
-            capture_output=True, text=True, timeout=5
-        )
+        result = run_process_silent(
+            ['powershell', '-EP', 'Bypass', '-C', ps], text=True)
         if 'OK' in (result.stdout or ''):
             time.sleep(0.3)
             return True

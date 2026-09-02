@@ -22,7 +22,7 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 ## 2. 版本与发布
 
-- 版本唯一入口：core/version.py（当前 v4.7.3，tag v4.7.3 已发布）
+- 版本唯一入口：core/version.py（当前 v4.8.0，tag v4.8.0 随本版发布）
 - 打包：python tools/build_release.py —— 门禁（git 干净/main）→ 全量测试 → PyInstaller → Inno 安装包 → SHA256，版本号自动注入 installer/AutoQuill.iss（勿手工改 iss）
 - 发布：git tag vX.Y.Z && git push origin main --tags && gh release create（gh 已登录 large-su）；产物在 release/，dist/release/build 不入库
 
@@ -33,8 +33,9 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 - webui/dashboard_api.py / drafts_api.py：看板 / 草稿箱路由（register 模式挂到 server app）
 - webui/_snapshot.py：统一快照层（published/drafts 共用发现/读取/坏数据回退/质量判定）
 - webui/published.py / drafts.py：各自业务（DOM 抽取、筛选、评分、删除；字段/质量回调不同）
-- workflows/base.py：单轮/批量编排（run_single / run_batch；批量阶段：收集 → 大模型问题筛选 → 生成 → 评分 → 发布）
-- workflows/zhihu.py：知乎 DOM 实现（选题规则+评分、并行提取候选取最优、发布写草稿）
+- workflows/base.py：单轮/批量/纯净模式编排（run_single / run_batch / run_clean；批量阶段：收集 → 大模型问题筛选 → 生成 → 评分 → 发布）
+- workflows/zhihu.py：知乎 DOM 实现（选题规则+评分、并行提取候选取最优、纯净模式 select_topic_clean / extract_content_clean、发布写草稿）
+- core/originality.py：纯净模式「洗稿/抄袭 + 段落长度分布」对比审核（本地相似度 + LLM 判定，Paragraph 属纯数学）
 - applications/zhihu_story/：browser_adapter（登录/爬取/删除）、author_profiler（文风蒸馏）、prompts.py（系统/评分/筛选提示词）
 - web_drivers/：Web 通道（browser_pool 共享浏览器、deepseek.py DOM 驱动、parallel.py 并行调度、base.py 驱动基类）
 - llm_client.py / story_generation.py / story_prompt.py / story_scoring.py：API 生成、提示词、评分、问题池筛选
@@ -52,6 +53,7 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 6. P0-P3 工程化：统一快照层、server 路由拆分、前端抽离 style.css+app.js、统一测试入口 tests/run_all.py、GitHub Actions CI、日志轮转（30 天+留 20）、端口单一来源 core/ports.py、19 个探查脚本归档 tools/archive/probes、类型注解
 7. 可靠性修复：批量 watchdog 按模式放宽（batch 60min，非用户操作会标注）、评分 Key 401 自动回退主 Key、快照质量防护/坏数据回退、删除单条容错、四任务浏览器互斥、双击启动黑屏修复（launcher sys.path+兜底）、草稿删除完成 toast 保留
 8. 技能安装：.claude/skills/code-review-skill（审查指南）+ superpowers（writing-plans/systematic-debugging/TDD 等 14 个），已随仓库提交
+9. 纯净模式（v4.8.0，工作台新增运行项）：去限制创作——流量选题（有飙升选飙升/无则按关注量）→ 提取只卡最短回答+点赞（门槛放宽+最高赞兜底）→ 极简生成（学风格+段落长短，禁抄袭洗稿）→ 审核（原创+段落分布）→ 发布草稿；支持多轮（一次设 N）。已答过题自动记台账跳过；后端纯净参数集中在 config/story.py 的 CLEAN_* 系列
 
 ## 5. 约定与常见坑（改代码前必读）
 

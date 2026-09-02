@@ -239,6 +239,11 @@ function renderStory(story, title) {
     const c = f >= 40 ? "danger" : f >= 20 ? "warn" : "ok";
     meta.push({ t: `AI味 ${f}/100`, c: c });
   }
+  if (story.audit) {
+    const a = story.audit;
+    const ok = !!a.passed;
+    meta.push({ t: `原创审核：${ok ? "通过" : "未过"} ${a.verdict || ""}`, c: ok ? "ok" : "danger" });
+  }
   $("storyMeta").innerHTML = meta.map((m) => `<span class="chip ${m.c}">${esc(m.t)}</span>`).join("");
   $("storyBody").textContent = story.text;
 }
@@ -304,7 +309,7 @@ const TUNABLE_KEYS = new Set(["MAX_TOPIC_RETRY", "MIN_ANSWER_LENGTH", "MATERIAL_
 const TUNABLE_HINTS = {
   MAX_TOPIC_RETRY: "首答不合格时最多重试次数（默认 5）",
   MIN_ANSWER_LENGTH: "首答最短字数，低于则重试（默认 500）",
-  MATERIAL_MIN_LIKES: "素材最低点赞门槛（默认 200）",
+  MATERIAL_MIN_LIKES: "素材最低点赞门槛（默认 200；纯净模式同样生效）",
 };
 
 /* 设置操作状态条（顶栏下方）：设置项修改即自动提交，成败在此反馈 */
@@ -2352,6 +2357,9 @@ async function run() {
     body.gen_count = parseInt($("genCount").value, 10) || 5;
     body.publish_count = parseInt($("pubCount").value, 10) || 3;
   }
+  if (currentMode === "clean") {
+    body.publish_count = parseInt($("cleanRounds").value, 10) || 1;
+  }
   $("logBox").innerHTML = "";
   genChars = 0;
   formatScore = null;
@@ -2387,6 +2395,7 @@ document.querySelectorAll("#modeGroup input[name=mode]").forEach((el) => {
     document.querySelectorAll(".mode-opt").forEach((o) =>
       o.classList.toggle("sel", o.querySelector("input").checked));
     $("batchParams").style.display = (currentMode === "batch") ? "" : "none";
+    $("cleanParams").style.display = (currentMode === "clean") ? "" : "none";
   });
 });
 

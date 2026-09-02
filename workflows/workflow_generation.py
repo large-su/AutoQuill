@@ -195,5 +195,113 @@ class GenerationMixin:
         return best, False
 
     # ============================================================
+    # 纯净模式生成（工作台 · 完整链路）
+    # ============================================================
+
+    def generate_clean_story(self, question_title, reference_answer,
+                             feedback=None):
+        """纯净模式：极简 prompt（风格学习 + 原创禁令），API/Web 分发。
+
+        与 generate_story 的区别：不做格式/字数硬约束，也不注入
+        去AI味/命名/章节守则。原创底线由 prompt 禁令 + 生成后的
+        generate_clean_with_retry 审核环节共同把关。
+        """
+        from config import LLM_MODE
+        from story_prompt import build_clean_prompt
+
+        log.info("=" * 50)
+        log.info(f"步骤 3：纯净模式生成（{LLM_MODE}）")
+        log.info("=" * 50)
+
+        if LLM_MODE == "api":
+            from story_generation import generate_story_clean
+            return generate_story_clean(question_title, reference_answer,
+                                        feedback=feedback)
+
+        # Web 模式：网页版大模型（无 API Key 依赖）
+        try:
+            from web_drivers import get_driver
+            full_prompt, mode_str = build_clean_prompt(
+                question_title, reference_answer, feedback=feedback)
+            log.info(f"  Prompt 模式：{mode_str}")
+            driver = get_driver()
+            story = driver.generate(full_prompt)
+            if story and story.strip():
+                from core.story_text import clean_story_output
+                story = clean_story_output(story)
+            return story or None
+        except Exception as exc:
+            log.warning("纯净模式 Web 生成失败：%s", exc)
+            return None
+
+    def generate_clean_with_retry(self, title, answer, max_attempts=None):
+        """纯净模式生成 + 洗稿/抄袭审核重试。
+
+        每轮生成后调用 core.originality.audit_originality，把新回答与
+        参考高赞回答对比；不通过时把审核意见注入重试 prompt 重新创作，
+        最多 CLEAN_MAX_GEN_ATTEMPTS 次。
+
+        返回 (story, audit)：audit 为最后一次审核的 dict（含 passed）；
+        story 为最后一次生成文本（可能 None）。
+        """
+        from config.story import CLEAN_AUDIT_ENABLE, CLEAN_MAX_GEN_ATTEMPTS
+        max_attempts = max_attempts or CLEAN_MAX_GEN_ATTEMPTS
+        last_audit = None
+        best = None
+
+        wash_streak = 0
+        for attempt in range(max_attempts):
+            feedback = None
+            if attempt > 0 and last_audit and not last_audit.get("passed"):
+                from core.originality import audit_feedback_text
+                feedback = audit_feedback_text(last_audit)
+                if "洗稿" in str(last_audit.get("verdict") or ""):
+                    wash_streak += 1
+                    if wash_streak >= 2:
+                        feedback = (
+                            "【注意：连续两版都与参考回答结构重合】这次必须把设定放到"
+                            "与参考完全不同的背景（如换成现代/校园/职场/科幻/都市等），"
+                            "人物关系、关键事件、推进顺序全部从头构思，不要借鉴参考的"
+                            "任何情节骨架，只保留风格上的借鉴。\n\n" + feedback)
+            story = self.generate_clean_story(title, answer, feedback=feedback)
+            if not story or not str(story).strip():
+                last_reason = "生成失败（模型无输出）"
+                log.warning("纯净模式生成失败（无输出），第 %d/%d 次重试…",
+                            attempt + 1, max_attempts)
+                if last_audit is None:
+                    last_audit = {"passed": False, "verdict": "无输出",
+                                  "reasons": [last_reason], "signals": {},
+                                  "llm_detail": None, "originality": None}
+                continue
+            best = story
+
+            if not CLEAN_AUDIT_ENABLE:
+                last_audit = {"passed": True, "verdict": "原创（审核已关闭）",
+                              "reasons": [], "signals": {},
+                              "llm_detail": None, "originality": None}
+                log.info("纯净模式审核已关闭（CLEAN_AUDIT_ENABLE=False），直接通过")
+                return story, last_audit
+
+            from core.originality import audit_originality
+            last_audit = audit_originality(title, story, answer)
+            reasons = last_audit.get("reasons") or []
+            if last_audit.get("passed"):
+                log.info(f"  原创审核通过：{last_audit.get('verdict')}")
+                if reasons:
+                    for r in reasons:
+                        log.info(f"    · {r}")
+                return story, last_audit
+            log.warning("  原创审核未通过：%s（第 %d/%d 次）",
+                        last_audit.get("verdict"), attempt + 1, max_attempts)
+            for r in reasons[:5]:
+                log.warning(f"    - {r}")
+
+        if best is None:
+            log.error("纯净模式：%d 次尝试均无输出，本轮未完成", max_attempts)
+        else:
+            log.warning("纯净模式：%d 次尝试后仍未通过原创审核，最高分版已存盘供人工核对",
+                        max_attempts)
+        return best, last_audit
+    # ============================================================
     # 保存故事文件（通用）
     # ============================================================
