@@ -5,4 +5,4 @@
 # README、installer/AutoQuill.iss、发布 tag（V<VERSION>）
 # ============================================================
 
-VERSION = "4.8.0"
+VERSION = "4.8.1"
