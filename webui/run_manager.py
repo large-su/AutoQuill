@@ -76,9 +76,9 @@ class _TimedHandler(logging.Handler):
 class _RunSpec(BaseModel):
     mode: str  # select | extract | generate | single | clean | batch | profile | general_profile | collect
     gen_count: int = 5
-    # batch=发布数量；clean=纯净模式轮数（前端显式下发，UI 默认 1；
-    # 无显式字段时沿用本默认值，仅影响裸 API 调用方）
+    # batch=发布数量；clean/single=完整链路轮数（前端显式下发，UI 默认 1）
     publish_count: int = 3
+    rounds: int = 1
     author: str = ""   # profile 模式：要提炼文风的作者名（collect 模式作者名自动识别）
     url: str = ""      # collect 模式：作者回答列表页 URL
     count: int = 5     # collect 模式：本次最多新增篇数
@@ -269,7 +269,7 @@ class TaskRunner:
 
         if mode == "clean":
             # 纯净模式：流量选题 → 赞门槛提取 → 极简生成（风格学习+原创）
-            # → 洗稿/抄袭审核 → 发布草稿。publish_count=轮数（默认 1），
+            # → 洗稿/抄袭审核 → 发布草稿。rounds=轮数（默认 1），
             # >1 时把完整链路循环执行多轮，每轮独立选题/生成/审核/发布。
             def _on_clean_extracted(title, answer, footer, url):
                 self.last_context = {
@@ -291,7 +291,7 @@ class TaskRunner:
                     log.info("  " + line)
 
             import time as _time
-            rounds = max(1, int(spec.publish_count or 1))
+            rounds = max(1, int(spec.rounds or 1))
             success = 0
             for rnd in range(1, rounds + 1):
                 if rounds > 1:
@@ -310,9 +310,9 @@ class TaskRunner:
             return success > 0
 
         if mode == "single":
-            # run_single 内部完成提取与发布，通过回调把结果回填到
-            # 上下文，让前端「提取结果」「生成故事」两张卡片在
-            # 单轮全流程后都能展示
+            # 经典模式完整链路（原「单轮」）：run_single 内部完成提取与发布，
+            # 通过回调把结果回填到上下文。rounds=轮数（默认 1），>1 时
+            # 循环执行完整链路多轮，每轮独立选题/生成/发布草稿。
             def _on_extracted(title, answer, footer, url):
                 self.last_context = {
                     "title": title, "answer": answer,
@@ -337,8 +337,24 @@ class TaskRunner:
                     "ai_flavor": flavor,
                 }
 
-            return wf.run_single(on_extracted=_on_extracted,
-                                 on_story=_on_story)
+            import time as _time
+            rounds = max(1, int(spec.rounds or 1))
+            success = 0
+            for rnd in range(1, rounds + 1):
+                if rounds > 1:
+                    log.info("\n" + "=" * 50 + "\n经典模式 · 第 " + str(rnd)
+                             + "/" + str(rounds) + " 轮\n" + "=" * 50)
+                try:
+                    if wf.run_single(on_extracted=_on_extracted,
+                                     on_story=_on_story):
+                        success += 1
+                except Exception as exc:
+                    log.warning("经典模式第 %d/%d 轮失败：%s",
+                                rnd, rounds, exc)
+                if rnd < rounds:
+                    _time.sleep(2)   # 轮间小憩
+            log.info(f"经典模式 {rounds} 轮完成：成功 {success}/{rounds}")
+            return success > 0
 
         if mode == "batch":
             published = wf.run_batch(
@@ -438,8 +454,9 @@ class TaskRunner:
     def _watchdog(self, spec: _RunSpec):
         # 批量模式放宽总时长上限（避免正常推进被一刀切误杀）
         # 批量/多轮纯净模式：总时长上限放宽（每轮约 2-4 分钟，防误杀）
-        multi_clean = (spec.mode == "clean" and int(spec.publish_count or 1) > 1)
-        overall = OVERALL_LIMIT_BATCH if (spec.mode == "batch" or multi_clean) \
+        multi_round = (spec.mode in ("clean", "single")
+                        and int(spec.rounds or 1) > 1)
+        overall = OVERALL_LIMIT_BATCH if (spec.mode == "batch" or multi_round) \
             else OVERALL_LIMIT
         deadline = time.time() + overall
         # 文风提炼是一次性 LLM 剖析（非流式），调用期间无日志，

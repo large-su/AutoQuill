@@ -2358,7 +2358,10 @@ async function run() {
     body.publish_count = parseInt($("pubCount").value, 10) || 3;
   }
   if (currentMode === "clean") {
-    body.publish_count = parseInt($("cleanRounds").value, 10) || 1;
+    body.rounds = parseInt($("cleanRounds").value, 10) || 1;
+  }
+  if (currentMode === "single") {
+    body.rounds = parseInt($("classicRounds").value, 10) || 1;
   }
   $("logBox").innerHTML = "";
   genChars = 0;
@@ -2396,6 +2399,7 @@ document.querySelectorAll("#modeGroup input[name=mode]").forEach((el) => {
       o.classList.toggle("sel", o.querySelector("input").checked));
     $("batchParams").style.display = (currentMode === "batch") ? "" : "none";
     $("cleanParams").style.display = (currentMode === "clean") ? "" : "none";
+    $("classicParams").style.display = (currentMode === "single") ? "" : "none";
   });
 });
 

@@ -105,7 +105,7 @@
           <label class="mode-opt"><input type="radio" name="mode" value="generate">
             <div><div class="t">环节测试 · 生成</div><div class="d">提取 + 生成故事并存盘</div></div></label>
           <label class="mode-opt"><input type="radio" name="mode" value="single">
-            <div><div class="t">单轮（完整链路）</div><div class="d">选题 → 生成 → 发布草稿</div></div></label>
+            <div><div class="t">经典模式 · 完整链路</div><div class="d">选题 → 生成 → 发布草稿（可设轮数）</div></div></label>
           <label class="mode-opt"><input type="radio" name="mode" value="clean">
             <div><div class="t">纯净模式 · 完整链路</div><div class="d">流量选题 → 赞门槛提取 → 高赞风格原创 → 洗稿审核 → 发布草稿</div></div></label>
           <label class="mode-opt"><input type="radio" name="mode" value="batch">
@@ -117,6 +117,9 @@
         </div>
         <div class="params-batch" id="cleanParams" style="display:none">
           <label><span>发布几篇（轮数）</span><input type="number" id="cleanRounds" min="1" max="20" value="1"></label>
+        </div>
+        <div class="params-batch" id="classicParams" style="display:none">
+          <label><span>发布几篇（轮数）</span><input type="number" id="classicRounds" min="1" max="20" value="1"></label>
         </div>
         <div class="run-row">
           <button class="btn primary btn-run" id="btnRun">运行</button>

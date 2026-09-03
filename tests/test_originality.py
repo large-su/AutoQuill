@@ -495,22 +495,38 @@ class TestCleanMultiRound(unittest.TestCase):
     """纯净模式多轮（默认 1，>1 时循环完整链路多次）。"""
 
     def test_clean_rounds_default_one_in_ui(self):
-        # UI 层纯净模式默认 1 轮；后端逻辑按 publish_count 循环
+        # UI 层纯净模式默认 1 轮；后端逻辑按 rounds 循环
         src = open("webui/static/index.html", encoding="utf-8").read()
         self.assertIn('id="cleanRounds" min="1" max="20" value="1"', src)
         js = open("webui/static/app.js", encoding="utf-8").read()
         self.assertIn(
-            'body.publish_count = parseInt($("cleanRounds").value, 10) || 1;', js)
+            'body.rounds = parseInt($("cleanRounds").value, 10) || 1;', js)
+
+    def test_classic_mode_renamed_and_rounds_in_ui(self):
+        # 经典模式（原单轮）改名 + 轮数输入 + 参数透传
+        src = open("webui/static/index.html", encoding="utf-8").read()
+        self.assertIn("经典模式 · 完整链路", src)
+        self.assertIn('id="classicRounds" min="1" max="20" value="1"', src)
+        self.assertNotIn("单轮（完整链路）", src)
+        js = open("webui/static/app.js", encoding="utf-8").read()
+        self.assertIn(
+            'body.rounds = parseInt($("classicRounds").value, 10) || 1;', js)
 
     def test_dispatch_loops_over_rounds(self):
-        # 后端 clean 分支必须按 publish_count 循环执行完整链路
+        # 后端 clean/single 分支都按 spec.rounds 循环执行完整链路
         import inspect
         from webui.run_manager import TaskRunner
         src = inspect.getsource(TaskRunner._dispatch)
-        clean_src = src[src.index('if mode == "clean"'):]
-        self.assertIn('rounds = max(1, int(spec.publish_count or 1))', clean_src)
+        clean_src = src[src.index('if mode == "clean"'):
+                         src.index('if mode == "single"')]
+        self.assertIn('rounds = max(1, int(spec.rounds or 1))', clean_src)
         self.assertIn("wf.run_clean(", clean_src)
         self.assertIn("成功 {success}/{rounds}", clean_src)
+        single_src = src[src.index('if mode == "single"'):
+                          src.index('if mode == "batch"')]
+        self.assertIn('rounds = max(1, int(spec.rounds or 1))', single_src)
+        self.assertIn("wf.run_single(", single_src)
+        self.assertIn("成功 {success}/{rounds}", single_src)
 
     def test_extract_clean_uses_min_answer_length(self):
         # 纯净提取必须遵守最短回答底线（跟随设置 MIN_ANSWER_LENGTH）
