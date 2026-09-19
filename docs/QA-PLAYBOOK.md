@@ -6,12 +6,12 @@
 
 | 脚本 | 用途 | 什么时候用 | 示例 |
 |---|---|---|---|
-| `tests/run_all.py` | 全量单元测试（336+ 用例；自动跳过需要真实浏览器/登录态的用例） | 每次改动后端后、提交前、CI 必跑 | `python tests/run_all.py` |
+| `tests/run_all.py` | 全量单元测试（514 例；自动跳过需要真实浏览器/登录态的用例） | 每次改动后端后、提交前、CI 必跑 | `python tests/run_all.py` |
 | `tools/auto_test.py` | 自动回归测试：后端单测 + Python/app.js 语法 + 前端 Playwright 全流程 + 服务端日志检查 | 改完前端/后端后，模拟“人工测试员”跑一遍；`--quick` 只跑后端+语法（CI 友好） | `python tools/auto_test.py`<br>`python tools/auto_test.py --quick` |
 | `tools/ai_flavor_check.py` | AI 味检测（0-100）：检查生成稿的机器味，与真人基准对比 | 生成效果前后对比、发布前自查 | `python tools/ai_flavor_check.py output`<br>`python tools/ai_flavor_check.py --zhihu data/published_answers_.json` |
 | `tools/build_release.py` | 正式发版：门禁（git 干净/分支 main）→ 全量测试 → PyInstaller → Inno Setup 安装包 → SHA256；**版本号自动从 core/version.py 注入** | 发新版本时 | `python tools/build_release.py` |
 | `tests/test_*.py` | 专项单测（草稿箱/快照/评分回退/并行窗口/大模型筛选/launcher 等） | 定位具体模块问题时单独跑 | `python -m unittest tests.test_drafts` |
-| `tools/archive/probes/` | 历史一次性探查脚本（已归档，只读参考） | 浏览器 DOM 排查时的历史参考 | — |
+| `tools/archive/probes/` | 历史一次性探查脚本（已归档，只读参考）。其中 `probe_markdown_rebuild.py` 是逐块重建 markdown 的**合成 DOM 真机验证**（不登录不联网，改 walker 后跑一次） | 浏览器 DOM 排查时的历史参考 | `python tools/archive/probes/probe_markdown_rebuild.py` |
 
 ## 二、推荐工作流（按场景）
 
@@ -27,7 +27,7 @@ python tools/auto_test.py --quick
 
 ### 提交前（完整回归）
 ```bash
-python tests/run_all.py                 # 336 用例
+python tests/run_all.py                 # 514 例
 python tools/auto_test.py               # 含前端 Playwright 全流程 + 日志检查
 ```
 
@@ -43,17 +43,27 @@ python tools/ai_flavor_check.py --zhihu data/published_answers_2026-08-23.json  
 python tools/ai_flavor_check.py output/story_x.md # 单篇
 ```
 
-### 发新版本（一键）
+### 发新版本（一键，2026-09-19 实跑校准）
 ```bash
 # 1. 改版本号（唯一入口）
 #    core/version.py  →  VERSION = "x.y.z"
-# 2. 打包发布（自动：门禁+测试+PyInstaller+安装包+SHA256，并自动把版本号写入 iss）
-python tools/build_release.py
-# 3. 发布到 GitHub
-#    git add -A && git commit -m "..."
+# 2. 先提交：门禁要求工作区干净（未提交改动会直接拒绝构建）
+#    git add -A && git commit -m "vx.y.z: ..."
+# 3. 打包（自动：门禁+全量测试+PyInstaller+安装包+SHA256，并自动把版本号写入 iss）
+#    --skip-browser = 测试走 tests/run_all.py（跳过需要真实浏览器/登录态的用例）
+python tools/build_release.py --skip-browser
+# 4. 提交构建脚本回写的 iss 版本号（此时工作区会多出这一处改动）
+#    git add installer/AutoQuill.iss && git commit -m "chore: 安装器版本号同步 vx.y.z"
+# 5. 打 tag + 推送 + 建 Release（两个资产：安装包 + sha256）
 #    git tag vx.y.z && git push origin main --tags
-#    gh release create vx.y.z release/AutoQuill-Setup-x.y.z.exe release/AutoQuill-Setup-x.y.z.exe.sha256 --title "AutoQuill vx.y.z" --notes-file notes.md
+#    gh release create vx.y.z --title "AutoQuill vx.y.z" \
+#        --notes-file release/release_notes_x.y.z.md \
+#        release/AutoQuill-Setup-x.y.z.exe release/AutoQuill-Setup-x.y.z.exe.sha256
 ```
+
+发布说明的惯例：正文用 `CHANGELOG.md` 对应版本段 + 「测试」+「安装提示（SmartScreen / 数据保留 / sha256 校验）」；
+发完把同一份说明存一份到 `release/release_notes_x.y.z.md`（`release/` 不入库，仅本机留档）。
+发布后回下载一次安装包比对 sha256（`gh release download` + `certutil -hashfile ... SHA256`），并确认 CI 变绿。
 
 ## 三、关键说明
 

@@ -22,7 +22,10 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 ## 2. 版本与发布
 
-- 版本唯一入口：core/version.py（当前 v4.9.0，tag v4.9.0 随本版发布）
+- 版本唯一入口：core/version.py（当前 v4.9.0）
+- 最近发布：**v4.9.0（2026-09-19）**——tag v4.9.0；安装包 `release/AutoQuill-Setup-4.9.0.exe`
+  （43.1 MB，SHA256 73c400a7d856c0ec45619bc3256349f6d80282607732c60b83349085927b24a5）；
+  GitHub Release 已发（Latest），发布说明存档 release/release_notes_4.9.0.md
 - 打包：python tools/build_release.py —— 门禁（git 干净/main）→ 全量测试 → PyInstaller → Inno 安装包 → SHA256，版本号自动注入 installer/AutoQuill.iss（勿手工改 iss）
 - 发布：git tag vX.Y.Z && git push origin main --tags && gh release create（gh 已登录 large-su）；产物在 release/，dist/release/build 不入库
 
@@ -50,7 +53,7 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 - llm_client.py / story_generation.py / story_prompt.py / story_scoring.py：API 生成、提示词、评分、问题池筛选
 - 前端：webui/static/index.html（结构）+ style.css + app.js（已抽离）；四大模式：工作台 / 作者蒸馏 / 已发布内容看板 / 草稿箱素材
 
-## 4. 已完成的重大功能（截至 v4.6.0）
+## 4. 已完成的重大功能（截至 v4.9.0）
 
 v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎草稿卡改版 DOM（标题/时间/正文 div，时间「编辑于 …」相对文本）→ 字数改用服务端草稿全文统计（不再 200 字摘要）、相对时间换算日期、列表点击条目开浏览器、删除按真实 qid 匹配；Web 模式评分/问题池筛选改走网页版大模型（双头：API 只用 API、Web 只用 Web），失败自动回退不阻断。（详见 CHANGELOG.md）
 
@@ -58,7 +61,7 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 2. 去 AI 味体系：采样惩罚参数、行文守则+中文 AI 句式禁词、评分「自然度」维度与专项扣分、tools/ai_flavor_check.py 检测器（真人≈1/100 vs AI≈28/100）
 3. Web 窗口复用：continue_chat 同会话连续提问；并行 slot 损坏（超时/错误/重置 3 次失败→DEAD）自动开新窗口补位（上限 8）；meta.session_id 同会话连续（生成重试接入属下一步）
 4. 大模型问题池筛选：批量（run_batch 收集后）+ 单轮（_ai_pick_best 在并行提取合格候选后），先排除不适合写知乎故事/小说的，再挑最适合的 1 个；开关 config/story.py 的 QUESTION_AI_SCREEN；失败/Web 模式/关闭回退原规则
-5. 自动回归测试：tools/auto_test.py（后端 336 用例+语法+Playwright 前端全流程+服务端日志；--quick 供 CI）
+5. 自动回归测试：tools/auto_test.py（后端 514 例+语法+Playwright 前端全流程+服务端日志；--quick 供 CI）
 6. P0-P3 工程化：统一快照层、server 路由拆分、前端抽离 style.css+app.js、统一测试入口 tests/run_all.py、GitHub Actions CI、日志轮转（30 天+留 20）、端口单一来源 core/ports.py、19 个探查脚本归档 tools/archive/probes、类型注解
 7. 可靠性修复：批量 watchdog 按模式放宽（batch 60min，非用户操作会标注）、评分 Key 401 自动回退主 Key、快照质量防护/坏数据回退、删除单条容错、四任务浏览器互斥、双击启动黑屏修复（launcher sys.path+兜底）、草稿删除完成 toast 保留
 8. 技能安装：.claude/skills/code-review-skill（审查指南）+ superpowers（writing-plans/systematic-debugging/TDD 等 14 个），已随仓库提交
@@ -77,23 +80,33 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
     data/cleanup/backup_20260917_085832/；删后全量复核确认命中 0（仅剩 1 条置顶手写 +
     2 条「洗稿含义」弱指纹）。日常新会话已由 v4.9.0 的「完成后自动删除」兜住
 
+11. v4.9.0 网页版通道大修（2026-09）：DeepSeek 官网改版适配（取消模式/开关切换、
+    多轮读取改「发送前打锚点、只读新回复」、会话删除走 `POST /api/v0/chat_session/delete`
+    + 侧栏 DOM 兜底）、新增**豆包网页版驱动** `web_drivers/doubao.py`（md-box 逐块重建、
+    卡片式交付兜底补问、发送双判据、完成判定含「末尾停在章节标题=残稿」、侧栏删除）、
+    网页端正文提取统一 `base.MARKDOWN_REBUILD_JS`、格式校验章节三形态容错
+    （规范 `## **N**` / `第N章` / 裸章节号）；经典与纯净两条完整链路均支持多轮发布
+
 ## 5. 约定与常见坑（改代码前必读）
 
-- 测试：改完先 python tests/run_all.py（336 用例，浏览器依赖类自动跳过）；前端改动跑 python tools/auto_test.py；发版用 build_release.py；完整手册见 docs/QA-PLAYBOOK.md
+- 测试：改完先 python tests/run_all.py（514 例，浏览器依赖类自动跳过）；前端改动跑 python tools/auto_test.py；发版用 build_release.py；完整手册见 docs/QA-PLAYBOOK.md
 - Python 环境：一律用 .venv/Scripts/python，不用 miniconda 裸 python
 - 行尾：仓库文件多 CRLF（编辑工具默认 LF），改完大文件用脚本归一化行尾；bat 必须纯 ASCII（中文注释会因 GBK 崩）
 - 写入文件的坑：DSH 模板字面量会把反引号、${}、\n 吞噬——写含这些的文件时避免或转义；前/后端 JS 用 node --check 验证
 - 网页端正文提取：markdown 会被渲染成 DOM（`## **N**` → h2），只读 innerText 必丢
   章节语法 → 一律走 base.MARKDOWN_REBUILD_JS 逐块重建；判「生成完成」前查末尾是否
   停在章节标题（base/豆包已有判据）；格式校验只认文本形态，别让通道差异背锅
-- 网络：沙箱 bash 无外网，需显式走 Clash 代理 -x http://127.0.0.1:7890 --ssl-no-revoke
+- 网络：本机可直连 GitHub——git push 走 SSH、gh 走 HTTPS 都实测可用（2026-09-19 发布验证）。
+  git 配置里写着 Clash 代理 http://127.0.0.1:7890，**Clash 没开时不要给命令加代理环境变量**
+  （会报 proxyconnect 拒绝）；确实需要代理的命令再显式 -x http://127.0.0.1:7890 --ssl-no-revoke
 - 端口守卫：测试用 8799 时需在 server 白名单放行（tools/auto_test.py 内建 bootstrap 已处理）
 - Hindsight 工具：仓库记忆服务可能不可达（网络策略）；优先读 docs/*.md + 代码定位
 
 ## 6. 待办 / 建议下一步
 
-- 豆包会话删除仍是「尽力而为」（内部接口 401、无 DOM 兜底）→ 待用与 DeepSeek
-  同款「侧栏悬停 → ⋯ → 删除 → 弹窗确认」链路校准（web_drivers/doubao.py）
+- 网页端逐块重建的真机复核：下一轮真实运行看日志的 `格式检测：` ——DeepSeek 出现 10/10
+  说明 h1-h6 命中；若仍显示「章节:0个(-4)」却判定合规，说明走的是文本侧兜底
+  （restore_bare_chapter_headings），届时再校准一次 DOM walker
 
 - 把「同一生成的格式修正重试」接到 meta.session_id（同窗口连续修正，能力已就绪未接）
 - 批量素材“DOM 提取失败或过短”告警偏多 → 提取阈值/重试调优

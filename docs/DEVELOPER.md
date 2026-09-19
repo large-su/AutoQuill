@@ -35,12 +35,14 @@ AutoQuill 是一套以 LLM 为认知中枢、以 **Playwright DOM 通道**为唯
 │                        →生成→评分→发布            │
 ├──────────────────────────────────────────────────┤
 │  Layer 3: Adapters (适配器)                       │
-│  web_drivers/  →  Web LLM 驱动(DeepSeek)         │
+│  web_drivers/  →  Web LLM 驱动(DeepSeek/豆包)    │
 │   ├ browser_pool.py  浏览器基础设施（共享单例/     │
 │   │                 取消钩子/有界交互；工厂由      │
 │   │                 应用层注册，不依赖上层）       │
 │   ├ deepseek.py      DeepSeek 网页版驱动+登录判定  │
+│   ├ doubao.py        豆包网页版驱动（卡片交付兜底）│
 │   └ base.py          WebLLMDriver 基类            │
+│                      markdown 逐块重建（共用）      │
 │  llm_api.py    →  API LLM 调用 + 风格双层注入     │
 │  kb_manager.py →  知识库管理（默认停用）           │
 ├──────────────────────────────────────────────────┤
@@ -97,13 +99,16 @@ python tools/launcher.py             # 一键启动器（源码态检查环境�
 
 旧坐标/OCR 时代命令（`--calibrate` / `--test-ocr` / `--debug-ocr-region` / `--probe-a11y` / `--resume` / `--image-gen`）已随对应代码归档移除，见 `archive/`。
 
-调试/探测脚本（tools/，需真实浏览器与登录态，选择器改版时先用它们实测 DOM）：
+调试/探测脚本（需真实浏览器与登录态，选择器改版时先用它们实测 DOM）：
 
 ```bash
 python -m web_drivers.deepseek --probe   # DeepSeek 关键 selector 探测
-python tools/probe_stop_button.py        # 停止按钮 selector 探测
-python tools/verify_dom_clicks.py        # DOM 点击链路验证
-python tools/debug_ds_modes.py           # DeepSeek 模式切换调试
+python -m web_drivers.doubao --probe     # 豆包消息状态/卡片/生成中探测
+# 逐块重建 markdown 的真机验证（合成 DOM，不登录不联网，改 walker 后跑一次）
+python tools/archive/probes/probe_markdown_rebuild.py
+# 历史探查脚本（选择器改版时的回归参考，已归档）：
+#   tools/archive/probes/probe_stop_button.py / verify_dom_clicks.py
+#   tools/archive/probes/debug_ds_modes.py
 ```
 
 站点运维工具（需真实登录态，默认无头）：
@@ -129,10 +134,14 @@ python tools/generate_with_author.py --question "..." --author 作者名
 ### 2.5 测试
 
 ```bash
-python -m unittest discover -s tests    # 全量测试（430+ 项，含安全回归与浏览器池并发）
+python tests/run_all.py                  # 全量单测（514 例；自动跳过真实浏览器/登录态用例）
+python -m unittest discover -s tests     # 同上但不跳过浏览器依赖用例（需本机 Edge 与登录态）
+python tools/auto_test.py --quick        # 后端单测 + Python/app.js 语法自检
+python tools/auto_test.py                # 再加前端 Playwright 全流程 + 服务端日志检查
 ```
 
-**提交门禁**：任何提交前必须 py_compile + 全量测试通过。
+**提交门禁**：任何提交前必须 py_compile + 全量测试通过；发版走 `tools/build_release.py`
+（门禁：工作区干净 + 分支 main → 全量测试 → PyInstaller → Inno Setup → SHA256）。
 
 ---
 
@@ -160,7 +169,7 @@ V4 起程序文件与用户数据分离：
 | `POST /api/setup/apikey` | 写入服务商 API Key（DATA_ROOT 的 llm_providers.json）并立即生效 |
 | `POST /api/setup/test-api` | 实测当前配置的 API 连接（返回 ok + 服务端回复） |
 | `POST /api/setup/zhihu-login` | 后台线程拉起可见 Edge 登录知乎（前端轮询 status 收尾） |
-| `POST /api/setup/web-login` | 后台线程拉起可见 Edge 登录 DeepSeek 网页版（前端轮询 status 收尾） |
+| `POST /api/setup/web-login` | 后台线程拉起可见 Edge 登录**当前网页版大模型**（DeepSeek / 豆包，前端轮询 status 收尾） |
 
 知乎登录逻辑抽为 `browser_adapter.login_zhihu_flow()`（CLI `--login` 与引导共用）；DeepSeek 网页版登录/判定在 `web_drivers/deepseek.web_llm_logged_in()` / `login_deepseek_web_flow()`（随驱动下沉 Layer 3，经 browser_pool 工厂创建独立实例）。
 
@@ -206,7 +215,10 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 | 模式 | 说明 | 适用场景 |
 |---|---|---|
 | **API** (`LLM_MODE = "api"`) | 直接调用 LLM API，快速稳定 | 日常批量生成 |
-| **Web** (`LLM_MODE = "web"`) | 通过浏览器操作网页版 LLM | 免费使用、API 不可用时 |
+| **Web** (`LLM_MODE = "web"`) | 通过浏览器操作网页版大模型 | 免费使用、API 不可用时 |
+
+网页版通道支持多个站点驱动（`config.WEB_DRIVERS` 注册表：**DeepSeek / 豆包**），控制台
+「生成通道 → 网页版大模型」切换；登录态、会话归属、登录判定都按驱动名隔离。
 
 ### 6.2 工作流生命周期
 
@@ -283,14 +295,25 @@ class PaperReviewWorkflow(WorkflowBase):
 ### 8.3 新增 Web LLM 驱动
 
 ```python
-from web_drivers.base import WebLLMDriver
+from web_drivers.base import MARKDOWN_REBUILD_JS, WebLLMDriver
 
 class NewSiteDriver(WebLLMDriver):
-    name = "newsite"
-
-    def setup(self):           ...  # 首次创建会话
-    def wait_complete(self):   ...  # 等待生成完毕
+    def new_chat(self):       ...  # 新会话（并行调度每任务一个会话）
+    def setup(self):          ...  # 站点设置（多数站点已无模式可切 → 空操作）
+    def input(self, prompt):  ...  # 填 prompt（DOM 语义，禁止坐标/剪贴板）
+    def send(self):           ...  # 发送 + 确认真的被接收（消息条数/输入框清空）
+    def wait_complete(self):  ...  # 等待完成（文本稳定 + read-back 重读 + UI 空闲）
+    def read_result(self):    ...  # 读回复：必须逐块重建 markdown（见下）
 ```
+
+**两条硬约束（2026-09-19 事故后固化）**：
+
+1. **读回复必须逐块重建 markdown**：站点把 `## **N**` 渲染成 h1-h6 元素，直接取容器
+   `innerText` 会丢掉标题语法，格式校验「章节 0 个」必扣 4 分——通道满分只剩 6/10，
+   字数略欠的合规稿会被判废。用 `base.MARKDOWN_REBUILD_JS`（DeepSeek / 豆包共用，
+   实测同一篇从 4/10 变 10/10）。
+2. **判完成前看正文末尾**：末尾停在章节标题 = 只读到半截稿（`doubao.py` 的
+   `reply_tail_is_chapter_heading`），不要判完成；超时返回 False 让上层重试。
 
 浏览器基础设施一律走 `web_drivers/browser_pool`：共享单例 `get_browser()`（锁内懒启动）、`safe_evaluate()`（有界交互）、`set_cancel_hook()`（停止按钮）。浏览器本体（知乎域）由应用层注册工厂——`browser_pool` 自身禁止 import applications。
 
