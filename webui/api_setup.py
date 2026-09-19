@@ -196,6 +196,30 @@ def _start_login_thread(kind, flow_call, log_name):
     _login_thread.start()
 
 
+@router.post("/api/setup/zhihu-check")
+def api_setup_zhihu_check():
+    """真实检查知乎登录态（打开知乎首页看是否跳登录页），并同步失效标记。
+
+    「有登录态文件」不等于「服务端还认」——cookie 还在但会话被登出时，必须靠
+    这一步才能发现（2026-09-19 看板/草稿箱刷新失败的真因）。前端「设置 →
+    知乎账号 → 检查登录状态」调用。"""
+    from webui.browser_tasks import (
+        browser_busy, clear_zhihu_login_stale, mark_zhihu_login_stale,
+    )
+    busy = browser_busy()
+    if busy:
+        return {"ok": False, "status": "busy",
+                "message": "「" + busy[0] + "」任务进行中，请完成后再检查登录状态"}
+    from applications.zhihu_story.browser_adapter import verify_zhihu_login
+    logged_in, detail = verify_zhihu_login(headless=True)
+    if logged_in:
+        clear_zhihu_login_stale()
+    else:
+        mark_zhihu_login_stale(detail)
+    log.info("知乎登录态检查：%s（%s）", "有效" if logged_in else "失效", detail)
+    return {"ok": True, "logged_in": logged_in, "detail": detail}
+
+
 @router.post("/api/setup/zhihu-login")
 def api_setup_zhihu_login():
     """后台线程拉起可见 Edge 引导登录知乎；前端轮询 setup/status 收尾。"""

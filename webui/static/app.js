@@ -2192,12 +2192,93 @@ async function pollSetupStatus() {
   } catch (e) { /* ignore */ }
 }
 
+/* ---------- 知乎账号（设置弹窗：检查登录态 / 重新登录） ----------
+   2026-09-19：此前只有首启引导里能登录知乎，装好之后找不到入口；而且
+   「有 cookie」被当成「已登录」，服务端把会话登出后一路绿灯直到抓取失败。
+   这里给常驻入口：真实检查 + 重新登录。 */
+function setZhihuLoginState(text, kind) {
+  const el = $("zhihuLoginState");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = kind === "ok" ? "var(--ok, #2ecc71)"
+    : kind === "err" ? "var(--err, #e74c3c)" : "var(--muted, #888)";
+}
+
+async function refreshZhihuLoginState() {
+  setZhihuLoginState("检测中…", "");
+  try {
+    const r = await fetch("/api/setup/status");
+    const st = await r.json();
+    if (!st.zhihu_logged_in) {
+      setZhihuLoginState("未登录（点右侧「重新登录知乎」）", "err");
+    } else if (st.zhihu_login_stale) {
+      setZhihuLoginState("⚠ 登录态已失效（需重新登录）", "err");
+    } else {
+      setZhihuLoginState("已保存登录态（可点「检查登录状态」实测）", "ok");
+    }
+  } catch (e) {
+    setZhihuLoginState("状态读取失败", "err");
+  }
+}
+
+async function checkZhihuLogin() {
+  const btn = $("btnZhihuCheck");
+  btn.disabled = true;
+  setZhihuLoginState("正在打开知乎确认登录态…", "");
+  try {
+    const r = await fetch("/api/setup/zhihu-check", { method: "POST" });
+    const d = await r.json();
+    if (!d.ok) { setZhihuLoginState(d.message || "检查未执行", "err"); return; }
+    setZhihuLoginState(d.logged_in
+      ? ("✓ 登录态有效（" + (d.detail || "") + "）")
+      : ("✗ " + (d.detail || "登录态失效") + "，请点「重新登录知乎」"),
+      d.logged_in ? "ok" : "err");
+  } catch (e) {
+    setZhihuLoginState("检查请求失败：" + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function reloginZhihu() {
+  const btn = $("btnZhihuRelogin");
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/setup/zhihu-login", { method: "POST" });
+    const d = await r.json();
+    if (!d.ok) { setZhihuLoginState(d.detail || d.message || "无法启动登录", "err"); return; }
+    setZhihuLoginState("请在弹出的 Edge 窗口完成登录…", "");
+    const timer = setInterval(async () => {
+      try {
+        const sr = await fetch("/api/setup/status");
+        const st = await sr.json();
+        if (st.login_running) return;
+        clearInterval(timer);
+        btn.disabled = false;
+        if (st.zhihu_login_stale) {
+          setZhihuLoginState("登录未完成：" + (st.zhihu_login_stale_reason || ""), "err");
+        } else {
+          setZhihuLoginState("✓ 已登录（正在实测确认…）", "ok");
+          checkZhihuLogin();
+        }
+      } catch (e) { /* 继续轮询 */ }
+    }, 3000);
+  } catch (e) {
+    btn.disabled = false;
+    setZhihuLoginState("登录请求失败：" + e.message, "err");
+  }
+}
+
+$("btnZhihuCheck") && $("btnZhihuCheck").addEventListener("click", checkZhihuLogin);
+$("btnZhihuRelogin") && $("btnZhihuRelogin").addEventListener("click", reloginZhihu);
+
 $("btnSetup").addEventListener("click", () => {
   // 首次引导未完成 → 打开引导向导；已完成 → 打开设置弹窗
   if (setupNeeded) { loadSetupStatus(); return; }
   $("settingsMask").classList.add("show");
   loadConfig(); loadMode(); loadBrowserMode();
   loadAuthors(); loadQuestionSource();
+  refreshZhihuLoginState();
 });
 
 $("settingsClose").addEventListener("click", () => $("settingsMask").classList.remove("show"));

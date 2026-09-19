@@ -105,6 +105,9 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
   任何页面被 302 到 /signin（2026-09-19 看板/草稿箱「刷新失败」的真因）。
   抓取/删除链路统一用 `page_needs_login()` 识别（抛 ZhihuLoginRequired），前端提示
   重新登录；排查用 tools/archive/probes/probe_state_login.py（一条命令定性）
+- 登录入口：设置弹窗「知乎账号」区块 = 状态显示 + 「检查登录状态」（POST /api/setup/zhihu-check，
+  真实打开知乎首页判断）+「重新登录知乎」；browser_adapter.verify_zhihu_login() 可复用。
+  首启引导的知乎步骤在失效态下也会重新显示登录按钮（此前被判「已完成」而隐藏）
 - 删除即同步本地：知乎删除成功后由 API 调 `_snapshot.prune_rows()` 剔除本地快照
   （published.prune_aids / drafts.prune_qids），前端重载列表即可见，不必整页重抓
 - 网页端正文提取：markdown 会被渲染成 DOM（`## **N**` → h2），只读 innerText 必丢

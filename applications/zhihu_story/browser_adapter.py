@@ -198,6 +198,25 @@ def page_needs_login(page):
     return "/signin" in url
 
 
+def verify_zhihu_login(headless=True):
+    """真实检查知乎登录态：打开知乎首页，看是否被重定向到登录页。
+
+    与 is_logged_in()（只看 z_c0 cookie）不同——cookie 还在但服务端已把会话
+    登出时，cookie 检查会假阳性（2026-09-19 看板/草稿箱「刷新失败」的真因）。
+    返回 (logged_in: bool, detail: str)；异常按「检查失败」返回，不抛出。
+    """
+    try:
+        with ZhihuBrowser(headless=headless) as browser:
+            browser.page.goto("https://www.zhihu.com/",
+                              wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2.5)
+            if page_needs_login(browser.page):
+                return False, "已登出（知乎把会话登出，页面被重定向到登录页）"
+            return True, "登录态有效（知乎首页正常打开）"
+    except Exception as exc:      # noqa: BLE001
+        return False, f"检查失败：{exc}"
+
+
 def login_zhihu_flow(timeout=300):
     """打开可见 Edge 窗口引导用户手动登录知乎，检测到登录后保存登录态。
 
