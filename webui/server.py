@@ -62,6 +62,7 @@ from .api_runs import router as runs_router
 from .api_settings import router as settings_router
 from .api_setup import router as setup_router
 from .api_feedback import router as feedback_router
+from .automation_api import router as automation_router
 from .run_manager import runner  # noqa: F401  (供存量扩展引用)
 
 
@@ -139,6 +140,15 @@ app.get("/style.css")(_static_css)
 app.get("/app.js")(_static_app_js)
 
 
+@app.get("/automation.js")
+def _static_automation_js():
+    """自动化模块前端（独立文件：时间轴渲染与调度交互，不挤进 app.js）。"""
+    p = Path(__file__).resolve().parent / "static" / "automation.js"
+    if not p.exists():
+        raise HTTPException(404, "automation.js 未找到")
+    return FileResponse(str(p), media_type="application/javascript")
+
+
 
 # —— P0 拆分：业务路由按域装配（实现见各 api_*.py / run_manager.py）
 from webui.dashboard_api import register_dashboard
@@ -148,6 +158,7 @@ app.include_router(setup_router)
 app.include_router(library_router)
 app.include_router(runs_router)
 app.include_router(feedback_router)
+app.include_router(automation_router)
 
 # —— 兼容门面：历史调用方(tests/外部脚本)习惯 webui.server.X 直接取用
 from .api_library import *   # noqa: F401,F403

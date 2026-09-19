@@ -1,0 +1,368 @@
+# -*- coding: utf-8 -*-
+"""把计划展开成「今天的时间轴」。
+
+用户口径对应到实现：
+  - 配额可自由设置 → 每天按 daily_cap 生成作业；当天改配置会重排未执行部分；
+  - 间隔 ≥1 小时且随机化 → 同类作业间隔 ∈ [min_gap, min_gap*(1+gap_jitter_ratio)]；
+  - 「当日完成即可」→ 不固定时间点，只在运行时段内铺开；
+  - 随时可停、再开始时先看今天已做多少 → 排班按「已完成数量」扣减后生成（幂等键去重）；
+  - 错过怎么办 → catch_up：none / same_day（默认，顺延到当天剩余时间）/ next_window。
+
+★ 排班必须可复现：随机数种子 = (日期, 计划指纹, 任务类型)，所以重启后同一份配置
+  得到同一条时间轴（用户看到的时间轴不会每次刷新都变），同时也让单测可断言。
+"""
+
+import hashlib
+import json
+import random
+from datetime import datetime, timedelta
+
+from automation.model import (
+    DECOLLISION_MINUTES, TASK_PRIORITY, TASK_TYPES, job_key, parse_hhmm,
+)
+
+STATUS_PLANNED = "planned"
+STATUS_RUNNING = "running"
+STATUS_DONE = "done"
+STATUS_FAILED = "failed"
+STATUS_SKIPPED = "skipped"
+STATUS_NEEDS_HUMAN = "needs_human"
+
+# 「错过」的宽限期（分钟）：刚过点的作业属于正常到期，直接执行；
+# 只有超过这个时长还没执行（说明当时程序没在跑）才按 catch_up 策略处理。
+CATCH_UP_GRACE_MINUTES = 10
+
+# 视为「已消耗配额」的状态（失败不算消耗，会重试/顺延）
+_CONSUMED = (STATUS_DONE, STATUS_RUNNING)
+
+
+def plan_fingerprint(plan) -> str:
+    """影响排班的字段指纹（变了就重排未执行部分）。"""
+    key = {
+        "window": plan.get("window"),
+        "min_gap": plan.get("min_gap_minutes"),
+        "gap_jitter": plan.get("gap_jitter_ratio"),
+        "jitter": plan.get("jitter_minutes"),
+        "catch_up": plan.get("catch_up"),
+        "tasks": {t: {k: v for k, v in (cfg or {}).items() if k != "params"}
+                  for t, cfg in (plan.get("tasks") or {}).items()},
+        "params": {t: (cfg or {}).get("params")
+                   for t, cfg in (plan.get("tasks") or {}).items()},
+    }
+    return hashlib.sha1(
+        json.dumps(key, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+
+
+def _window_bounds(day, plan, cfg):
+    """返回 (窗口起点 datetime, 窗口终点 datetime)。"""
+    win = cfg.get("window") if isinstance(cfg.get("window"), dict) else None
+    win = win or plan.get("window") or {}
+    start_t = parse_hhmm(win.get("start"), parse_hhmm("08:00"))
+    end_t = parse_hhmm(win.get("end"), parse_hhmm("23:30"))
+    base = datetime.strptime(day, "%Y-%m-%d")
+    return (base.replace(hour=start_t.hour, minute=start_t.minute),
+            base.replace(hour=end_t.hour, minute=end_t.minute))
+
+
+def _done_jobs(schedule, task_type):
+    """已消耗配额的作业（done/running）——用于「先看今天已经做了多少」。"""
+    return [j for j in schedule
+            if j.get("type") == task_type and j.get("status") in _CONSUMED]
+
+def _build_schedule(day, plan, schedule=None, counters=None):
+    """生成当天作业列表（含去碰撞）。
+
+    「今天已经做了多少」有两个来源，取较大者（避免重复计）：
+      a) schedule 里 status=done/running 的作业（本进程排班内）；
+      b) counters（当天台账统计，跨重启/排班丢失后的依据——用户明确要求）。
+    """
+    schedule = schedule or []
+    counters = counters or {}
+    jobs = []
+    types = sorted(TASK_TYPES, key=lambda t: TASK_PRIORITY.get(t, 99))
+    for task_type in types:
+        meta = TASK_TYPES[task_type]
+        cfg = (plan.get("tasks") or {}).get(task_type) or {}
+        cap = int(cfg.get("daily_cap") or 0)
+        if not (cfg.get("enabled") and meta["implemented"] and cap > 0):
+            continue
+        done = _done_jobs(schedule, task_type)
+        done_n = max(len(done), int(counters.get(task_type) or 0))
+        remaining = cap - done_n
+        if remaining <= 0:
+            continue
+        cfg_gap = cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60
+        min_gap = float(cfg_gap)
+        ratio = float(plan.get("gap_jitter_ratio") or 0.0)
+        jitter = float(plan.get("jitter_minutes") or 0)
+        seed = "%s|%s|%s" % (day, plan_fingerprint(plan), task_type)
+        rng = random.Random(seed)
+        win_start, win_end = _window_bounds(day, plan, cfg)
+        cursor = win_start
+        last_done = None
+        for job in done:
+            try:
+                t = datetime.fromisoformat(job.get("planned_at", ""))
+            except Exception:
+                continue
+            last_done = t if last_done is None else max(last_done, t)
+        for i in range(remaining):
+            if i == 0 and last_done is None:
+                step = rng.uniform(0, max(jitter, 0.1))
+                t = cursor + timedelta(minutes=step)
+            elif i == 0:
+                step = rng.uniform(min_gap, min_gap * (1 + ratio))
+                t = last_done + timedelta(minutes=step)
+            else:
+                step = rng.uniform(min_gap, min_gap * (1 + ratio))
+                t = cursor + timedelta(minutes=step)
+                if jitter > 0:
+                    t += timedelta(minutes=rng.uniform(-jitter / 2.0, jitter / 2.0))
+            if t > win_end:
+                jobs.append({"key": job_key(task_type, day, "overflow", i),
+                             "type": task_type, "planned_at": "",
+                             "status": STATUS_SKIPPED, "units": 1,
+                             "params": cfg.get("params") or {},
+                             "note": "运行时段内排不下（配额 %d，已排 %d 项）" % (cap, i)})
+                break
+            jobs.append({
+                "key": job_key(task_type, day, "slot", i),
+                "type": task_type,
+                "planned_at": t.replace(microsecond=0).isoformat(),
+                "status": STATUS_PLANNED,
+                "units": 1,
+                "params": cfg.get("params") or {},
+                "note": "",
+            })
+            cursor = t
+    return _deconflict(jobs)
+
+
+def _deconflict(jobs):
+    """去碰撞：任意两个待执行作业至少隔开 DECOLLISION_MINUTES 分钟。"""
+    pending = [j for j in jobs
+               if j.get("status") == STATUS_PLANNED and j.get("planned_at")]
+    pending.sort(key=lambda j: j["planned_at"])
+    prev = None
+    for job in pending:
+        t = datetime.fromisoformat(job["planned_at"])
+        if prev is not None:
+            floor = prev + timedelta(minutes=DECOLLISION_MINUTES)
+            if t < floor:
+                t = floor
+                job["planned_at"] = t.replace(microsecond=0).isoformat()
+                job["note"] = (job.get("note") or "") + "（避让同刻任务）"
+        prev = t
+    return jobs
+
+
+def materialize_day(now, plan, day_data, done_counts=None):
+    """确保当日排班存在且与当前计划一致；返回更新后的 day_data。
+
+    三种情况：
+      a) 首次进入某一天 → 按配额生成整条时间轴；
+      b) 计划被改（配额/时段/间隔/参数）→ 保留已完成的作业，重排未执行部分；
+      c) 什么都没变 → 原样返回（时间轴稳定，不因每次 tick 而抖动）。
+    """
+    day = now.strftime("%Y-%m-%d")
+    fingerprint = plan_fingerprint(plan)
+    if (not day_data) or day_data.get("date") != day:
+        day_data = {"date": day, "plan_hash": fingerprint, "schedule": [],
+                    "counters": dict(done_counts or {}), "rescheduled": 0,
+                    "notes": []}
+    changed = day_data.get("plan_hash") != fingerprint
+    if changed or not day_data.get("schedule"):
+        keep = [j for j in day_data.get("schedule", [])
+                if j.get("status") in _CONSUMED or j.get("type") not in TASK_TYPES]
+        day_data["schedule"] = keep + _build_schedule(day, plan, keep,
+                                                       day_data.get("counters") or {})
+        day_data["plan_hash"] = fingerprint
+        day_data.setdefault("notes", []).append(
+            "%s 按最新计划重排（保留已完成 %d 项）" % (now.strftime("%H:%M"), len(keep)))
+    day_data["schedule"] = _deconflict(day_data["schedule"])
+    return day_data
+
+def apply_catch_up(now, plan, day_data):
+    """处理错过的作业（电脑关机 / 程序没开 / 暂停导致）。
+
+    判定：计划时间已过 **且超过宽限期**（CATCH_UP_GRACE_MINUTES）才算「错过」——
+    刚过点的作业是正常到期，直接执行即可（否则每次 tick 都会把它顺延，永远不执行）。
+
+    same_day 策略下顺延要**保住同类最小间隔**：
+      1) 错过的作业按原计划顺序顺延（从 now 起排，且与「同类上一次完成/上一次顺延」保持间隔）；
+      2) 后续未执行的作业跟着往后推（保持顺序与间隔）；
+      3) 最后统一去碰撞，仍排不下的标记跳过并说明原因。
+    """
+    policy = plan.get("catch_up", "same_day")
+    grace = timedelta(minutes=CATCH_UP_GRACE_MINUTES)
+    missed, future, changed = [], [], False
+    for job in day_data.get("schedule", []):
+        if job.get("status") != STATUS_PLANNED or not job.get("planned_at"):
+            continue
+        t = datetime.fromisoformat(job["planned_at"])
+        if t <= now - grace:
+            missed.append((t, job))
+        elif t > now:
+            future.append((t, job))
+    if not missed:
+        return day_data
+    missed.sort(key=lambda x: x[0])
+    future.sort(key=lambda x: x[0])
+    if policy != "same_day":
+        for _, job in missed:
+            job["status"] = STATUS_SKIPPED
+            job["note"] = ("错过时间点（策略：不补做）" if policy == "none"
+                           else "错过时间点（策略：顺延到下一个运行时段）")
+        changed = True
+        if changed:
+            day_data["schedule"] = _deconflict(day_data["schedule"])
+        return day_data
+    # ---- same_day：从 now 起按间隔把错过的作业排进当天剩余时段 ----
+    anchor = {}                     # {type: 该类最后一次「占位」时间}
+    for job in day_data.get("schedule", []):
+        if job.get("status") in _CONSUMED and job.get("planned_at"):
+            try:
+                t = datetime.fromisoformat(job["planned_at"])
+            except Exception:
+                continue
+            anchor[job["type"]] = max(anchor.get(job["type"], t), t)
+    placed_missed = 0
+    for _, job in missed:
+        task_type = job["type"]
+        cfg = (plan.get("tasks") or {}).get(task_type) or {}
+        gap = float(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
+        win_end = _window_bounds(day_data["date"], plan, cfg)[1]
+        base = max(now + timedelta(minutes=2),
+                   anchor.get(task_type, now) + timedelta(minutes=gap))
+        if base > win_end:
+            job["status"] = STATUS_SKIPPED
+            job["note"] = "错过时间点且当天时段已过（未补做）"
+            continue
+        job["planned_at"] = base.replace(microsecond=0).isoformat()
+        job["note"] = (job.get("note") or "") + "（错过原时间点，当日内顺延）"
+        anchor[task_type] = base
+        placed_missed += 1
+    # 未执行的后续作业跟着往后推（保持同类间隔）
+    for t, job in future:
+        task_type = job["type"]
+        cfg = (plan.get("tasks") or {}).get(task_type) or {}
+        gap = float(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
+        win_end = _window_bounds(day_data["date"], plan, cfg)[1]
+        base = max(t, anchor.get(task_type, t) + timedelta(minutes=gap))
+        if base > win_end:
+            job["status"] = STATUS_SKIPPED
+            job["note"] = "顺延后已超出当天时段（未执行）"
+            continue
+        if base != t:
+            job["planned_at"] = base.replace(microsecond=0).isoformat()
+            job["note"] = (job.get("note") or "") + "（因补做顺延）"
+        anchor[task_type] = base
+    day_data["rescheduled"] = int(day_data.get("rescheduled") or 0) + placed_missed
+    day_data["schedule"] = _deconflict(day_data["schedule"])
+    return day_data
+
+
+def plan_retry(now, plan, day_data, failed_job, delay_minutes=20):
+    """失败补位：当天配额还没做完时，晚些再补一次（用户要求「当日完成即可」）。
+
+    约束：补位作业也占配额、也走同一个窗口与去碰撞；窗口内排不下就不补。
+    返回 True 表示已补位（调用方负责落盘）。
+    """
+    task_type = failed_job.get("type")
+    cfg = (plan.get("tasks") or {}).get(task_type) or {}
+    cap = int(cfg.get("daily_cap") or 0)
+    if cap <= 0:
+        return False
+    sched = day_data.get("schedule") or []
+    same = [j for j in sched if j.get("type") == task_type]
+    done = len([j for j in same if j.get("status") in _CONSUMED])
+    pending = len([j for j in same if j.get("status") == STATUS_PLANNED])
+    if done + pending >= cap:
+        return False
+    win_end = _window_bounds(day_data["date"], plan, cfg)[1]
+    when = now + timedelta(minutes=max(5, int(delay_minutes)))
+    if when > win_end:
+        return False
+    seq = len(same)
+    job = {
+        "key": job_key(task_type, day_data["date"], "retry", seq),
+        "type": task_type,
+        "planned_at": when.replace(microsecond=0).isoformat(),
+        "status": STATUS_PLANNED,
+        "units": 1,
+        "params": failed_job.get("params") or {},
+        "note": "失败补位（当日配额未完成）",
+    }
+    sched.append(job)
+    day_data["schedule"] = _deconflict(sched)
+    return True
+
+
+def due_jobs(now, day_data):
+    """该执行的作业：已到点且未执行（按任务优先级与计划时间排序）。"""
+    out = []
+    for job in day_data.get("schedule", []):
+        if job.get("status") != STATUS_PLANNED or not job.get("planned_at"):
+            continue
+        if datetime.fromisoformat(job["planned_at"]) <= now:
+            out.append(job)
+    out.sort(key=lambda j: (TASK_PRIORITY.get(j["type"], 99), j["planned_at"]))
+    return out
+
+
+def next_job(now, day_data):
+    """下一个待执行作业（UI 倒计时用）；没有返回 None。"""
+    pending = [j for j in day_data.get("schedule", [])
+               if j.get("status") == STATUS_PLANNED and j.get("planned_at")]
+    if not pending:
+        return None
+    return min(pending, key=lambda j: j["planned_at"])
+
+
+def window_open(now, plan):
+    """当前是否在运行时段内。"""
+    win = plan.get("window") or {}
+    start_t = parse_hhmm(win.get("start"), parse_hhmm("08:00"))
+    end_t = parse_hhmm(win.get("end"), parse_hhmm("23:30"))
+    return start_t <= now.time() <= end_t
+
+
+def summarize(now, plan, day_data):
+    """给 UI 的进度摘要：每类任务的配额/已完成/待执行 + 下一个时间点。"""
+    schedule = day_data.get("schedule", []) or []
+    per_type = {}
+    for task_type, meta in TASK_TYPES.items():
+        cfg = (plan.get("tasks") or {}).get(task_type) or {}
+        jobs = [j for j in schedule if j.get("type") == task_type]
+        done = len([j for j in jobs if j.get("status") in _CONSUMED])
+        failed = len([j for j in jobs if j.get("status") == STATUS_FAILED])
+        pending = len([j for j in jobs if j.get("status") == STATUS_PLANNED])
+        skipped = len([j for j in jobs if j.get("status") == STATUS_SKIPPED])
+        per_type[task_type] = {
+            "label": meta["label"],
+            "unit": meta["unit"],
+            "lane": meta["lane"],
+            "implemented": meta["implemented"],
+            "enabled": bool(cfg.get("enabled")),
+            "cap": int(cfg.get("daily_cap") or 0),
+            "window": (cfg.get("window") or plan.get("window") or {}),
+            "min_gap_minutes": int(cfg.get("min_gap_minutes")
+                                   or plan.get("min_gap_minutes") or 60),
+            "done": done, "pending": pending, "failed": failed, "skipped": skipped,
+            "desc": meta["desc"],
+        }
+    nxt = next_job(now, day_data)
+    active_types = [v for v in per_type.values() if v["enabled"] and v["implemented"]]
+    return {
+        "day": day_data.get("date"),
+        "in_window": window_open(now, plan),
+        "next_job": nxt,
+        "rescheduled": int(day_data.get("rescheduled") or 0),
+        "per_type": per_type,
+        "done_total": sum(v["done"] for v in per_type.values()),
+        "plan_total": sum(v["cap"] for v in active_types),
+        "window_label": "%s-%s" % ((plan.get("window") or {}).get("start", ""),
+                                   (plan.get("window") or {}).get("end", "")),
+        "notes": (day_data.get("notes") or [])[-5:],
+    }

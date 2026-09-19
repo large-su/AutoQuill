@@ -34,6 +34,12 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 ## 3. 架构地图（核心模块）
 
+- automation/：**自动化模块**（2026-09-19 新增，M1）——24 小时时间轴调度，无人化运营：
+  model（任务类型契约/计划默认值）· store（计划/当日排班/台账，原子写）· planner（排班：
+  配额/时段/≥1h 随机间隔/去碰撞/错过补做/失败补位）· scheduler（tick、串行、幂等、熔断、
+  暂停/停止）· executor（复用 TaskRunner，不直接碰 DOM）。运行数据在
+  `data/state/automation/`（已 gitignore）；API 见 webui/automation_api.py；前端独立文件
+  `webui/static/automation.js` + `/automation.js` 路由。规划见 docs/AUTOMATION-PLAN.md
 - webui/server.py：Web 控制台入口（路由注册 + TaskRunner + watchdog + 日志/SSE + 设置/状态）
 - webui/browser_tasks.py：看板/草稿箱四个后台任务状态字典 + browser_busy() 互斥（共用同一浏览器 profile，必须串行）
 - webui/dashboard_api.py / drafts_api.py：看板 / 草稿箱路由（register 模式挂到 server app）

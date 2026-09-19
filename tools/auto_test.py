@@ -192,7 +192,9 @@ def test_frontend(port):
             check("首页加载", "AutoQuill" in pg.title())
             check("样式生效", "rgb(11, 14, 20)" in pg.evaluate("() => getComputedStyle(document.body).backgroundColor"))
             modes = pg.evaluate("() => Array.from(document.querySelectorAll('#leftModeSel option')).map(o => o.text)")
-            check("四大模式", modes == ["工作台", "作者蒸馏", "已发布内容看板", "草稿箱素材"], json.dumps(modes, ensure_ascii=False))
+            check("五大模式",
+                  modes == ["工作台", "作者蒸馏", "已发布内容看板", "草稿箱素材", "自动化"],
+                  json.dumps(modes, ensure_ascii=False))
 
             pg.click("#btnSetup"); pg.wait_for_timeout(300)
             check("设置弹窗", pg.evaluate("() => document.getElementById('settingsMask')?.classList.contains('show')"))
@@ -248,6 +250,20 @@ def test_frontend(port):
                   "status='%s' del_disabled=%s" % (
                       status_txt,
                       pg.evaluate("() => document.getElementById('btnDraftsDelete').disabled")))
+
+            # 自动化模块：只验证渲染与接线（不点「开始」，避免测试里真跑任务）
+            pg.select_option("#leftModeSel", "automation")
+            pg.wait_for_timeout(1200)
+            check("自动化时间轴泳道",
+                  pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-lane').length") == 5)
+            check("自动化刻度与图例",
+                  pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-ticks span').length") == 13
+                  and pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-legend span').length") >= 6)
+            check("自动化控制与任务配置",
+                  pg.evaluate("() => !!document.getElementById('autoStartBtn')"
+                              + " && document.querySelectorAll('#autoTaskConfig .auto-task').length >= 2"))
+            check("自动化进度卡",
+                  pg.evaluate("() => document.querySelectorAll('#autoProgress .auto-pcard').length") >= 2)
 
             pg.select_option("#leftModeSel", "workspace")
             pg.wait_for_timeout(300)

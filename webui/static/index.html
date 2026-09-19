@@ -93,6 +93,60 @@
       <div class="mode-desc" id="leftModeDesc"></div>
     </div>
 
+    <!-- 模式：自动化（时间轴调度 · 无人化） -->
+    <div class="mode-pane" id="pane-automation" hidden>
+      <div class="card">
+        <h2><span class="badge">⏱</span>自动化</h2>
+        <div class="auto-switch">
+          <span class="auto-state" id="autoState">未启用</span>
+          <button class="btn primary" id="autoStartBtn">开始</button>
+          <button class="btn ghost" id="autoPauseBtn" hidden>暂停</button>
+          <button class="btn danger" id="autoStopBtn" hidden>停止</button>
+        </div>
+        <div class="auto-hint" id="autoHint">到点自动执行：发布草稿 / 全链路撰写。
+          停止后再次开始会先看今天已做多少，再补差额。</div>
+      </div>
+
+      <div class="card">
+        <h2><span class="badge">▤</span>运行时段与间隔</h2>
+        <div class="row2">
+          <label>时段开始<input type="time" id="autoWinStart" value="08:00"></label>
+          <label>时段结束<input type="time" id="autoWinEnd" value="23:30"></label>
+        </div>
+        <label class="auto-line">同类最小间隔（分钟）
+          <input type="number" id="autoMinGap" min="5" step="5" value="60"></label>
+        <label class="auto-line">间隔随机化上限（倍）
+          <input type="number" id="autoGapRatio" min="0" max="2" step="0.1" value="0.6"></label>
+        <label class="auto-line">时间抖动（±分钟）
+          <input type="number" id="autoJitter" min="0" max="120" step="1" value="8"></label>
+        <label class="auto-line">错过时间点
+          <select id="autoCatchUp">
+            <option value="same_day">当日内补做（推荐）</option>
+            <option value="none">不补做</option>
+            <option value="next_window">顺延到下一时段</option>
+          </select>
+        </label>
+        <label class="auto-check"><input type="checkbox" id="autoPauseBusy" checked>
+          我手动操作时，自动化让路</label>
+      </div>
+
+      <div class="card">
+        <h2><span class="badge">☰</span>任务与配额</h2>
+        <div id="autoTaskConfig"><div class="empty-note">加载中…</div></div>
+        <div class="auto-actions">
+          <button class="btn ghost" id="autoRunNowBtn">立即执行下一个</button>
+          <button class="btn ghost" id="autoRefreshBtn">刷新状态</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="badge">🔔</span>通知</h2>
+        <div id="autoNoticeList" class="auto-notices">
+          <div class="empty-note">暂无通知</div>
+        </div>
+      </div>
+    </div>
+
     <!-- 模式：工作台 -->
     <div class="mode-pane" id="pane-workspace">
       <div class="card">
@@ -387,6 +441,28 @@
       </div>
     </div>
 
+    <!-- 自动化：24 小时时间轴 -->
+    <div class="card auto-card" id="autoCard">
+      <div class="dash-head">
+        <h2><span class="badge">⏱</span>自动化时间轴</h2>
+        <div class="dash-pills">
+          <span class="dash-pill" id="autoDayPill">今天 · -</span>
+          <span class="dash-pill" id="autoNextPill">下次 · -</span>
+          <span class="dash-pill" id="autoWindowPill">时段 · -</span>
+          <span class="dash-pill" id="autoStatePill">未启用</span>
+        </div>
+      </div>
+      <div class="auto-progress" id="autoProgress"></div>
+      <div class="tl" id="autoTimeline"></div>
+      <div class="auto-detail" id="autoDetail" hidden></div>
+      <div class="auto-hist">
+        <div class="auto-sub">今日执行记录（台账）</div>
+        <div id="autoHistoryList" class="auto-hist-list">
+          <div class="empty-note">今天还没有执行记录</div>
+        </div>
+      </div>
+    </div>
+
     <div class="card log-card">
       <div class="log-head">
         <h2 style="margin-bottom:0"><span class="badge">◧</span>运行日志</h2>
@@ -656,5 +732,6 @@
 </div>
 
 <script src="app.js"></script>
+<script src="automation.js"></script>
 </body>
 </html>
