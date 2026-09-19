@@ -12,6 +12,7 @@
 
 import logging
 import re
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +135,108 @@ INLINE_OUTPUT_RULE = """
 
 
 # ============================================================
+
+# 开篇起手式多样化守则（2026-09-19）：真实产物统计——经典模式最近 22 篇里 20 篇，
+# 最近 20 篇 100%，都以「我」字开头，且高度同构（"我撬开丈夫的抽屉" / "我把离婚协议
+# 放在茶几上" / "我数了数…"）。根因不是模型能力，而是守则叠加把开头挤成了唯一解：
+#   第一人称声口（本守则第 6 条 + 作者签名里的"第一人称内心OS"）
+# + 引言一票否决（正文第一行必须直接是故事正文）
+# + 禁止空镜开场 / 第一行直接进入动作或对话
+# → 模型最省力的合规解就是「我 + 强动作/物件/数字」。参考素材本身只有 23% 是「我」
+#   开头（1968 篇实测 42%），不是参考带偏的；纯净模式（不注入本守则）只有 33%。
+# 本守则只约束"起手式"，不放宽任何格式门槛（引言仍必须第一行是正文）。
+OPENING_VARIETY_RULE = """
+
+## 开篇起手式多样化（硬性，优先级高于作者签名里的"第一人称"表述）
+
+作者签名与上面的守则说的是"声口与人称偏好"，不是"每篇都必须用「我」字起手"。
+同一账号连续产出的文章，开篇首句必须换着来：**不许把「我 + 强动作/物件/数字」
+当成默认模板**（"我撬开丈夫的抽屉""我把离婚协议放在茶几上""我数了数……"都是同构）。
+
+引言第一句从下面几种起手式里挑，同一批产出不要连续重复同一种（本篇具体用哪种，
+见 prompt 末尾的「本篇指定的开篇起手式」；那里指定了就照它写）：
+
+1. **对话起手**：第一句就是一句带引号的对话，人物身份下一句再交代。
+   例：「你要是敢走，我就把这房子点了。」
+2. **他人起手**：用他人（他/她/身份称呼）的动作或状态开场，主角随事件入画。
+   例：她把离婚协议推过来的时候，手指在抖。
+3. **物件起手**：从一个具体东西切入，用它带出冲突，同一句里必须有人或动作。
+   例：床头柜上那只蓝边搪瓷碗缺了一角，他用了十年没换。
+4. **时间/数字断语起手**：用时间点、次数或事实陈述开场，不要写成"我数了数"。
+   例：第十七年，他还没喝过我送的那杯咖啡。
+5. **反差断语起手**：先给一句反常识的判断，再用事件撑住它。
+   例：这世上最狠的报复，是替一个人把烂摊子全背下来。
+
+- 第一人称叙述本身允许保留（这是本赛道的常态），但**引言第一句不要以「我」字
+  开头**；确实需要第一人称时，把人称放到第二句，第一句先给对话/他人/物件/时间。
+- 引言其余要求不变：3-8 句、60-300 字，先抛冲突再展开；第一行仍然必须是故事正文
+  （不得是章节标题、标签、分割线）。
+- 每种起手式的第一段内都要出现人（我/他/她/身份称呼）或对话，避免被判"空镜开场"。"""
+
+
+# 起手式轮换表：按顺序分配给同一进程里连续生成的每一篇，保证一次运行内不重样。
+# 每项 = (短标签, 给模型的硬要求)。
+OPENING_STYLES = (
+    ("对话起手",
+     "引言第一句必须是一句带引号的对话（以「开头），且不得以「我」字开头；"
+     "说话人身份放到第二句再交代。"),
+    ("他人起手",
+     "引言第一句必须以他人（他/她/身份称呼）的动作或状态开场，主角在第二、三句入画；"
+     "第一句不得以「我」字开头。"),
+    ("物件起手",
+     "引言第一句必须从一个具体物件切入（一件东西、一张纸、一只碗、一份病历…），"
+     "同一句里就要有人或动作，不得以「我」字开头。"),
+    ("时间/数字断语起手",
+     "引言第一句用时间点、次数或事实陈述开场（如「第十七年，…」），"
+     "不要写成「我数了数」这类以「我」起手的句式。"),
+    ("反差断语起手",
+     "引言第一句先给一句反常识的判断或结论（不许用「人这一生」「这世上」开头的空话），"
+     "紧接第二句用具体事件撑住它；不得以「我」字开头。"),
+)
+
+_OPENING_LOCK = threading.Lock()
+_OPENING_CURSOR = 0
+
+
+def next_opening_style():
+    """取下一个起手式（进程内轮换，多线程安全）。
+
+    一次运行里的每篇故事都调用一次 → 第 1 篇对话起手、第 2 篇他人起手……
+    到末尾回环，保证同一批产出不重样（各篇之间互不可见，只能靠外部轮换）。
+    """
+    global _OPENING_CURSOR
+    with _OPENING_LOCK:
+        style = OPENING_STYLES[_OPENING_CURSOR % len(OPENING_STYLES)]
+        _OPENING_CURSOR += 1
+    return style
+
+
+def peek_opening_cursor():
+    """当前轮换位置（只读，测试/日志用）。"""
+    with _OPENING_LOCK:
+        return _OPENING_CURSOR
+
+
+def reset_opening_cursor():
+    """把轮换位置复位（测试用）。"""
+    global _OPENING_CURSOR
+    with _OPENING_LOCK:
+        _OPENING_CURSOR = 0
+
+
+def render_opening_instruction(style):
+    """把指定的起手式渲染成本篇的硬要求块（prompt 末尾、醒目位置）。"""
+    if not style:
+        return ""
+    label, requirement = style
+    return ("\n\n## 本篇指定的开篇起手式（硬性，与作者签名的第一人称声口不冲突）\n\n"
+            "- 起手式：**%s**\n"
+            "- %s\n"
+            "- 第一句必须是故事正文（不得是章节标题/标签/分割线），引言 3-8 句、60-300 字。\n"
+            "- 先满足本条，再谈其余风格；作者签名约束的是声口与节奏，不是「每篇我起手」。") % (
+                label, requirement)
+
+
 # 发布前自检（与 core.story_text.validate_story_format 扣分点一一对应）
 # 生成结束前自查一遍：任何一项不满足都会在格式检测被扣分重试（8/29
 # 复盘：引言缺失/量化堆砌/环境空镜/章节不足是废稿与重试的主要来源）。
@@ -145,6 +248,8 @@ FORMAT_SELF_CHECK_RULE = """
    绝不能是章节标题（如 `## **1**`）、分割线，也不要写"引言/引子"标签；
    第一行若直接是章节标题即判缺少引言、整篇不合格（一票否决）。
    引言 3-8 句、60-300 字，先抛冲突再展开。
+   ★ 起手式：按 prompt 末尾「本篇指定的开篇起手式」写，引言第一句不得默认
+   落回「我 + 强动作/物件/数字」的老模板（同一账号篇篇这样开头，读者一眼看出是机器批量产的）。
 2. 章节：全篇用 "## **N**" 分节（N 为 1、2、3...），至少 6 节，
    每节 500-800 字；节内用短段落（单段不超过 150 字）。
 3. 量化克制：不要堆数字（一年、三百六十五天式换算罗列禁止）；
@@ -225,7 +330,7 @@ def _render_retry_feedback(feedback):
 
 def build_story_prompt(question_title, reference_answer=None, recipe=None,
                        meta_knowledge=None, author_profile=None,
-                       feedback=None):
+                       feedback=None, opening_style=None, rotate_opening=True):
     """
     根据 STORY_MATERIAL_MODE 构建故事生成 prompt。
 
@@ -248,6 +353,9 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         feedback:          重试修正反馈（可选）。str 或 str 列表，是上一版故事的
                           失败原因；非空时在 prompt 末尾渲染成「必须修正」段，
                           供模型针对性重写。
+        opening_style:     指定本篇的开篇起手式（OPENING_STYLES 里的一项）；
+                          默认 None = 按轮换自动取下一个（防篇篇「我」字起手）。
+        rotate_opening:    False 时不注入起手式（单测/特殊场景用）。
 
     返回：(user_message, mode_str)
     """
@@ -442,11 +550,30 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
             log.warning(f"  [作者风格注入] 渲染失败，跳过：{e}")
     mode_str = mode_str + author_tag
 
+    # === 开篇起手式多样化（公共：经典/常规链路生效；纯净模式刻意不注入） ===
+    # 真实产物统计（2026-09-19）：经典模式最近 22 篇里 20 篇以「我」字开头，
+    # 最近 20 篇 100% 同构（我+强动作/物件/数字）。守则叠加把开头挤成了唯一解，
+    # 这里按篇轮换指定起手式——各篇生成互相看不见，只能靠外部轮换保证不重样。
+    try:
+        from config.story import OPENING_VARIETY
+    except Exception:      # 配置缺失时按开启处理（防回归成同构）
+        OPENING_VARIETY = True
+    _opening = None
+    if OPENING_VARIETY:
+        _opening = opening_style or (next_opening_style() if rotate_opening
+                                    else None)
+
     # === 问题优先 + 命名约束 + 行文去AI味守则 + 发布前自检（公共：所有模式生效） ===
     user_message += QUESTION_FIRST_RULE
     user_message += NAMING_CONSTRAINT
     user_message += DEAI_STYLE_RULE
+    if _opening:
+        user_message += OPENING_VARIETY_RULE
     user_message += FORMAT_SELF_CHECK_RULE
+    if _opening:
+        # 指定起手式放在公共守则之后（越靠后越醒目），并写进 mode_str 便于日志核对
+        user_message += render_opening_instruction(_opening)
+        mode_str += f" · 起手式:{_opening[0]}"
     user_message += INLINE_OUTPUT_RULE
 
     # === 重试修正反馈（如有：放在最末尾，最醒目，模型应先读到它） ===

@@ -93,6 +93,10 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 - Python 环境：一律用 .venv/Scripts/python，不用 miniconda 裸 python
 - 行尾：仓库文件多 CRLF（编辑工具默认 LF），改完大文件用脚本归一化行尾；bat 必须纯 ASCII（中文注释会因 GBK 崩）
 - 写入文件的坑：DSH 模板字面量会把反引号、${}、\n 吞噬——写含这些的文件时避免或转义；前/后端 JS 用 node --check 验证
+- 开篇同质化：写作守则叠加（第一人称声口 + 引言一票否决 + 禁空镜开场 + 首句进动作）
+  会把开头挤成唯一解「我+动作」（2026-09-19 实测经典模式最近 22 篇 20 篇如此、最近
+  20 篇 100%）。对策 = story_prompt 的 OPENING_VARIETY_RULE + 按篇轮换起手式，
+  开关 config/story.py 的 OPENING_VARIETY；纯净模式刻意不注入
 - 网页端正文提取：markdown 会被渲染成 DOM（`## **N**` → h2），只读 innerText 必丢
   章节语法 → 一律走 base.MARKDOWN_REBUILD_JS 逐块重建；判「生成完成」前查末尾是否
   停在章节标题（base/豆包已有判据）；格式校验只认文本形态，别让通道差异背锅
