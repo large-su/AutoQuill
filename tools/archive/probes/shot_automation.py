@@ -106,7 +106,20 @@ def main():
             blocks = pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-block').length")
             png = outdir / "auto_timeline.png"
             pg.screenshot(path=str(png), full_page=False)
+            # 左侧控制台通常比一屏高（任务配额 / 按钮在下面）——再拍一张滚到底的，
+            # 否则「演练发布」这类新按钮在截图里永远看不到（一次性验收会漏）
+            pg.evaluate("""() => {
+              // 真正能滚的是 #pane-automation 的某个祖先（左栏），逐层找一个能滚的
+              let el = document.getElementById('pane-automation');
+              while (el && el.scrollHeight <= el.clientHeight) el = el.parentElement;
+              if (el) el.scrollTop = el.scrollHeight;
+              return el ? (el.className || el.tagName) : '';
+            }""")
+            pg.wait_for_timeout(400)
+            png2 = outdir / "auto_timeline_console.png"
+            pg.screenshot(path=str(png2), full_page=False)
             print("POINTS: lanes=%d blocks=%d console_errors=%d" % (lanes, blocks, len(errors)))
+            print("screenshot(console):", png2)
             for e in errors[:5]:
                 print("  console error:", e[:160])
             print("screenshot:", png)

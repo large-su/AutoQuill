@@ -34,12 +34,18 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 ## 3. 架构地图（核心模块）
 
-- automation/：**自动化模块**（2026-09-19 新增，M1）——24 小时时间轴调度，无人化运营：
+- automation/：**自动化模块**（2026-09-19 新增，M1 骨架 + M2 发布草稿）——24 小时时间轴调度，无人化运营：
   model（任务类型契约/计划默认值）· store（计划/当日排班/台账，原子写）· planner（排班：
   配额/时段/≥1h 随机间隔/去碰撞/错过补做/失败补位）· scheduler（tick、串行、幂等、熔断、
   暂停/停止）· executor（复用 TaskRunner，不直接碰 DOM）。运行数据在
   `data/state/automation/`（已 gitignore）；API 见 webui/automation_api.py；前端独立文件
   `webui/static/automation.js` + `/automation.js` 路由。规划见 docs/AUTOMATION-PLAN.md
+  · **任务 A 发布草稿（M2，2026-09-19）**：真机探针确认草稿箱 DOM（卡片
+  `.CreationManage-CreationCard`，DOM 顺序 = 编辑于倒序、**最旧的在最后**；编辑入口
+  `a[href*="#write"]`；发布按钮文本「发布回答」）→ `browser_write.list_draft_cards()` /
+  `publish_draft()`（qid 空 = 发最旧一篇；校验 URL `/answer/<aid>` 或服务端草稿清空）。
+  护栏：空草稿箱记「跳过」而非失败（防空跑触发熔断）、登录失效转 NeedHuman 暂停全自动化、
+  失败不自动重试、`run-now {dry_run:true}` 演练只探按钮不点发布（前端「演练发布」按钮）
 - webui/server.py：Web 控制台入口（路由注册 + TaskRunner + watchdog + 日志/SSE + 设置/状态）
 - webui/browser_tasks.py：看板/草稿箱四个后台任务状态字典 + browser_busy() 互斥（共用同一浏览器 profile，必须串行）
 - webui/dashboard_api.py / drafts_api.py：看板 / 草稿箱路由（register 模式挂到 server app）
@@ -48,7 +54,7 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 - workflows/base.py：单轮/批量/纯净模式编排（run_single / run_batch / run_clean；批量阶段：收集 → 大模型问题筛选 → 生成 → 评分 → 发布）
 - workflows/zhihu.py：知乎 DOM 实现（选题规则+评分、并行提取候选取最优、纯净模式 select_topic_clean / extract_content_clean、发布写草稿）
 - core/originality.py：纯净模式「洗稿/抄袭 + 段落长度分布」对比审核（本地相似度 + LLM 判定，Paragraph 属纯数学）
-- applications/zhihu_story/：browser_adapter（登录/爬取/删除）、author_profiler（文风蒸馏）、prompts.py（系统/评分/筛选提示词）
+- applications/zhihu_story/：browser_adapter（登录/爬取/删除；browser_write 拆分出写操作通道——含 publish_story 写草稿与 publish_draft 发布草稿）、author_profiler（文风蒸馏）、prompts.py（系统/评分/筛选提示词）
 - web_drivers/：Web 通道（browser_pool 共享浏览器、deepseek.py DOM 驱动、parallel.py 并行调度、base.py 驱动基类）。
   2026-09 已适配 DeepSeek 官网改版：无模式/开关切换（用默认态）、多轮读取用
   「发送前打锚点 → 只读锚点之后的新消息」防读旧回复、会话删除走
@@ -102,7 +108,7 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 
 ## 5. 约定与常见坑（改代码前必读）
 
-- 测试：改完先 python tests/run_all.py（514 例，浏览器依赖类自动跳过）；前端改动跑 python tools/auto_test.py；发版用 build_release.py；完整手册见 docs/QA-PLAYBOOK.md
+- 测试：改完先 python tests/run_all.py（605 例，浏览器依赖类自动跳过）；前端改动跑 python tools/auto_test.py；发版用 build_release.py；完整手册见 docs/QA-PLAYBOOK.md
 - Python 环境：一律用 .venv/Scripts/python，不用 miniconda 裸 python
 - 行尾：仓库文件多 CRLF（编辑工具默认 LF），改完大文件用脚本归一化行尾；bat 必须纯 ASCII（中文注释会因 GBK 崩）
 - 写入文件的坑：DSH 模板字面量会把反引号、${}、\n 吞噬——写含这些的文件时避免或转义；前/后端 JS 用 node --check 验证

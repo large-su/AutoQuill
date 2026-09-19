@@ -40,6 +40,9 @@ data/state/automation/
 __pycache__/
 *.pyc
 
+# 测试临时目录（tests/test_user_feedback.py 在工作区根下建，带 pid）
+_tmp_fb_test*/
+
 # 草稿记录（含历史 API Key 备注）
 config/1.txt
 

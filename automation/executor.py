@@ -75,6 +75,71 @@ def _full_chain(job, should_stop=None, progress=None):
     }
 
 
+def _publish_drafts(job, should_stop=None, progress=None):
+    """发布草稿箱里最旧的一篇（不可逆：草稿变公开回答）。
+
+    复用 applications/zhihu_story/browser_write.publish_draft（真机探针确认的 DOM：
+    草稿列表 → 编辑页 → 「发布回答」→ 确认弹窗 → 校验）。
+    失败不自动重试（不可逆动作），交给调度器的熔断与人工介入；
+    登录失效统一转成 NeedHuman，避免把「未登录」误判成发布失败而反复重试。
+    """
+    from applications.zhihu_story.browser_adapter import (
+        LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired, page_needs_login,
+    )
+    busy = _browser_busy()
+    if busy:
+        raise BrowserBusy("浏览器被占用：" + "、".join(busy))
+    b = ZhihuBrowser(headless=True)
+    try:
+        b.start()
+        if page_needs_login(b.page):
+            # 统一成语义异常：调度器收到 NeedHuman 会暂停全部自动化并通知
+            raise NeedHuman(LOGIN_EXPIRED_MSG)
+        params = job.get("params") or {}
+        qid = str(params.get("qid") or "")
+
+        def _say(text):
+            """浏览器层只回报文本；这里转成调度器的状态字典（界面据此显示进度）。"""
+            if progress:
+                try:
+                    progress({"message": text})
+                except Exception:      # noqa: BLE001
+                    pass
+
+        r = b.publish_draft(qid=qid, progress=_say,
+                            dry_run=bool(job.get("dry_run")))
+    except ZhihuLoginRequired as exc:
+        raise NeedHuman(str(exc))
+    finally:
+        try:
+            b.close()
+        except Exception:          # noqa: BLE001
+            pass
+    ok = bool(r.get("ok"))
+    if not ok and r.get("reason") == "dry_run":
+        # 演练：走完「找草稿 → 开编辑页 → 确认发布按钮」，绝不点发布。
+        # 通过记跳过（不是发布成功，也不占配额）；未通过才是真问题。
+        return {"ok": False, "units": 0,
+                "status": (STATUS_SKIPPED if r.get("rehearsed")
+                           else STATUS_FAILED),
+                "message": r.get("detail") or "演练完成（未发布）",
+                "artifacts": []}
+    if not ok and r.get("reason") == "empty":
+        # 草稿箱空 = 今天没有可发的，记「跳过」：不计失败、不触发熔断，
+        # 也不占用当日配额（done_counts 只累加 status=done 的 units）。
+        return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
+                "message": r.get("detail") or "草稿箱里没有待发布的草稿",
+                "artifacts": []}
+    return {
+        "ok": ok,
+        "units": 1 if ok else 0,
+        "status": STATUS_DONE if ok else STATUS_FAILED,
+        "message": ("已发布《%s》" % r.get("title")) if ok
+                   else (r.get("detail") or "发布未确认"),
+        "artifacts": [r.get("url")] if r.get("url") else [],
+    }
+
+
 def _unimplemented(job, should_stop=None, progress=None):
     """留接口的任务类型（打卡 / 感谢 / 评论回复 / 草稿发布未接入时）。"""
     from automation.model import task_label
@@ -85,7 +150,7 @@ def _unimplemented(job, should_stop=None, progress=None):
 
 _HANDLERS = {
     "full_chain": _full_chain,
-    "publish_drafts": _unimplemented,
+    "publish_drafts": _publish_drafts,
     "checkin": _unimplemented,
     "thank": _unimplemented,
     "reply_comment": _unimplemented,

@@ -261,7 +261,17 @@ def test_frontend(port):
                   and pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-legend span').length") >= 6)
             check("自动化控制与任务配置",
                   pg.evaluate("() => !!document.getElementById('autoStartBtn')"
+                              + " && !!document.getElementById('autoDryRunBtn')"
                               + " && document.querySelectorAll('#autoTaskConfig .auto-task').length >= 2"))
+            # M2：发布草稿必须从「待接入」变成可用（泳道能派活、配额可调）
+            check("自动化发布草稿已接入",
+                  pg.evaluate("() => {"
+                              + " const rows = Array.from(document.querySelectorAll('#autoTaskConfig .auto-task'));"
+                              + " const pub = rows.find(r => r.innerText.indexOf('发布草稿') >= 0);"
+                              + " if (!pub) return false;"
+                              + " const box = pub.querySelector('input[type=checkbox]');"
+                              + " return !!box && !box.disabled && pub.innerText.indexOf('待接入') < 0;"
+                              + " }"))
             check("自动化进度卡",
                   pg.evaluate("() => document.querySelectorAll('#autoProgress .auto-pcard').length") >= 2)
 

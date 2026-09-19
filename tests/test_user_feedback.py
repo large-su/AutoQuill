@@ -8,9 +8,11 @@ from unittest import mock
 from core import user_feedback
 
 # 临时目录建在工作区根下（沙箱禁止写系统 %TEMP%，且 tempfile 创建
-# 的目录也会被沙箱拦截写入，故用固定工作区路径 + os.makedirs）
+# 的目录也会被沙箱拦截写入，故用工作区路径 + os.makedirs）。
+# 目录名带 pid：本机可能同时跑两份测试（tools/auto_test.py 内部也会跑一遍
+# 全量），固定路径会互相踩 → 出现「6 != 2」这种假失败。
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_TMP_DIR = os.path.join(_ROOT, "_tmp_fb_test")
+_TMP_DIR = os.path.join(_ROOT, "_tmp_fb_test_%d" % os.getpid())
 
 
 class UserFeedbackTest(unittest.TestCase):

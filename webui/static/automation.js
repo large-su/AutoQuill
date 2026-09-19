@@ -375,6 +375,10 @@ function initAutomationPanel() {
     autoPost(paused ? "/api/automation/resume" : "/api/automation/pause");
   });
   $("autoRunNowBtn").addEventListener("click", function () { autoPost("/api/automation/run-now", {}); });
+  // 演练：走完「找草稿 → 开编辑页 → 确认发布按钮」，不点发布（不可逆动作先验证）
+  $("autoDryRunBtn").addEventListener("click", function () {
+    autoPost("/api/automation/run-now", { type: "publish_drafts", dry_run: true });
+  });
   $("autoRefreshBtn").addEventListener("click", loadAutomation);
   ["autoWinStart", "autoWinEnd", "autoMinGap", "autoGapRatio", "autoJitter",
    "autoCatchUp", "autoPauseBusy"].forEach(function (id) {

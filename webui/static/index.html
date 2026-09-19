@@ -134,7 +134,10 @@
         <h2><span class="badge">☰</span>任务与配额</h2>
         <div id="autoTaskConfig"><div class="empty-note">加载中…</div></div>
         <div class="auto-actions">
-          <button class="btn ghost" id="autoRunNowBtn">立即执行下一个</button>
+          <button class="btn ghost" id="autoRunNowBtn"
+                  title="把排班里最近的一个作业提前到现在执行——如果是发布草稿，就是真的发布（不可逆）">立即执行下一个</button>
+          <button class="btn ghost" id="autoDryRunBtn"
+                  title="只走到「发布回答」按钮前就停下，不点击、不公开——首次验证发布链路用">演练发布</button>
           <button class="btn ghost" id="autoRefreshBtn">刷新状态</button>
         </div>
       </div>

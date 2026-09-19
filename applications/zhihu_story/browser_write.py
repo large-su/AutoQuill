@@ -121,6 +121,149 @@ class WriteActionsMixin:
         except Exception as e:
             log.warning("browser_adapter: 页面状态 dump 失败[%s]: %s", tag, e)
 
+    # ---------------- 发布草稿（自动化 M2；2026-09-19 真机探针确认的 DOM） ----------------
+    # 真实链路：草稿箱列表（DOM 顺序 = 「编辑于」倒序，**最旧的在最后一张**）
+    #   → 打开该草稿的编辑页（/question/<qid>#write，编辑器内已带草稿正文）
+    #   → 点编辑器主按钮「发布回答」（Button--primary Button--blue）
+    #   → 若弹出发布设置/确认弹窗，点其中的「发布/确认发布/确定」
+    #   → 校验：URL 变成 /question/<qid>/answer/<aid>，或服务端草稿 API 已无内容
+    # 探针结论（tools/archive/probes/probe_draft_publish.py）：列表卡片 12 张、
+    # 编辑页 has_editor=True、按钮文案「发布回答」、旁边有「发布设置」。
+    _DRAFT_URL = "https://www.zhihu.com/creator/manage/creation/draft?type=answer"
+
+    _DRAFT_CARDS_JS = r"""() => Array.from(
+        document.querySelectorAll('.CreationManage-CreationCard')).map((c, i) => {
+      const a = c.querySelector('a[href*="/question/"][href*="#write"]');
+      const t = c.querySelector('.CreationCardTitle-wrapper');
+      const m = a ? a.href.match(/question\/(\d+)/) : null;
+      return {index: i, qid: m ? m[1] : '', href: a ? a.href : '',
+              title: t ? (t.innerText || '').trim() : ''};
+    })"""
+
+    # click=False 用于演练：只确认按钮在，不点（发布不可逆，演练绝不点）
+    _PUBLISH_BTN_JS = """(click) => {
+      const clean = s => (s || '').replace(/[\u200b-\u200d\ufeff]/g, '').trim();
+      const hit = Array.from(document.querySelectorAll('button'))
+          .find(b => clean(b.innerText) === '发布回答' && b.offsetParent !== null);
+      if (!hit) return false;
+      if (click) hit.click();
+      return true;
+    }"""
+
+    _PUBLISH_CONFIRM_JS = r"""() => {
+      const clean = s => (s || '').replace(/[\u200b-\u200d\ufeff]/g, '')
+          .replace(/\s+/g, '').trim();
+      const modals = Array.from(document.querySelectorAll(
+          '[class*=Modal],[role=dialog]')).filter(m => m.offsetParent !== null);
+      for (const m of modals) {
+        const hit = Array.from(m.querySelectorAll('button')).find(b =>
+            /^(确认发布|确定发布|发布|确认|确定)$/.test(clean(b.innerText))
+            && b.offsetParent !== null);
+        if (hit) { hit.click(); return clean(hit.innerText); }
+      }
+      return '';
+    }"""
+
+    def list_draft_cards(self):
+        """打开草稿箱并返回卡片列表（DOM 顺序 = 「编辑于」倒序，最后一张最旧）。"""
+        self.page.goto(self._DRAFT_URL, wait_until="domcontentloaded",
+                       timeout=_NAV_TIMEOUT * 1000)
+        time.sleep(5)
+        for _ in range(6):          # 滚动加载（列表分页/懒加载）
+            self._safe_evaluate(
+                "() => { window.scrollTo(0, document.body.scrollHeight); return true; }")
+            time.sleep(1.2)
+        return self._safe_evaluate(self._DRAFT_CARDS_JS) or []
+
+    def publish_draft(self, qid="", verify_timeout=90, progress=None, dry_run=False):
+        """发布草稿箱里的一篇草稿（qid 为空 = 发布**最旧**的一篇）。
+
+        返回 {"ok", "qid", "title", "url", "detail"}；草稿箱为空时
+        额外带 "reason": "empty"，便于调用方与真正的发布失败区分。
+
+        dry_run=True 只做演练：定位草稿 → 打开编辑页 → 确认「发布回答」按钮存在，
+        **不点击**，返回 reason="dry_run"（供首次验证链路，不会真的公开）。
+
+        ★ 不可逆（草稿变公开回答）：调用方必须先取得用户授权（自动化模块只在
+          计划里声明的数量/顺序下调用，且失败不盲目重试）。
+        """
+        def _say(text):
+            """进度回调只传文本：调度器/界面各自决定怎么呈现（本层不碰 UI 结构）。"""
+            log.info("browser_adapter: %s", text)
+            if progress:
+                try:
+                    progress(text)
+                except Exception:      # noqa: BLE001
+                    pass
+
+        _say("打开草稿箱…")
+        cards = self.list_draft_cards()
+        _say("草稿箱可见 %d 篇草稿" % len(cards))
+        target = None
+        if qid:
+            target = next((c for c in cards if str(c.get("qid")) == str(qid)), None)
+        elif cards:
+            target = cards[-1]        # 倒序列表的最后一张 = 最旧
+        if not target:
+            # reason=empty：调度器据此记「跳过」而不是「失败」——
+            # 草稿箱空是正常状态（今天还没写、或已发完），不该触发熔断。
+            return {"ok": False, "reason": "empty", "qid": "", "title": "",
+                    "url": "",
+                    "detail": "草稿箱里没有可发布的草稿" + ("（找不到 qid=%s）" % qid if qid else "")}
+        _say("准备发布最旧的一篇：《%s》" % (target.get("title") or target.get("qid")))
+        self.page.goto(target["href"], wait_until="domcontentloaded",
+                       timeout=_NAV_TIMEOUT * 1000)
+        time.sleep(6)
+        # 等编辑器就绪（草稿正文可能还在异步填充）
+        for _ in range(10):
+            ready = self._safe_evaluate(
+                "() => !!document.querySelector('.public-DraftEditor-content')")
+            if ready:
+                break
+            time.sleep(1.5)
+        if not self._safe_evaluate(self._PUBLISH_BTN_JS, not dry_run):
+            detail = "编辑器里没找到「发布回答」按钮（可能草稿还在加载/页面改版）"
+            if dry_run:
+                return {"ok": False, "reason": "dry_run", "rehearsed": False,
+                        "qid": target.get("qid", ""),
+                        "title": target.get("title", ""),
+                        "url": self.page.url or "", "detail": "演练未通过：" + detail}
+            return {"ok": False, "qid": target.get("qid", ""),
+                    "title": target.get("title", ""), "url": self.page.url or "",
+                    "detail": detail}
+        if dry_run:
+            _say("演练通过：已定位《%s》与「发布回答」按钮（未点击）"
+                 % (target.get("title") or target.get("qid")))
+            return {"ok": False, "reason": "dry_run", "rehearsed": True,
+                    "qid": target.get("qid", ""),
+                    "title": target.get("title", ""),
+                    "url": self.page.url or "",
+                    "detail": "演练通过：草稿箱 %d 篇，将发最旧的一篇《%s》，未点击发布"
+                              % (len(cards), target.get("title") or target.get("qid"))}
+        _say("已点「发布回答」，等待确认…")
+        time.sleep(2)
+        confirm = self._safe_evaluate(self._PUBLISH_CONFIRM_JS) or ""
+        if confirm:
+            _say("已确认发布弹窗（%s）" % confirm)
+        deadline = time.time() + verify_timeout
+        while time.time() < deadline:
+            url = self.page.url or ""
+            m = re.search(r"/answer/(\d+)", url)
+            if m:
+                _say("发布成功：%s" % url)
+                return {"ok": True, "qid": target.get("qid", ""),
+                        "title": target.get("title", ""), "url": url,
+                        "detail": "页面已跳到回答页"}
+            if not self.get_draft_content():
+                _say("发布成功（服务端草稿已清空）")
+                return {"ok": True, "qid": target.get("qid", ""),
+                        "title": target.get("title", ""), "url": url,
+                        "detail": "服务端草稿已清空（已发布）"}
+            time.sleep(2)
+        return {"ok": False, "qid": target.get("qid", ""),
+                "title": target.get("title", ""), "url": self.page.url or "",
+                "detail": "已点发布，但 %ds 内未确认到结果（请人工核对）" % verify_timeout}
+
     def publish_story(self, story, question_url=None, max_wait=60):
         """发布（编辑器写回答通道）：打开编辑器 → 清空旧草稿 → 富文本粘贴。
 

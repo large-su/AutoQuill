@@ -15,8 +15,8 @@
   顺延、不算失败）；**随时可停**，再次开始时按台账统计「今天已发布/已写多少」只补差额；
   失败当日补位（最多补 2 次），连续失败 3 次自动熔断该类任务并通知；登录失效/通道未配置
   → 暂停全部自动化并提示（不硬闯）
-- **首批任务**：**全链路撰写**已可用（复用经典/纯净完整链路，一次作业 = 一篇）；
-  发布草稿（草稿箱按「从旧到新」发布）、打卡挑战、感谢赞同/喜欢、回复评论只登记契约，
+- **首批任务**：**全链路撰写**（复用经典/纯净完整链路，一次作业 = 一篇）与
+  **发布草稿**（M2，见下节）已可用；打卡挑战、感谢赞同/喜欢、回复评论只登记契约，
   UI 显示「待接入」，按里程碑逐个接入
 - **可视化**（`webui/static/automation.js` + style.css）：24 小时刻度 + 每类任务一条泳道 +
   状态配色（待执行/执行中/已完成/失败/已跳过/需要人工）+ 「现在」指针 + 运行时段底纹；
@@ -33,9 +33,38 @@
 - 新增 `tools/archive/probes/shot_automation.py`：独立数据目录 + 造当天排班 → 截图时间轴
   （改样式后一眼验收，产物 data/cleanup/auto_timeline.png）
 
+### 新功能：自动化 M2 —— 发布草稿（真机探针 + 发布链路 + 演练模式）
+- **真机探针**（`tools/archive/probes/probe_draft_publish.py`，只读）：草稿箱
+  `https://www.zhihu.com/creator/manage/creation/draft?type=answer` 实测 12 张草稿卡
+  （`.CreationManage-CreationCard`，DOM 顺序 = 「编辑于」倒序，**最旧的在最后一张**），
+  每张卡的编辑入口是 `a[href*="/question/"][href*="#write"]`；编辑页容器
+  `#AnswerFormPortalContainer` / `#js-answerAddCard`、`DraftEditor-content` 可等；
+  发布按钮 = `BUTTON` 文本**「发布回答」**（`Button--primary Button--blue`），旁边另有
+  「发布设置」；弹窗容器 `ModalLoading-content`；抓到的接口路径
+  `/api/v4/content/publish`、`/api/v4/answers/`、`/api/v4/questions/<qid>/draft`。
+  结论落盘 `data/cleanup/draft_publish_probe_*.json`（本机运行数据，不入库）
+- **发布链路**（`applications/zhihu_story/browser_write.py`）：`list_draft_cards()` +
+  `publish_draft()`——草稿箱列表 → 打开目标草稿编辑页 → 等编辑器 → 点「发布回答」→
+  有确认弹窗就点（确认发布/确定）→ 校验（URL 变成 `/answer/<aid>` **或**服务端草稿 API
+  已清空）；**qid 为空 = 发最旧的一篇**（与用户口径「从旧到新」一致）
+- **安全护栏**：① **空草稿箱 = 跳过，不算失败**（不触发熔断、不占当日配额，也避免
+  「机器一开机就三连失败把自己停掉」）；② **登录失效 → 暂停全部自动化并通知**，绝不
+  误判成发布失败反复重试；③ **发布失败不自动重试**（不可逆动作只补位一次、留给人工核对）；
+  ④ **演练模式**：左侧「演练发布」按钮走完「找草稿 → 开编辑页 → 确认发布按钮」，
+  **不点发布**，用于首次验证链路（`POST /api/automation/run-now {type, dry_run:true}`）；
+  **发布任务没启用/配额用完也能演练**（临时造一次性演练作业，units=0 不占配额），
+  报告里带「草稿箱 N 篇 / 将发最旧的一篇《…》」方便人工核对
+- **接线**：`automation/executor.py::_publish_drafts`（无头浏览器按需拉起、用完即关；
+  浏览器被手动任务占用则顺延）+ `TASK_TYPES["publish_drafts"]["implemented"]=True`，
+  时间轴泳道由「待接入」变为可派活；同一时刻撞车时发布优先（对外可见动作落在白天）
+- **测试**：新增 `tests/test_automation_publish.py` 18 例（最旧优先的选择、空箱跳过、
+  按钮缺失、演练不点击、执行器结果归一、登录失效转「需要人工」、浏览器占用顺延、
+  排班接入）；`tools/auto_test.py` 增加「发布草稿已接入」（不再是「待接入」）检查；
+  全量 `tests/run_all.py` **605 例 0 失败**；`tools/auto_test.py` **28/28 通过**
+- 顺手修：`tests/test_user_feedback.py` 的临时目录固定在工作区根下，本机同时跑两份
+  全量测试（`auto_test.py` 内部也会跑）会互相踩出「6 != 2」假失败 → 目录名带 pid
+
 ### 待办（自动化后续里程碑）
-- **M2 发布草稿**：真机探针确认「草稿编辑页 → 发布 → 确认弹窗 → 校验已发布」的 DOM，
-  接入后按「从旧到新」发布并注入任务（用户第一优先项）
 - **M4 托盘常驻**：关窗最小化到托盘（pywebview WinForms NotifyIcon 先做 spike）、
   可选开机自启（默认关闭）
 - **M3 互动类**：打卡挑战 / 感谢赞同喜欢 / 评论回复（按 M0 探针结论接入；评论回复默认

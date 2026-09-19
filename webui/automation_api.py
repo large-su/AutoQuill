@@ -25,6 +25,7 @@ class _PlanBody(BaseModel):
 
 class _RunNowBody(BaseModel):
     type: str = ""
+    dry_run: bool = False       # 演练：只走到「发布回答」按钮前，不点（不可逆）
 
 
 class _PauseBody(BaseModel):
@@ -91,7 +92,7 @@ def api_automation_run_now(body: _RunNowBody):
     task_type = (body.type or "").strip()
     if task_type and task_type not in TASK_TYPES:
         raise HTTPException(400, "未知任务类型：%s" % task_type)
-    r = get_scheduler().run_now(task_type)
+    r = get_scheduler().run_now(task_type, dry_run=bool(body.dry_run))
     return {"ok": bool(r.get("ok")), "message": r.get("message", ""),
             "status": get_scheduler().status()}
 

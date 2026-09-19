@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from automation import planner, store
+from automation import model, planner, store
 from automation.executor import BrowserBusy, NeedHuman, execute
 from automation.planner import (
     STATUS_DONE, STATUS_FAILED, STATUS_NEEDS_HUMAN, STATUS_PLANNED,
@@ -277,8 +277,12 @@ class AutomationScheduler:
 
     # ---------------- 手动干预 ----------------
 
-    def run_now(self, task_type=""):
-        """立即执行：把队首（或指定类型的下一个）作业提前到现在。"""
+    def run_now(self, task_type="", dry_run=False):
+        """立即执行：把队首（或指定类型的下一个）作业提前到现在。
+
+        dry_run=True → 只演练（当前仅发布草稿支持：不点发布按钮），
+        用于用户首次验证链路，避免不可逆动作。
+        """
         now = self._now()
         day = now.strftime("%Y-%m-%d")
         plan = store.load_plan()
@@ -293,12 +297,30 @@ class AutomationScheduler:
                 continue
             if target is None or job["planned_at"] < target["planned_at"]:
                 target = job
+        if target is None and dry_run:
+            # 演练要能「先验证再启用」：发布草稿没启用/配额用完时，
+            # 也要能造一个一次性演练作业（units=0 → 不占配额，只是个探路者）。
+            task_type = task_type or "publish_drafts"
+            if task_type != "publish_drafts":
+                return {"ok": False, "message": "该任务类型暂不支持演练"}
+            seq = len([j for j in day_data.get("schedule", [])
+                       if ":rehearsal:" in str(j.get("key") or "")])
+            target = {"key": model.job_key(task_type, day, "rehearsal", seq),
+                      "type": task_type, "planned_at": "",
+                      "status": STATUS_PLANNED, "units": 0,
+                      "params": {}, "note": ""}
+            day_data.setdefault("schedule", []).append(target)
         if target is None:
             return {"ok": False, "message": "没有可提前执行的作业（配额已用完或该任务未启用）"}
         target["planned_at"] = (now + timedelta(seconds=3)).replace(microsecond=0).isoformat()
-        target["note"] = (target.get("note") or "") + "（手动立即执行）"
+        if dry_run:
+            target["dry_run"] = True
+            target["note"] = (target.get("note") or "") + "（演练：不会真的发布）"
+        else:
+            target["note"] = (target.get("note") or "") + "（手动立即执行）"
         self._save_day_if_changed(day, day_data)
-        self._push_notice("info", "已安排立即执行：%s" % target["type"])
+        self._push_notice("info", "已安排立即执行：%s%s"
+                          % (target["type"], "（演练）" if dry_run else ""))
         return {"ok": True, "job": target}
 
     # ---------------- 状态（给 UI） ----------------

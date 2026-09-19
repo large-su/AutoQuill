@@ -22,9 +22,9 @@ TASK_TYPES = {
         "label": "发布草稿",
         "unit": "篇",
         "lane": 0,
-        "implemented": False,          # M2：待接草稿发布 DOM 能力
+        "implemented": True,           # M2 已接入（2026-09-19 真机探针 + 发布链路）
         "default_cap": 3,
-        "desc": "从草稿箱按「从旧到新」逐篇发布（公开可见）",
+        "desc": "从草稿箱按「从旧到新」逐篇发布（公开可见，不可逆）",
         "params": {"order": "oldest_first", "source": "all"},
     },
     "full_chain": {

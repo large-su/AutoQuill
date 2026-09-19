@@ -16,12 +16,25 @@ from unittest import mock
 from core import paths
 from automation import planner, store
 from automation.executor import BrowserBusy, NeedHuman
-from automation.model import normalize_plan
+from automation.model import TASK_TYPES, normalize_plan
 from automation.scheduler import AutomationScheduler
 
 
+def _only(task_type, **cfg):
+    """只启用一个任务类型（其余全关）。
+
+    默认计划里 full_chain / publish_drafts 都是开启的（用户口径：撰写 3 + 发布 3），
+    单类型断言必须显式关掉其它类型，否则排班数量会被默认值污染。
+    """
+    tasks = {t: {"enabled": False, "daily_cap": 0} for t in TASK_TYPES}
+    tasks[task_type] = dict({"enabled": True}, **cfg)
+    return {"enabled": True, "tasks": tasks}
+
+
 def _plan(**tasks):
-    raw = {"enabled": True, "tasks": dict(tasks)}
+    raw = {"enabled": True,
+           "tasks": dict({t: {"enabled": False, "daily_cap": 0}
+                          for t in TASK_TYPES}, **tasks)}
     return normalize_plan(raw)
 
 
@@ -112,8 +125,7 @@ class SchedulerTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_s_"))
         self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
         self._p.start()
-        store.save_plan({"enabled": True,
-                         "tasks": {"full_chain": {"enabled": True, "daily_cap": 2}}})
+        store.save_plan(_only("full_chain", daily_cap=2))
         self.now = datetime(2026, 9, 20, 9, 0, 0)
         self.calls = []
         self.result = {"ok": True, "units": 1, "status": planner.STATUS_DONE,
@@ -178,8 +190,7 @@ class SchedulerTest(unittest.TestCase):
         self.assertTrue(any(n["level"] != "info" for n in st["notices"]))
 
     def test_circuit_breaker_disables_type_after_three_failures(self):
-        store.save_plan({"enabled": True,
-                         "tasks": {"full_chain": {"enabled": True, "daily_cap": 3}}})
+        store.save_plan(_only("full_chain", daily_cap=3))
         self.result = RuntimeError("模型无输出")
         # 失败会「当日补位」再试，最多补 2 次 → 第 3 次失败触发熔断；
         # 这里按 30 分钟步进反复 tick，直到熔断（或步数用尽）
@@ -202,6 +213,31 @@ class SchedulerTest(unittest.TestCase):
         self._advance(1)
         self.sched._tick()
         self.assertEqual(len(self.calls), 1)
+
+    def test_run_now_dry_run_is_marked_on_the_job(self):
+        """演练：作业上打 dry_run 标记（执行器据此只探测不点发布）。"""
+        store.save_plan(_only("publish_drafts", daily_cap=1))
+        r = self.sched.run_now("publish_drafts", dry_run=True)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["job"]["dry_run"])
+        self.assertIn("演练", r["job"]["note"])
+
+    def test_dry_run_works_even_when_publish_is_disabled(self):
+        """演练的意义是「先验证再启用」：发布没启用/配额用完也要能跑一次。"""
+        store.save_plan(_only("full_chain", daily_cap=1))    # 发布草稿未启用
+        r = self.sched.run_now("publish_drafts", dry_run=True)
+        self.assertTrue(r["ok"])
+        job = r["job"]
+        self.assertEqual(job["type"], "publish_drafts")
+        self.assertEqual(job["units"], 0)                   # 不占配额
+        self.assertTrue(job["dry_run"])
+        self.assertIn(":rehearsal:", job["key"])
+
+    def test_dry_run_rejects_types_without_rehearsal_support(self):
+        store.save_plan(_only("full_chain", daily_cap=1))
+        r = self.sched.run_now("checkin", dry_run=True)
+        self.assertFalse(r["ok"])
+        self.assertIn("不支持演练", r["message"])
 
     def test_paused_scheduler_does_not_execute(self):
         times = self._planned_times()
@@ -292,7 +328,8 @@ class AutomationApiTest(unittest.TestCase):
 
     def test_run_now_without_pending_job_is_graceful(self):
         self.client.post("/api/automation/plan", json={"plan": {
-            "tasks": {"full_chain": {"enabled": False, "daily_cap": 0}}}})
+            "tasks": {t: {"enabled": False, "daily_cap": 0}
+                      for t in TASK_TYPES}}})
         d = self.client.post("/api/automation/run-now", json={}).json()
         self.assertFalse(d["ok"])
         self.assertIn("没有可提前执行", d["message"])
