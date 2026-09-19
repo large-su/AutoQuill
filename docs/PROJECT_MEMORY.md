@@ -22,10 +22,11 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 ## 2. 版本与发布
 
-- 版本唯一入口：core/version.py（当前 v4.9.0）
-- 最近发布：**v4.9.0（2026-09-19）**——tag v4.9.0；安装包 `release/AutoQuill-Setup-4.9.0.exe`
-  （43.1 MB，SHA256 73c400a7d856c0ec45619bc3256349f6d80282607732c60b83349085927b24a5）；
-  GitHub Release 已发（Latest），发布说明存档 release/release_notes_4.9.0.md
+- 版本唯一入口：core/version.py（当前 v4.9.1）
+- 上一个发布：**v4.9.0（2026-09-19）**——安装包 `release/AutoQuill-Setup-4.9.0.exe`
+  （SHA256 73c400a7d856c0ec45619bc3256349f6d80282607732c60b83349085927b24a5）
+- 本次发布：**v4.9.1（2026-09-19）**——「起手方式以参考文章为准 + 抄袭红线」+ 首启引导
+  文案与文档修订；安装包与 SHA256 见 release/ 与 GitHub Release（Latest）
 - 打包：python tools/build_release.py —— 门禁（git 干净/main）→ 全量测试 → PyInstaller → Inno 安装包 → SHA256，版本号自动注入 installer/AutoQuill.iss（勿手工改 iss）
 - 发布：git tag vX.Y.Z && git push origin main --tags && gh release create（gh 已登录 large-su）；产物在 release/，dist/release/build 不入库
 

@@ -2,7 +2,7 @@
 
 版本号以 core/version.py 为唯一事实来源（发布 tag 为 v<VERSION>）。
 
-## v4.9.1（开发中）
+## v4.9.1（2026-09-19）
 
 ### 修复（2026-09-19：经典模式篇篇「我」字开头，开篇同质化）
 - **现象**：经典模式最近 22 篇里 20 篇以「我」开头（最近 20 篇 100%、今天 16/16），
@@ -36,6 +36,22 @@
 - 新增/更新测试：tests/test_opening_variety.py（18 例：轮换覆盖与回环、多线程不重不漏、
   参考起手识别、注入策略（参考优先 / 轮换兜底 / 显式覆盖 / 全关）、抄袭红线阈值与片段）；
   tests/test_generate_retry.py 新增 2 例（命中红线重写 / 三次都命中弃稿）
+
+### 首启引导与文档（同日修订）
+- 首启引导文案不再写死 DeepSeek：Web 卡片说明与登录按钮改为「网页版大模型
+  （DeepSeek / 豆包）」（按钮文字本由前端按当前驱动动态覆盖，这里修默认值）
+- README：标题与安装步骤版本号同步；版本历史补 v4.9.1 / v4.9.0 / v4.8.1；FAQ 模式名更新；
+  Web 通道成本行补豆包
+- docs/DEVELOPER.md：架构图补 doubao.py 与 base 的 markdown 逐块重建；探测脚本路径修正
+  （三个脚本已归档到 tools/archive/probes/）；8.3「新增 Web LLM 驱动」补齐两条硬约束
+- docs/QA-PLAYBOOK.md：发版流程按 2026-09-19 实跑校准（先提交 → build --skip-browser →
+  提交 iss 版本号 → tag/push → gh release create → 回下载比对 sha256 → 盯 CI）
+- docs/PROJECT_MEMORY.md / AGENT-OPERATING-NOTES.md：发布记录、网页端提取坑、网络实测说明同步
+
+### 测试
+- 全量 tests/run_all.py：534 例，0 失败 0 错误（浏览器依赖用例自动跳过）
+- tools/auto_test.py --quick：后端单测 + Python 文件语法 + app.js 语法全通过
+- 用户真实运行验证：经典模式开篇起手方式已按参考文章走（本篇 log 可见「起手式:参考起手:…」）
 
 
 ## v4.9.0（2026-09-19）
