@@ -80,7 +80,10 @@
 3. 替换代码用精确小锚点（含函数签名与上下文），小步提交，改后 py_compile + 单测 + git diff。
 4. 验证按真实运行路径（双击/cmd/脚本入口），不只 import 级验证。
 5. 新增行为必须配单测；回归默认跑 tests/run_all.py + tools/auto_test.py。
-6. 用 .venv/Scripts/python；沙箱无外网时显式走代理（-x http://127.0.0.1:7890 --ssl-no-revoke）。
+6. 用 .venv/Scripts/python。网络（2026-09-19 实测）：本机可直连 GitHub —— git push 走 SSH、
+   gh 走 HTTPS 都可用；git 配置里写着 Clash 代理 http://127.0.0.1:7890，**Clash 没开时不要给
+   命令加代理环境变量**（会 proxyconnect 拒绝），确实需要代理时再显式
+   -x http://127.0.0.1:7890 --ssl-no-revoke。
 7. 先读再改：新模块先读头注释/入口/相关测试；跑陌生脚本先看入口逻辑。
 
 ## 三、收益反思
