@@ -101,6 +101,60 @@ def local_signals(new_text, ref_text):
     }
 
 
+# ---- 开篇重合专测（2026-09-19）----
+# 背景：为了治「篇篇以『我』起手」的同质化，生成侧改成「优先模仿当前话题下
+# 最受认可那篇参考文章的起手方式」。模仿手法可以，抄开头不行——本函数只比
+# 故事引言 vs 参考回答开头：连续重合 >= OPENING_MIN_RUN 字即视为抄/换皮。
+# 阈值取 12：换词不换骨架的改写通常留下 8-15 字连续片段，而「我把离婚协议
+# 放在茶几上」这类通用短句一般不会连续命中 12 字。
+OPENING_MIN_RUN = 12
+_OPENING_STORY_CHARS = 240     # 只比故事引言部分
+_OPENING_REF_CHARS = 400       # 只比参考回答开头部分
+
+
+def _clean_chars(text, limit):
+    """去标题语法/空白/标点后取前 limit 字（字符级比较用）。"""
+    t = re.sub(r"^#{1,6}\s*.*$", "", text or "", flags=re.M)
+    t = re.sub(r"[^\u4e00-\u9fff0-9A-Za-z]", "", t)
+    return t[:limit]
+
+
+def _lcs_with_snippet(a, b):
+    """最长公共子串的长度与片段（短文本 DP，返回片段供提示语引用）。"""
+    if not a or not b:
+        return 0, ""
+    prev = [0] * (len(b) + 1)
+    best = 0
+    end = 0
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best, end = cur[j], i
+        prev = cur
+    return best, a[max(0, end - best):end]
+
+
+def opening_copy_signals(new_text, ref_text, min_run=None):
+    """开篇是否与参考回答开头过度重合（学起手式 != 抄开头）。
+
+    返回 {"run": 最长连续重合字数, "snippet": 重合片段, "risky": run >= min_run}。
+    阈值默认取 config.story.OPENING_COPY_MIN_RUN（配置缺失时用 OPENING_MIN_RUN）。
+    """
+    if min_run is None:
+        try:
+            from config.story import OPENING_COPY_MIN_RUN as min_run
+        except Exception:
+            min_run = OPENING_MIN_RUN
+    a = _clean_chars(new_text, _OPENING_STORY_CHARS)
+    b = _clean_chars(ref_text, _OPENING_REF_CHARS)
+    run, snippet = _lcs_with_snippet(a, b)
+    return {"run": run, "snippet": snippet, "risky": run >= int(min_run)}
+
+
 def local_verdict(signals):
     """本地信号 → 违规理由列表（空 = 本地信号正常）。"""
     reasons = []

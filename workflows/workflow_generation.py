@@ -155,6 +155,7 @@ class GenerationMixin:
         from core.story_text import (
             clean_story_output, fix_story_format, validate_story_format,
         )
+        from core.originality import opening_copy_signals
 
         max_attempts = max_attempts or STORY_GENERATE_MAX_ATTEMPTS
         best = None            # 兜底：多次失败时返回更高分版本
@@ -180,6 +181,21 @@ class GenerationMixin:
                               f"{min_length} 字）"
                 log.warning("故事过短（%d字），第 %d/%d 次重试…",
                             len(story), attempt + 1, max_attempts)
+                continue
+
+            # 开篇抄袭红线（2026-09-19）：本篇的起手方式是模仿参考文章的，
+            # 模仿手法可以、抄开头不行——引言与参考开头连续重合达阈值即判抄，
+            # 带反馈重写（重试仍命中则整轮弃稿，宁可不发也不冒险）。
+            risk = opening_copy_signals(story, answer)
+            if risk["risky"]:
+                if best is None or len(story) > len(best):
+                    best = story
+                last_reason = (
+                    f"开篇与参考回答有 {risk['run']} 字连续重合"
+                    f"（「{risk['snippet']}」）——只允许学参考的起手手法，"
+                    f"句子、人物、道具、情节必须全部换新")
+                log.warning("开篇疑似抄参考（连续 %d 字重合），第 %d/%d 次重试…",
+                            risk["run"], attempt + 1, max_attempts)
                 continue
 
             fmt_score, is_valid, details = validate_story_format(story)

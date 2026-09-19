@@ -153,8 +153,9 @@ OPENING_VARIETY_RULE = """
 同一账号连续产出的文章，开篇首句必须换着来：**不许把「我 + 强动作/物件/数字」
 当成默认模板**（"我撬开丈夫的抽屉""我把离婚协议放在茶几上""我数了数……"都是同构）。
 
-引言第一句从下面几种起手式里挑，同一批产出不要连续重复同一种（本篇具体用哪种，
-见 prompt 末尾的「本篇指定的开篇起手式」；那里指定了就照它写）：
+**首选：模仿本题最受认可那篇参考文章的起手方式**（见 prompt 末尾的「本篇开篇
+起手方式」，那里指定了就照它写，只学手法、不抄句子）。没有参考文章时，从下面
+几种起手式里挑一种，同一批产出不要连续重复同一种：
 
 1. **对话起手**：第一句就是一句带引号的对话，人物身份下一句再交代。
    例：「你要是敢走，我就把这房子点了。」
@@ -328,9 +329,115 @@ def _render_retry_feedback(feedback):
     return "\n".join(lines) + "\n"
 
 
+
+# ---- 参考文章起手方式（2026-09-19 用户口径）----
+# 不要固定循环：这个话题下大家最认可的那篇参考文章怎么起手，我们就模仿它的起手方式，
+# 只是不能抄袭、要控制度。因此：有参考文章 → 模仿其起手方式；没有参考（或参考不可用）
+# → 才退回轮换表兜底。抄袭的度由 core.originality.opening_copy_signals 在生成后兜底拦截
+# （故事引言与参考开头连续重合达到阈值 → 判抄、带反馈重写）。
+_OPENING_ENV_WORDS = ("窗外", "窗台", "阳光", "月光", "灯光", "夜色", "雨", "风",
+                      "街道", "街头", "巷子", "院子", "屋子", "房间", "客厅",
+                      "走廊", "远处", "空气", "光线", "天边", "云")
+_OPENING_OBJECT_RE = re.compile(
+    r"(?:那|这|一|两|三|几)?\s*(?:张|只|份|把|条|枚|本|支|瓶|碗|件|双|页|封|串)"
+    r"|(?:照片|病历|协议|车票|戒指|钥匙|信|合同|收据|手机|日记|搪瓷碗)")
+
+_REF_OPENING_TECHNIQUES = {
+    "dialogue": ("对话起手",
+                 "第一句就是一句带引号的对话，说话人身份放到第二句再交代"),
+    "first_person": ("第一人称起手（参考本身就是「我」开头）",
+                     "可以沿用第一人称，但必须换句式与切入口：不要写成「我+动词+具体物件」的清单式模板，也要换掉具体事件、道具与数字"),
+    "other_person": ("他人起手",
+                     "第一句用他人（他/她/身份称呼）的动作或状态开场，主角随后入画"),
+    "object": ("物件起手",
+               "第一句从一个具体物件切入，同一句里就有人或动作"),
+    "time_number": ("时间/数字断语起手",
+                    "第一句用时间点、次数或事实陈述开场，第二句立刻给事件"),
+    "scene": ("场景起手（必须带人）",
+              "第一句可以给场景，但同一句里必须有人或动作，不许纯景物空镜"),
+    "judgment": ("判断/反差断语起手",
+                 "第一句先给一句反常识的判断或结论，第二句用具体事件撑住它"),
+}
+
+
+def _first_sentence(text):
+    """取参考回答的第一个非空句（去掉标题井号/引用符号）。"""
+    for line in str(text or "").split(chr(10)):
+        s = line.strip().lstrip("#>*- ").strip()
+        if not s:
+            continue
+        parts = re.split(r"[。！？!?...]", s)
+        return parts[0].strip() if parts else ""
+    return ""
+
+
+def analyze_reference_opening(reference_answer):
+    """识别参考回答（本题最受认可的高赞文章）的起手方式（纯本地启发式，零 LLM 调用）。
+
+    返回 {label, key, technique, sample, cliche_tail}；无参考返回 None。
+    cliche_tail=True 表示参考首句本身就是「我+强动作」这类批量感模板——
+    此时指令会额外要求换句式，避免把同质化再学一遍。
+    """
+    first = _first_sentence(reference_answer)
+    if not first:
+        return None
+    head = first[:40]
+    if head[:1] in "「『“‘":
+        key = "dialogue"
+    elif re.match(r"^(?:我|我们|咱)", head):
+        key = "first_person"
+    elif re.match(r"^(?:他|她|他们|她们|它)", head):
+        key = "other_person"
+    elif re.match(r"^第?\s*(?:那|这)?[0-9一二三四五六七八九十百千万两]+\s*[年月日天次岁遍周]", head) \
+            or re.match(r"^(?:那|这)(?:天|年|月|日|晚|次)", head) \
+            or re.match(r"^[0-9]{2,4}\s*[年月日]", head):
+        key = "time_number"
+    elif _OPENING_OBJECT_RE.search(head):
+        key = "object"
+    elif any(w in head for w in _OPENING_ENV_WORDS) \
+            and not re.search(r"[我你他她]", head):
+        key = "scene"
+    else:
+        key = "judgment"
+    label, technique = _REF_OPENING_TECHNIQUES[key]
+    # 参考首句就是「我…」起手：允许沿用第一人称，但必须换句式与切入口，
+    # 否则会把「篇篇我起手」的同质化原样学回来
+    cliche_tail = bool(key == "first_person")
+    return {"label": label, "key": key, "technique": technique,
+            "sample": first[:60], "cliche_tail": cliche_tail}
+
+
+def render_reference_opening_instruction(info):
+    """把「模仿参考起手方式」渲染成本篇硬要求（放在 prompt 末尾、醒目位置）。"""
+    if not info:
+        return ""
+    lines = [
+        "", "",
+        "## 本篇开篇起手方式（模仿参考文章的手法，不抄它的句子）", "",
+        "- 参考文章（本题最受认可的高赞回答）的起手方式：**%s**" % info["label"],
+        "- 它的原句：%s（只作手法示例，不得复用）" % info["sample"],
+        "- 具体写法：%s" % info["technique"],
+    ]
+    if info.get("cliche_tail"):
+        lines.append(
+            "- 注意：参考首句是「我…」起手。整句照学容易又写成一篇同构文章——"
+            "第一人称可以保留，但请换句式与切入口（对话/他人动作/物件特写/"
+            "时间断语任选一种），不要写成「我+动词+具体物件」的清单式开场。")
+    lines += [
+        "- 抄袭红线：内容、人物、场景、道具、事件、措辞全部换新；与参考首句不得有",
+        "  10 字以上连续重合，也不许同义替换（换词不换骨架同样算抄）。",
+        "- 格式底线不变：第一行必须直接是故事正文（不得是章节标题/标签/分割线），",
+        "  引言 3-8 句、60-300 字，先抛冲突再展开。",
+        "- 若这种起手方式与本题不合（如参考是对话起手但你的题开场不适合对话），",
+        "  可换成对话/他人/物件/时间·数字/反差断语任一种，但不要默认用",
+        "  「我+强动作/物件/数字」。",
+    ]
+    return chr(10).join(lines) + chr(10)
+
+
 def build_story_prompt(question_title, reference_answer=None, recipe=None,
                        meta_knowledge=None, author_profile=None,
-                       feedback=None, opening_style=None, rotate_opening=True):
+                       feedback=None, opening_style=None, opening_auto=True):
     """
     根据 STORY_MATERIAL_MODE 构建故事生成 prompt。
 
@@ -355,7 +462,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
                           供模型针对性重写。
         opening_style:     指定本篇的开篇起手式（OPENING_STYLES 里的一项）；
                           默认 None = 按轮换自动取下一个（防篇篇「我」字起手）。
-        rotate_opening:    False 时不注入起手式（单测/特殊场景用）。
+        opening_auto:      False 时两种自动选择都不注入（单测/特殊场景用）。
 
     返回：(user_message, mode_str)
     """
@@ -555,25 +662,39 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     # 最近 20 篇 100% 同构（我+强动作/物件/数字）。守则叠加把开头挤成了唯一解，
     # 这里按篇轮换指定起手式——各篇生成互相看不见，只能靠外部轮换保证不重样。
     try:
-        from config.story import OPENING_VARIETY
+        from config.story import OPENING_MIRROR_REFERENCE, OPENING_VARIETY
     except Exception:      # 配置缺失时按开启处理（防回归成同构）
-        OPENING_VARIETY = True
-    _opening = None
-    if OPENING_VARIETY:
-        _opening = opening_style or (next_opening_style() if rotate_opening
-                                    else None)
+        OPENING_MIRROR_REFERENCE, OPENING_VARIETY = True, True
+    _opening_block = ""
+    _opening_tag = ""
+    if opening_style:                       # 显式指定（测试/特殊场景）最优先
+        _opening_block = render_opening_instruction(opening_style)
+        _opening_tag = opening_style[0]
+    else:
+        _ref_opening = (analyze_reference_opening(reference_answer)
+                        if (OPENING_MIRROR_REFERENCE and opening_auto)
+                        else None)
+        if _ref_opening:
+            # ① 用户口径：模仿本题最受认可那篇参考文章的起手方式（学手法不抄句子）
+            _opening_block = render_reference_opening_instruction(_ref_opening)
+            _opening_tag = "参考起手:" + _ref_opening["label"]
+        elif OPENING_VARIETY and opening_auto:
+            # ② 没有参考文章时才用轮换表兜底（不再是固定循环指定）
+            _style = next_opening_style()
+            _opening_block = render_opening_instruction(_style)
+            _opening_tag = _style[0]
 
     # === 问题优先 + 命名约束 + 行文去AI味守则 + 发布前自检（公共：所有模式生效） ===
     user_message += QUESTION_FIRST_RULE
     user_message += NAMING_CONSTRAINT
     user_message += DEAI_STYLE_RULE
-    if _opening:
+    if _opening_block:
         user_message += OPENING_VARIETY_RULE
     user_message += FORMAT_SELF_CHECK_RULE
-    if _opening:
-        # 指定起手式放在公共守则之后（越靠后越醒目），并写进 mode_str 便于日志核对
-        user_message += render_opening_instruction(_opening)
-        mode_str += f" · 起手式:{_opening[0]}"
+    if _opening_block:
+        # 起手方式放在公共守则之后（越靠后越醒目），并写进 mode_str 便于日志核对
+        user_message += _opening_block
+        mode_str += f" · 起手式:{_opening_tag}"
     user_message += INLINE_OUTPUT_RULE
 
     # === 重试修正反馈（如有：放在最末尾，最醒目，模型应先读到它） ===

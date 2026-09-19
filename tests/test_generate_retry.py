@@ -87,6 +87,45 @@ class TestGenerateStoryWithRetry(unittest.TestCase):
         self.assertIsNotNone(calls[1])
         self.assertIn("章节", calls[1])
 
+    def test_opening_copy_risk_triggers_rewrite(self):
+        """开篇与参考回答连续重合（模仿起手式变成了抄开头）→ 判抄、带反馈重写。
+
+        2026-09-19：生成侧改成「模仿本题最受认可那篇参考文章的起手方式」，
+        必须配这道红线，否则模型会把参考开头整句搬过来。"""
+        ref_opening = "她把离婚协议推过来的时候，手指在抖。"
+        reference = ref_opening + "那天我们结婚刚满三年。" * 40
+        copied = ref_opening + "手指没抖。" + _valid_story()
+        fixed = _valid_story()
+        calls = []
+
+        def fake_gen(title, answer, feedback=None):
+            calls.append(feedback)
+            return copied if len(calls) == 1 else fixed
+
+        with mock.patch.object(self.wf, "generate_story",
+                               side_effect=fake_gen):
+            story, ok = self.wf.generate_story_with_retry("题", reference)
+
+        self.assertTrue(ok)
+        self.assertEqual(story, fixed)
+        self.assertIsNone(calls[0])
+        self.assertIsNotNone(calls[1])
+        self.assertIn("连续重合", calls[1])
+
+    def test_opening_copy_risk_all_attempts_discards_round(self):
+        """三次都抄参考开头 → 整轮弃稿（ok=False），宁可不发也不冒险。"""
+        ref_opening = "她把离婚协议推过来的时候，手指在抖。"
+        reference = ref_opening + "那天我们结婚刚满三年。" * 40
+        copied = ref_opening + "手指没抖。" + _valid_story()
+
+        with mock.patch.object(self.wf, "generate_story",
+                               return_value=copied):
+            story, ok = self.wf.generate_story_with_retry("题", reference)
+
+        self.assertFalse(ok)
+        self.assertEqual(story, copied)   # 兜底返回最高分（供人工核对）
+
+
     def test_short_story_feedback_mentions_length(self):
         """过短故事的重试反馈应指出字数限制。"""
         calls = []
