@@ -122,6 +122,9 @@
           <input type="number" id="autoJitter" min="0" max="120" step="1" value="8"></label>
         <div class="auto-hint">排班方式：把时段<b>等分成 N 份</b>、每份随机取一点，再统一
           保证两两间隔 ≥ 最小间隔——动作铺满整段时间，而不是从早到晚「发一个等一小时」。</div>
+        <div class="auto-hint">时段只管「动作落在什么时候」：<b>不在时段内也能点开始</b>，
+          程序照常待命、到点才执行；时段外不会自动退出，第二天自动接着排。
+          时段结束时今天没做完的会标成「已跳过」并通知你（手动点「立即执行」不受时段限制）。</div>
         <label class="auto-line">错过时间点
           <select id="autoCatchUp">
             <option value="same_day">当日内补做（推荐）</option>

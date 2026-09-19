@@ -145,6 +145,11 @@ def spread_times(win_start, win_end, count, min_gap_minutes, rng,
     return [win_start + timedelta(minutes=round(o, 3)) for o in offsets]
 
 
+def window_bounds(day, plan, cfg=None):
+    """当天运行时段的 (起点, 终点)——公开版本：调度器要判断「时段是不是已经过了」。"""
+    return _window_bounds(day, plan, cfg or {})
+
+
 def _done_jobs(schedule, task_type):
     """已消耗配额的作业（done/running）——用于「先看今天已经做了多少」。"""
     return [j for j in schedule

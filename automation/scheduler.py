@@ -54,6 +54,7 @@ class AutomationScheduler:
         self._fails = {}          # {task_type: 连续失败次数}
         self._notices = []        # 给 UI 的通知（环形，最多 50 条）
         self._last_day_hash = ""
+        self._closed_day = ""     # 已经为哪一天做过「时段结束收尾」（每天只通知一次）
 
     # ---------------- 通知 ----------------
 
@@ -149,16 +150,66 @@ class AutomationScheduler:
                                            store.done_counts(day))
         day_data = planner.apply_catch_up(now, plan, day_data)
         self._save_day_if_changed(day, day_data)
-        if not planner.window_open(now, plan):
-            return
+        in_window = planner.window_open(now, plan)
+        if not in_window:
+            # 时段外不派活（这就是「运行时段」的全部含义），但：
+            #  · 用户手动点「立即执行」的作业照做（手动优先于时段）；
+            #  · 时段**已经过了**（不是还没到）时给今天收尾：剩下的标记跳过 + 通知一次，
+            #    否则它们会一直挂在「待执行」，看起来像程序卡住了。
+            _, win_end = planner.window_bounds(day, plan)
+            if now > win_end:
+                self._close_out_day(now, plan, day, day_data)
+            due_manual = [j for j in planner.due_jobs(now, day_data)
+                          if j.get("manual")]
+            if not due_manual:
+                return
+            due = due_manual
+        else:
+            due = planner.due_jobs(now, day_data)
+            if not due:
+                return
         if plan.get("pause_when_user_busy"):
             from webui.browser_tasks import browser_busy
             if browser_busy():
                 return                     # 手动任务优先，等它跑完再派活
-        due = planner.due_jobs(now, day_data)
-        if not due:
-            return
         self._run_job(due[0], day, day_data, plan)
+
+    def _close_out_day(self, now, plan, day, day_data):
+        """时段已过：给今天剩下的「待执行」作业一个明确收尾（每天只通知一次）。
+
+        为什么要做：apply_catch_up 会把「错过且当天排不下」的作业标成跳过，
+        但如果程序一直在跑、只是时段结束了，作业会停在「待执行」——用户看到的是
+        「说好做 3 篇，结果一直挂着」。这里统一收尾：标记跳过 + 明确原因 + 通知一次。
+        """
+        if self._closed_day == day:
+            return
+        schedule = day_data.get("schedule", []) or []
+        leftover = [j for j in schedule if j.get("status") == STATUS_PLANNED]
+        # 「本该做但没做成」的口径：还挂着的 + 被跳过/失败的（排不下那种 units=0 的说明不算）
+        unfinished = [j for j in schedule
+                      if j.get("status") in (STATUS_PLANNED, STATUS_FAILED)
+                      or (j.get("status") == STATUS_SKIPPED and j.get("units"))]
+        self._closed_day = day
+        if not unfinished:
+            return
+        for job in leftover:
+            job["status"] = STATUS_SKIPPED
+            job["note"] = (job.get("note") or "") + "（运行时段已结束，今天不再执行）"
+            store.append_ledger({
+                "day": day, "key": job["key"], "type": job["type"],
+                "status": STATUS_SKIPPED, "units": 0,
+                "planned_at": job.get("planned_at"),
+                "finished_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                "message": "运行时段已结束，未执行",
+                "artifacts": [], "dry_run": bool(job.get("dry_run")),
+            })
+        if leftover:
+            self._save_day_if_changed(day, day_data)
+        done = len([j for j in schedule if j.get("status") == STATUS_DONE])
+        self._push_notice(
+            "info",
+            "运行时段已结束：今天完成 %d 项、未执行 %d 项（原因见时间轴）；明天 %s 继续"
+            % (done, len(unfinished), (plan.get("window") or {}).get("start", "08:00")))
 
     def _save_day_if_changed(self, day, day_data):
         blob = json.dumps(day_data, ensure_ascii=False, sort_keys=True)
@@ -313,15 +364,18 @@ class AutomationScheduler:
         if target is None:
             return {"ok": False, "message": "没有可提前执行的作业（配额已用完或该任务未启用）"}
         target["planned_at"] = (now + timedelta(seconds=3)).replace(microsecond=0).isoformat()
+        target["manual"] = True          # 手动：时段外也照做（用户明确要求现在执行）
         if dry_run:
             target["dry_run"] = True
             target["note"] = (target.get("note") or "") + "（演练：不会真的发布）"
         else:
             target["note"] = (target.get("note") or "") + "（手动立即执行）"
         self._save_day_if_changed(day, day_data)
-        self._push_notice("info", "已安排立即执行：%s%s"
-                          % (target["type"], "（演练）" if dry_run else ""))
-        return {"ok": True, "job": target}
+        outside = "" if planner.window_open(now, plan) else "（当前不在运行时段，手动执行照做）"
+        self._push_notice("info", "已安排立即执行：%s%s%s"
+                          % (target["type"], "（演练）" if dry_run else "",
+                             outside))
+        return {"ok": True, "job": target, "outside_window": bool(outside)}
 
     # ---------------- 状态（给 UI） ----------------
 

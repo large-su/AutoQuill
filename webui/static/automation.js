@@ -82,7 +82,7 @@ function renderAutoState() {
   if (st.running) { text = "执行中：" + (st.running.type || ""); cls = "busy"; }
   else if (st.paused) { text = "已暂停"; cls = "paused"; }
   else if (st.enabled) { text = "运行中"; cls = "on"; }
-  else if (st.summary && st.summary.in_window === false) { text = "待机（不在时段）"; }
+  else if (st.summary && st.summary.in_window === false) { text = "运行中 · 时段外待机"; }
   if (el) { el.textContent = text; el.className = "auto-state " + cls; }
   if (pill) pill.textContent = text;
   const on = !!st.enabled;
@@ -132,7 +132,7 @@ function renderAutoProgress() {
         : "今天没有待执行任务") + "</div></div>";
   html += "<div class=\"auto-pcard\"><div class=\"l\">运行时段</div>"
     + "<div class=\"v\">" + esc(s.window_label || "-") + "</div>"
-    + "<div class=\"d\">" + (s.in_window ? "当前在时段内" : "当前不在时段内（到点才执行）")
+    + "<div class=\"d\">" + (s.in_window ? "当前在时段内" : "当前不在时段内（时段外不派活，程序不退出）")
     + "</div></div>";
   box.innerHTML = html;
 }

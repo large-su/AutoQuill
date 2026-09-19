@@ -298,6 +298,57 @@ class SchedulerTest(unittest.TestCase):
         self.assertFalse(store.load_plan()["tasks"]["full_chain"]["enabled"])
         self.assertTrue(any("连续失败" in n["text"] for n in self.sched.status()["notices"]))
 
+    def test_manual_run_works_outside_the_window(self):
+        """「运行时段」只约束自动派活；用户手动点「立即执行」不受它限制。"""
+        store.save_plan(_only("full_chain", daily_cap=2))
+        self.now = datetime(2026, 9, 20, 3, 0, 0)        # 凌晨：时段外
+        self.sched._tick()
+        self.assertEqual(self.calls, [])                # 自动派活：不执行
+        r = self.sched.run_now("full_chain")
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["outside_window"])
+        self._advance(1)
+        self.sched._tick()
+        self.assertEqual(len(self.calls), 1)            # 手动：照做
+
+    def test_window_close_marks_leftovers_skipped_and_notifies(self):
+        """时段结束：今天剩下的作业要明确收尾（标记跳过 + 通知一次），不能一直挂着。"""
+        store.save_plan(_only("full_chain", daily_cap=2))
+        self.now = datetime(2026, 9, 20, 23, 55, 0)      # 时段（08:00-23:30）已过
+        self.sched._tick()
+        self.assertEqual(self.calls, [])
+        jobs = store.load_day("2026-09-20")["schedule"]
+        self.assertTrue(jobs)
+        self.assertTrue(all(j["status"] != planner.STATUS_PLANNED for j in jobs),
+                        [j["status"] for j in jobs])
+        # 作业被标跳过的原因可能是「错过时间点且当天时段已过」（catch_up 先处理），
+        # 也可能是收尾时打的「运行时段已结束」——两种都算明确交代，不能有「无原因」的
+        self.assertTrue(all((j.get("note") or "") for j in jobs),
+                        [(j["status"], j.get("note")) for j in jobs])
+        notices = self.sched.status()["notices"]
+        self.assertTrue(any("运行时段已结束" in n["text"] for n in notices),
+                        [n["text"] for n in notices])
+        # 只通知一次：再 tick 不应再刷一条
+        before = len(notices)
+        self._advance(1)
+        self.sched._tick()
+        after = [n for n in self.sched.status()["notices"]
+                 if "运行时段已结束" in n["text"]]
+        self.assertEqual(len(after), 1, before)
+
+    def test_next_day_rolls_over_without_restart(self):
+        """跨零点：不用重新点开始，第二天照常排班（时段、配额自动进入新的一天）。"""
+        store.save_plan(_only("full_chain", daily_cap=1))
+        self.now = datetime(2026, 9, 21, 8, 5, 0)        # 第二天、时段内
+        self.sched._tick()
+        jobs = store.load_day("2026-09-21")["schedule"]   # 自动排出了新一天的时间轴
+        self.assertTrue(jobs)
+        self.assertEqual(len(self.calls), 0)              # 还没到点
+        self.now = datetime.fromisoformat(jobs[0]["planned_at"])   # 到点
+        self.sched._tick()
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("2026-09-21", self.calls[0]["key"])
+
     def test_stop_prevents_further_execution(self):
         self.sched.start()
         self.sched.stop()
