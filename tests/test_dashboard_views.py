@@ -69,9 +69,11 @@ class DashboardViewsTest(unittest.TestCase):
                        ".stats-grid", ".stat-card", ".stat-chart",
                        ".dash-summary", ".stats-empty"):
             self.assertIn(needle, css, needle)
-        # 响应式：窄屏收敛为单列，KPI 降为 3/2 列
+        # 响应式：窄屏收敛为单列，KPI 降为 3 列；1440 以下收紧图表高度
         self.assertIn("@media (max-width: 1180px)", css)
-        self.assertIn("@media (max-width: 1400px)", css)
+        self.assertIn("@media (max-width: 1440px)", css)
+        # 统计视图必须可滚动（应用窗口 1280x820，内容比看板卡高，不能裁掉）
+        self.assertIn("#dashViewStats { overflow-y: auto", css)
 
     def test_auto_test_harness_matches_new_dom(self):
         src = self._src("tools/auto_test.py")

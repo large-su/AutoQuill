@@ -55,8 +55,8 @@ def stats_of(rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8799)
-    ap.add_argument("--width", type=int, default=1680)
-    ap.add_argument("--height", type=int, default=1050)
+    ap.add_argument("--width", type=int, default=1280)   # 与 pywebview 默认窗口一致
+    ap.add_argument("--height", type=int, default=820)
     args = ap.parse_args()
     port = args.port
     rows = build_rows()
@@ -108,7 +108,48 @@ def main():
             pg.evaluate("() => document.getElementById('dashCard').scrollIntoView()")
             stats_png = outdir / "dash_stats.png"
             pg.screenshot(path=str(stats_png), full_page=False)
-            print("统计视图：", stats_png)
+            print("统计视图（顶部）：", stats_png)
+            # 滚到底再看一眼：验证「内容超出时是滚动而不是被裁掉」
+            overflow = pg.evaluate(
+                "() => { const el = document.getElementById('dashViewStats');"
+                " el.scrollTop = el.scrollHeight;"
+                " return {scroll: el.scrollHeight, client: el.clientHeight}; }")
+            pg.wait_for_timeout(700)
+            bottom_png = outdir / "dash_stats_bottom.png"
+            pg.screenshot(path=str(bottom_png), full_page=False)
+            print("统计视图（滚到底）：", bottom_png,
+                  "内容高 %d / 可视高 %d" % (overflow["scroll"], overflow["client"]),
+                  "→ 需要滚动" if overflow["scroll"] > overflow["client"] + 4 else "→ 一屏放得下")
+            pg.evaluate("() => { document.getElementById('dashViewStats').scrollTop = 0; }")
+            pg.wait_for_timeout(300)
+            # ★ 可达性自检：最后一张图（阅读·赞同散点）必须能滚进视野——
+            # 用户报「有些图超出界面框看不到」，所以把这条固化成脚本输出
+            reach = pg.evaluate("""
+                () => {
+                  const box = document.getElementById('dashViewStats');
+                  const target = document.getElementById('chartScatter');
+                  box.scrollTop = box.scrollHeight;
+                  let ok = target.getBoundingClientRect().bottom <= window.innerHeight + 2;
+                  let via = ok ? '#dashViewStats' : '';
+                  if (!ok) {
+                    const card = document.getElementById('dashCard');
+                    card.scrollTop = card.scrollHeight;
+                    ok = target.getBoundingClientRect().bottom <= window.innerHeight + 2;
+                    if (ok) via = '#dashCard';
+                  }
+                  if (!ok) {
+                    window.scrollTo(0, document.body.scrollHeight);
+                    ok = target.getBoundingClientRect().bottom <= window.innerHeight + 2;
+                    if (ok) via = 'window';
+                  }
+                  return {ok: ok, via: via,
+                          content: box.scrollHeight, view: box.clientHeight};
+                }""")
+            print("REACH: %s via=%s content=%d view=%d  (末图=阅读·赞同散点)"
+                  % ("PASS" if reach["ok"] else "FAIL",
+                     reach["via"] or "-", reach["content"], reach["view"]))
+            pg.evaluate("() => { document.getElementById('dashViewStats').scrollTop = 0; }")
+            pg.wait_for_timeout(200)
             pg.click("#dashViewSwitch .view-btn[data-view='detail']")
             pg.wait_for_timeout(900)
             detail_png = outdir / "dash_detail.png"

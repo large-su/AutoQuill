@@ -420,6 +420,10 @@
 
   /* 统计视图：摘要条 + KPI + 图表栅格 */
   .dash-view { min-height: 0; display: flex; flex-direction: column; flex: 1; }
+  /* ★ 统计视图必须能滚动：应用窗口只有 1280x820，栅格整体比看板卡高，
+     不给 overflow 就会被裁掉（用户实测「有些图超出界面框看不到」） */
+  #dashViewStats { overflow-y: auto; overflow-x: hidden; padding-right: 2px; }
+  #dashViewDetail { overflow: hidden; }
   .dash-summary {
     display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline;
     font-size: 12px; color: var(--muted); margin: 0 0 12px;
@@ -444,8 +448,8 @@
   .stat-card .stat-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
   .stat-card .stat-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
   .stat-card .stat-hint { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
-  .stat-chart { height: 232px; }
-  .stat-chart.tall { height: 320px; }
+  .stat-chart { height: 190px; }
+  .stat-chart.tall { height: 250px; }
   .stat-card.span-4 { grid-column: span 4; }
   .stat-card.span-5 { grid-column: span 5; }
   .stat-card.span-6 { grid-column: span 6; }
@@ -455,12 +459,21 @@
     grid-column: 1 / -1; padding: 28px 12px; text-align: center;
     color: var(--muted); font-size: 12.5px;
   }
-  @media (max-width: 1400px) {
-    .stats-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* 应用窗口默认 1280x820（pywebview）→ 中屏优先保证「一屏能看全一行图」 */
+  @media (max-width: 1440px) {
+    .stats-kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .stats-kpis .kpi-card { padding: 8px 10px; }
+    .stats-kpis .kpi-value { font-size: 19px; }
+    .stats-kpis .kpi-label, .stats-kpis .kpi-sub { font-size: 10.5px; }
+    .stat-card { padding: 9px 11px 4px; }
+    .stat-chart { height: 176px; }
+    .stat-chart.tall { height: 224px; }
   }
   @media (max-width: 1180px) {
-    .stats-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stats-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .stats-grid > .stat-card { grid-column: 1 / -1; }
+    .stat-chart { height: 200px; }
+    .stat-chart.tall { height: 240px; }
   }
 
   /* 激活筛选 chips */

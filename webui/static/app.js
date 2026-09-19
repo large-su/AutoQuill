@@ -991,13 +991,13 @@ function renderKpis(st, allTotal) {
   const engage = st.sum_likes + st.sum_comments + st.sum_collects + st.sum_favors;
   box.innerHTML =
     kpiCard("已发布", fmtNum(st.total) + '<span class="sub"> 篇</span>',
-            "有赞 " + st.liked + " 篇 · 覆盖 " + st.liked_ratio + "%", st.liked_ratio) +
+            "有赞 " + st.liked + " · 覆盖 " + st.liked_ratio + "%", st.liked_ratio) +
     kpiCard("阅读合计", fmtNum(st.sum_reads), "篇均 " + fmtNum(st.avg_reads)) +
     kpiCard("赞同合计", fmtNum(st.sum_likes), "篇均 " + fmtNum(st.avg_likes)) +
     kpiCard("评论合计", fmtNum(st.sum_comments),
-            "收藏 " + fmtNum(st.sum_collects) + " · 喜欢 " + fmtNum(st.sum_favors)) +
+            "藏 " + fmtNum(st.sum_collects) + " / 喜 " + fmtNum(st.sum_favors)) +
     kpiCard("赞同率", likeRate.toFixed(1) + "%", "赞同 ÷ 阅读", likeRate) +
-    kpiCard("篇均互动", fmtNum(Math.round(engage / st.total)), "赞 + 评 + 藏 + 喜 / 篇");
+    kpiCard("篇均互动", fmtNum(Math.round(engage / st.total)), "赞+评+藏+喜 / 篇");
   if (sum) {
     const dmin = (st.date_min || "").slice(0, 10), dmax = (st.date_max || "").slice(0, 10);
     sum.innerHTML =
@@ -1327,15 +1327,18 @@ function renderCharts(rows) {
   const avg = (k) => rows.reduce((s, r) => s + (r[k] || 0), 0) / n;
   ecInit("chartFunnel").setOption({
     ...ecBase(), tooltip: { ...ecBase().tooltip, formatter: "{b}: {c}" },
-    series: [{ type: "funnel", left: "9%", width: "82%", top: 12, bottom: 12, gap: 2,
-      minSize: "15%", maxSize: "95%", sort: "descending",
-      label: { color: EC_TXT, formatter: "{b} {c}" },
+    series: [{ type: "funnel", left: "8%", width: "84%", top: 10, bottom: 10, gap: 2,
+      minSize: "18%", maxSize: "96%", sort: "descending",
+      // 标签放形状内 + 浅色分段：窄卡片下不会被容器边缘裁掉（原来「阅读 1013」被截断）
+      label: { position: "inside", color: "#0f1424", fontWeight: 600, fontSize: 11,
+               formatter: "{b} {c}" },
+      itemStyle: { borderWidth: 0 },
       data: [
-        { value: Math.round(avg("reads")), name: "阅读" },
-        { value: Math.round(avg("likes")), name: "赞同" },
-        { value: Math.round(avg("comments")), name: "评论" },
-        { value: Math.round(avg("collects")), name: "收藏" },
-        { value: Math.round(avg("favors")), name: "喜欢" },
+        { value: Math.round(avg("reads")), name: "阅读", itemStyle: { color: "#a5b4fc" } },
+        { value: Math.round(avg("likes")), name: "赞同", itemStyle: { color: "#c4b5fd" } },
+        { value: Math.round(avg("comments")), name: "评论", itemStyle: { color: "#6ee7b7" } },
+        { value: Math.round(avg("collects")), name: "收藏", itemStyle: { color: "#fcd34d" } },
+        { value: Math.round(avg("favors")), name: "喜欢", itemStyle: { color: "#fdba74" } },
       ] }],
   }, true);
 
@@ -1371,10 +1374,13 @@ function renderCharts(rows) {
   const gmap = {};
   rows.forEach((r) => { const g = r.genre || "其他"; gmap[g] = (gmap[g] || 0) + 1; });
   const keys = Object.keys(gmap);
+  // 题材种类多、卡片不高：图例竖排放右侧，扇区不再挂外标签（避免拥挤与被裁）
   ecInit("chartGenre").setOption({
     ...ecBase(), tooltip: { ...ecBase().tooltip, formatter: "{b}: {c} 篇 ({d}%)" },
-    series: [{ type: "pie", radius: ["38%", "68%"], center: ["50%", "50%"],
-      label: { color: EC_TXT, formatter: "{b} {c}" },
+    legend: { orient: "vertical", right: 4, top: "middle", itemWidth: 8, itemHeight: 8,
+              itemGap: 6, textStyle: { color: EC_MUTED, fontSize: 11 } },
+    series: [{ type: "pie", radius: ["46%", "70%"], center: ["34%", "50%"],
+      avoidLabelOverlap: true, label: { show: false }, labelLine: { show: false },
       data: keys.map((k) => ({ name: k, value: gmap[k] })) }],
   }, true);
 
