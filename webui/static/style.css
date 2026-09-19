@@ -401,6 +401,68 @@
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
   }
 
+  /* ---------- 看板视图切换（统计 / 明细） ---------- */
+  .view-switch {
+    display: inline-flex; gap: 2px; padding: 3px; margin-left: 2px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .view-btn {
+    appearance: none; border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12.5px; line-height: 1.6; padding: 3px 15px;
+    border-radius: 7px; cursor: pointer; transition: color .15s, background .15s;
+  }
+  .view-btn:hover { color: var(--text); }
+  .view-btn.sel {
+    color: #fff;
+    background: linear-gradient(135deg, rgba(99,102,241,.92), rgba(167,139,250,.78));
+    box-shadow: 0 1px 6px rgba(99,102,241,.35);
+  }
+
+  /* 统计视图：摘要条 + KPI + 图表栅格 */
+  .dash-view { min-height: 0; display: flex; flex-direction: column; flex: 1; }
+  .dash-summary {
+    display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline;
+    font-size: 12px; color: var(--muted); margin: 0 0 12px;
+  }
+  .dash-summary b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .dash-summary .k { opacity: .85; margin-right: 5px; }
+  .stats-kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .stats-kpis .kpi-card { position: relative; overflow: hidden; }
+  .stats-kpis .kpi-card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+    background: linear-gradient(180deg, var(--accent), rgba(99,102,241,0));
+  }
+  .stats-kpis .kpi-value { font-size: 22px; }
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 12px; align-content: start;
+  }
+  .stat-card {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+    padding: 11px 13px 6px; min-width: 0;
+  }
+  .stat-card .stat-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .stat-card .stat-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .stat-card .stat-hint { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .stat-chart { height: 232px; }
+  .stat-chart.tall { height: 320px; }
+  .stat-card.span-4 { grid-column: span 4; }
+  .stat-card.span-5 { grid-column: span 5; }
+  .stat-card.span-6 { grid-column: span 6; }
+  .stat-card.span-7 { grid-column: span 7; }
+  .stat-card.span-8 { grid-column: span 8; }
+  .stats-empty {
+    grid-column: 1 / -1; padding: 28px 12px; text-align: center;
+    color: var(--muted); font-size: 12.5px;
+  }
+  @media (max-width: 1400px) {
+    .stats-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 1180px) {
+    .stats-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stats-grid > .stat-card { grid-column: 1 / -1; }
+  }
+
   /* 激活筛选 chips */
   .dash-filterbar { display: none; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .dash-filterbar.show { display: flex; }
@@ -419,36 +481,6 @@
     font-size: 11.5px; cursor: pointer; padding: 2px 4px; font-family: inherit;
   }
   .dash-filterbar .f-btn:hover { text-decoration: underline; }
-
-  /* 图表分区块 */
-  .dash-section { margin-bottom: 14px; }
-  .dash-section-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
-  .dash-section-title {
-    font-size: 12px; color: var(--muted); letter-spacing: 1px; flex: 1;
-    border-bottom: 1px solid var(--border); padding-bottom: 6px;
-  }
-  .chart-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
-  .chart-tab {
-    border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
-    font-size: 11.5px; padding: 4px 12px; border-radius: 999px; cursor: pointer;
-    transition: color .15s, border-color .15s, background .15s; font-family: inherit;
-  }
-  .chart-tab:hover { color: var(--text); border-color: #3b4d74; }
-  .chart-tab.sel {
-    color: #fff; border-color: transparent;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  }
-  .dash-chart-pane {
-    position: relative;
-    background: var(--panel-2); border: 1px solid var(--border);
-    border-radius: 10px; padding: 10px 10px 6px; min-width: 0;
-  }
-  .dash-charts-empty {
-    position: absolute; inset: 0; z-index: 3;
-    display: flex; align-items: center; justify-content: center;
-    color: var(--muted); font-size: 12.5px; gap: 6px;
-    background: var(--panel-2); border-radius: 10px;
-  }
 
   /* ---------- 草稿箱素材管理模式 ---------- */
   .draft-card { display: none; }
@@ -499,8 +531,6 @@
   .dft-view:hover { color: var(--accent-2); border-color: var(--accent); }
   .dft-empty { padding: 30px 12px; text-align: center; color: var(--muted); font-size: 12.5px; }
   .draft-view-body { white-space: pre-wrap; word-break: break-all; }
-  .dash-chart { min-width: 0; }
-  .dash-chart-box { height: 300px; }
 
   /* 数据表 */
   .dash-table-wrap {

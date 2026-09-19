@@ -292,6 +292,10 @@
     <div class="card dash-card" id="dashCard">
       <div class="dash-head">
         <h2><span class="badge">▦</span>已发布内容看板</h2>
+        <div class="view-switch" id="dashViewSwitch" role="tablist" aria-label="看板视图">
+          <button class="view-btn sel" data-view="stats" role="tab" aria-selected="true">统计</button>
+          <button class="view-btn" data-view="detail" role="tab" aria-selected="false">明细</button>
+        </div>
         <div class="dash-pills">
           <span class="dash-pill" id="dashCount">加载中…</span>
           <span class="dash-pill" id="dashSnap">快照 · -</span>
@@ -300,46 +304,60 @@
         </div>
       </div>
       <div class="dash-status" id="dashStatus"></div>
-      <div class="kpi-grid" id="dashKpis"></div>
-      <div class="dash-filterbar" id="dashFilterbar"></div>
-      <div class="dash-section" id="dashChartSection">
-        <div class="dash-section-head">
-          <div class="dash-section-title">数据分析（图表随筛选结果更新）</div>
-          <div class="chart-tabs" id="chartTabs">
-            <button class="chart-tab sel" data-tab="trend">发布趋势</button>
-            <button class="chart-tab" data-tab="dist">赞同分布</button>
-            <button class="chart-tab" data-tab="funnel">转化漏斗</button>
-            <button class="chart-tab" data-tab="scatter">阅读·赞同</button>
-            <button class="chart-tab" data-tab="top">Top 20</button>
-            <button class="chart-tab" data-tab="genre">题材分布</button>
-          </div>
-        </div>
-        <div class="dash-chart-pane">
-          <div class="dash-charts-empty" id="dashChartEmpty" hidden>📭 当前筛选暂无数据</div>
-          <div class="dash-chart" id="chartPane-trend"><div class="dash-chart-box" id="chartTrend"></div></div>
-          <div class="dash-chart" id="chartPane-dist" hidden><div class="dash-chart-box" id="chartDist"></div></div>
-          <div class="dash-chart" id="chartPane-funnel" hidden><div class="dash-chart-box" id="chartFunnel"></div></div>
-          <div class="dash-chart" id="chartPane-scatter" hidden><div class="dash-chart-box" id="chartScatter"></div></div>
-          <div class="dash-chart" id="chartPane-top" hidden><div class="dash-chart-box" id="chartTop"></div></div>
-          <div class="dash-chart" id="chartPane-genre" hidden><div class="dash-chart-box" id="chartGenre"></div></div>
+
+      <!-- 统计视图：KPI + 图表栅格（明细视图只留筛选 + 表格，两组互不干扰） -->
+      <div class="dash-view" id="dashViewStats">
+        <div class="dash-summary" id="dashSummary"></div>
+        <div class="kpi-grid stats-kpis" id="dashKpis"></div>
+        <div class="stats-grid" id="dashStatsGrid">
+          <section class="stat-card span-8">
+            <div class="stat-head"><span class="stat-title">发布节奏</span><span class="stat-hint">按月 · 篇数</span></div>
+            <div class="stat-chart" id="chartTrend"></div>
+          </section>
+          <section class="stat-card span-4">
+            <div class="stat-head"><span class="stat-title">互动漏斗</span><span class="stat-hint">篇均</span></div>
+            <div class="stat-chart" id="chartFunnel"></div>
+          </section>
+          <section class="stat-card span-6">
+            <div class="stat-head"><span class="stat-title">赞同分布</span><span class="stat-hint">按篇数分桶</span></div>
+            <div class="stat-chart" id="chartDist"></div>
+          </section>
+          <section class="stat-card span-6">
+            <div class="stat-head"><span class="stat-title">题材分布</span><span class="stat-hint">标题 + 正文识别</span></div>
+            <div class="stat-chart" id="chartGenre"></div>
+          </section>
+          <section class="stat-card span-7">
+            <div class="stat-head"><span class="stat-title">Top 20 高赞</span><span class="stat-hint">按赞同排序</span></div>
+            <div class="stat-chart tall" id="chartTop"></div>
+          </section>
+          <section class="stat-card span-5">
+            <div class="stat-head"><span class="stat-title">阅读 · 赞同</span><span class="stat-hint">每点一篇 · 最多 600</span></div>
+            <div class="stat-chart tall" id="chartScatter"></div>
+          </section>
+          <div class="stats-empty" id="dashChartsEmpty" hidden>📭 当前筛选结果为空，没有可统计的数据</div>
         </div>
       </div>
-      <div class="dash-table-wrap">
-        <div class="table-toolbar">
-          <div class="tbl-info" id="dashTableInfo">加载中…</div>
-          <div class="tbl-page">
-            <select id="dashPageSize" title="每页条数">
-              <option value="20">20 条/页</option>
-              <option value="50" selected>50 条/页</option>
-              <option value="100">100 条/页</option>
-              <option value="200">200 条/页</option>
-            </select>
-            <button id="dashPrev" title="上一页">‹</button>
-            <span class="pg-no" id="dashPageNo">1/1</span>
-            <button id="dashNext" title="下一页">›</button>
+
+      <!-- 明细视图：筛选 chips + 表格 -->
+      <div class="dash-view" id="dashViewDetail" hidden>
+        <div class="dash-filterbar" id="dashFilterbar"></div>
+        <div class="dash-table-wrap">
+          <div class="table-toolbar">
+            <div class="tbl-info" id="dashTableInfo">加载中…</div>
+            <div class="tbl-page">
+              <select id="dashPageSize" title="每页条数">
+                <option value="20">20 条/页</option>
+                <option value="50" selected>50 条/页</option>
+                <option value="100">100 条/页</option>
+                <option value="200">200 条/页</option>
+              </select>
+              <button id="dashPrev" title="上一页">‹</button>
+              <span class="pg-no" id="dashPageNo">1/1</span>
+              <button id="dashNext" title="下一页">›</button>
+            </div>
           </div>
+          <div class="dash-table-scroll" id="dashTable"><div class="dash-empty"><span class="em">⏳</span>加载中…</div></div>
         </div>
-        <div class="dash-table-scroll" id="dashTable"><div class="dash-empty"><span class="em">⏳</span>加载中…</div></div>
       </div>
     </div>
 

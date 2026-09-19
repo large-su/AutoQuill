@@ -856,7 +856,13 @@ let dashState = {
   page: 1, pageSize: 50,
 };
 let dashData = { rows: [], total: 0, all_total: 0, stats: {}, generated_at: "", source_file: "" };
-let dashTab = "trend";
+// 看板视图：stats（统计：KPI + 图表）/ detail（明细：筛选 + 表格）。
+// 用户在标题栏切换，选择记 localStorage —— 两个视图互不干扰（2026-09-19 布局重构）
+function _loadDashView() {
+  try { return localStorage.getItem("aqDashView") === "detail" ? "detail" : "stats"; }
+  catch (e) { return "stats"; }
+}
+let dashView = _loadDashView();
 let dashDebounce = null;
 let dashPollTimer = null;
 let dashJustRefreshed = false;
@@ -974,18 +980,31 @@ function kpiCard(label, value, sub, barPct) {
 
 function renderKpis(st, allTotal) {
   const box = $("dashKpis");
+  const sum = $("dashSummary");
   if (!st || !st.total) {
-    box.innerHTML = kpiCard("当前结果", "0", "无匹配内容，调整筛选试试");
+    box.innerHTML = kpiCard("当前结果", "0", "无匹配内容，调整左侧筛选试试");
+    if (sum) sum.innerHTML = "";
     return;
   }
-  const dmin = (st.date_min || "").slice(0, 7);
-  const dmax = (st.date_max || "").slice(0, 7);
-  const span = dmin && dmax ? (dmin === dmax ? dmin : dmin + " ~ " + dmax) : "—";
+  // 互动率 = 赞同 / 阅读；篇均互动 = (赞+评+藏+喜) / 篇
+  const likeRate = st.sum_reads ? (st.sum_likes * 100 / st.sum_reads) : 0;
+  const engage = st.sum_likes + st.sum_comments + st.sum_collects + st.sum_favors;
   box.innerHTML =
-    kpiCard("发布时段", span, "最早 ~ 最近发布") +
-    kpiCard("赞同合计", fmtNum(st.sum_likes), "篇均 " + fmtNum(st.avg_likes)) +
+    kpiCard("已发布", fmtNum(st.total) + '<span class="sub"> 篇</span>',
+            "有赞 " + st.liked + " 篇 · 覆盖 " + st.liked_ratio + "%", st.liked_ratio) +
     kpiCard("阅读合计", fmtNum(st.sum_reads), "篇均 " + fmtNum(st.avg_reads)) +
-    kpiCard("有赞占比", st.liked_ratio + "%", "有赞 " + (st.liked || 0) + " / " + st.total + " 篇", st.liked_ratio);
+    kpiCard("赞同合计", fmtNum(st.sum_likes), "篇均 " + fmtNum(st.avg_likes)) +
+    kpiCard("评论合计", fmtNum(st.sum_comments),
+            "收藏 " + fmtNum(st.sum_collects) + " · 喜欢 " + fmtNum(st.sum_favors)) +
+    kpiCard("赞同率", likeRate.toFixed(1) + "%", "赞同 ÷ 阅读", likeRate) +
+    kpiCard("篇均互动", fmtNum(Math.round(engage / st.total)), "赞 + 评 + 藏 + 喜 / 篇");
+  if (sum) {
+    const dmin = (st.date_min || "").slice(0, 10), dmax = (st.date_max || "").slice(0, 10);
+    sum.innerHTML =
+      '<span><span class="k">统计口径</span>左侧筛选条件（清空即全量）</span>' +
+      '<span><span class="k">数据窗口</span><b>' + esc(dmin || "—") + " ~ " + esc(dmax || "—") + "</b></span>" +
+      '<span><span class="k">快照总量</span><b>' + fmtNum(allTotal || st.total) + "</b> 篇，本次纳入 <b>" + fmtNum(st.total) + "</b> 篇</span>";
+  }
 }
 
 function activeFilterItems() {
@@ -1218,14 +1237,25 @@ function ecBase() {
   };
 }
 
-const CHART_TABS = ["trend", "dist", "funnel", "scatter", "top", "genre"];
-function switchDashTab(tab) {
-  if (!CHART_TABS.includes(tab)) return;
-  dashTab = tab;
-  document.querySelectorAll("#chartTabs .chart-tab").forEach((b) => b.classList.toggle("sel", b.dataset.tab === tab));
-  CHART_TABS.forEach((t) => { $("chartPane-" + t).hidden = t !== tab; });
-  const c = ecCharts["chart" + tab[0].toUpperCase() + tab.slice(1)];
-  if (c) setTimeout(() => c.resize(), 30);
+function applyDashView(view) {
+  dashView = view === "detail" ? "detail" : "stats";
+  try { localStorage.setItem("aqDashView", dashView); } catch (e) { /* 无痕模式忽略 */ }
+  document.querySelectorAll("#dashViewSwitch .view-btn").forEach((b) => {
+    const sel = b.dataset.view === dashView;
+    b.classList.toggle("sel", sel);
+    b.setAttribute("aria-selected", sel ? "true" : "false");
+  });
+  const stats = $("dashViewStats"), detail = $("dashViewDetail");
+  if (stats) stats.hidden = dashView !== "stats";
+  if (detail) detail.hidden = dashView !== "detail";
+  // 统计视图的摘要条已含「总量/筛选口径」，标题栏那两颗 pill 会重复（明细视图保留，
+  // 因为它与表格的「第 X-Y 条 / 共 N 条」口径一致）
+  ["dashCount", "dashSnap"].forEach((id) => {
+    const el = $(id);
+    if (el) el.hidden = dashView === "stats";
+  });
+  // 容器在 hidden 状态下尺寸为 0：切换后必须让 echarts 重新量一次
+  setTimeout(() => Object.values(ecCharts).forEach((c) => c && c.resize()), 30);
 }
 
 function _monthCounts(rows) {
@@ -1248,14 +1278,14 @@ function _bucket(likes) {
 }
 
 function renderCharts(rows) {
-  if (typeof echarts === "undefined") { $("dashChartSection").hidden = true; return; }
-  const emptyEl = $("dashChartEmpty");
+  if (typeof echarts === "undefined") return;
+  const emptyEl = $("dashChartsEmpty");
   if (!rows.length) {
-    emptyEl.hidden = false;
+    if (emptyEl) emptyEl.hidden = false;
     Object.keys(ecCharts).forEach((id) => { const c = ecCharts[id]; if (c) c.clear(); });
     return;
   }
-  emptyEl.hidden = true;
+  if (emptyEl) emptyEl.hidden = true;
 
   // 1) 发布量趋势（按月）
   const tr = _monthCounts(rows);
@@ -1275,15 +1305,21 @@ function renderCharts(rows) {
   // 2) 互动分布（赞同分桶）
   const buckets = ["0", "1-10", "11-50", "51-100", "101-500", "500+"];
   const counts = buckets.map((b) => rows.filter((r) => _bucket(r.likes) === b).length);
+  const peak = Math.max(...counts);            // 最高峰高亮，扫一眼就知道主区间
   ecInit("chartDist").setOption({
     ...ecBase(), grid: { left: 40, right: 16, top: 22, bottom: 34 },
     xAxis: { type: "category", data: buckets,
       axisLine: { lineStyle: { color: EC_BORDER } }, axisLabel: { color: EC_MUTED } },
     yAxis: { type: "value", axisLabel: { color: EC_MUTED },
       splitLine: { lineStyle: { color: EC_SPLIT } } },
-    series: [{ type: "bar", data: counts, name: "篇数",
-      barMaxWidth: 42,
-      itemStyle: { borderRadius: [4, 4, 0, 0] } }],
+    series: [{ type: "bar", name: "篇数", barMaxWidth: 42,
+      data: counts.map((v) => ({
+        value: v,
+        itemStyle: {
+          borderRadius: [4, 4, 0, 0],
+          color: v === peak && peak > 0 ? "#a78bfa" : "#5b6796",
+        },
+      })) }],
   }, true);
 
   // 3) 互动转化漏斗（篇均）
@@ -1291,7 +1327,7 @@ function renderCharts(rows) {
   const avg = (k) => rows.reduce((s, r) => s + (r[k] || 0), 0) / n;
   ecInit("chartFunnel").setOption({
     ...ecBase(), tooltip: { ...ecBase().tooltip, formatter: "{b}: {c}" },
-    series: [{ type: "funnel", left: "6%", width: "88%", top: 10, bottom: 10,
+    series: [{ type: "funnel", left: "9%", width: "82%", top: 12, bottom: 12, gap: 2,
       minSize: "15%", maxSize: "95%", sort: "descending",
       label: { color: EC_TXT, formatter: "{b} {c}" },
       data: [
@@ -1317,13 +1353,15 @@ function renderCharts(rows) {
 
   // 5) Top 20（按赞同）
   const top = [...rows].sort((a, b) => b.likes - a.likes).slice(0, 20);
-  const topLabels = top.map((r) => (r.title || "(无标题)").slice(0, 20));
+  const topLabels = top.map((r) => (r.title || "(无标题)").slice(0, 16));
   ecInit("chartTop").setOption({
-    ...ecBase(), grid: { left: 130, right: 40, top: 8, bottom: 22 },
+    ...ecBase(), grid: { left: 156, right: 46, top: 8, bottom: 22 },
+    tooltip: { ...ecBase().tooltip, trigger: "axis", axisPointer: { type: "shadow" } },
     xAxis: { type: "value", axisLabel: { color: EC_MUTED },
       splitLine: { lineStyle: { color: EC_SPLIT } } },
-    yAxis: { type: "category", data: topLabels,
-      axisLabel: { color: EC_TXT, fontSize: 11 }, axisLine: { lineStyle: { color: EC_BORDER } } },
+    yAxis: { type: "category", data: topLabels, inverse: true,
+      axisLabel: { color: EC_TXT, fontSize: 11, width: 140, overflow: "truncate" },
+      axisLine: { lineStyle: { color: EC_BORDER } } },
     series: [{ type: "bar", data: top.map((r) => r.likes),
       barMaxWidth: 22,
       itemStyle: { borderRadius: [0, 4, 4, 0] } }],
@@ -1339,6 +1377,9 @@ function renderCharts(rows) {
       label: { color: EC_TXT, formatter: "{b} {c}" },
       data: keys.map((k) => ({ name: k, value: gmap[k] })) }],
   }, true);
+
+  // 视图刚切换/容器刚显示时尺寸可能为 0 → 统一重算一次
+  Object.values(ecCharts).forEach((c) => c && c.resize());
 }
 
 /* ---------- 已发布内容：筛选待清理 / 删除 ---------- */
@@ -2587,8 +2628,9 @@ $("modalMask").addEventListener("click", (e) => {
   });
   document.querySelectorAll("#pane-dashboard .df-quick .chip-btn").forEach((b) =>
     b.addEventListener("click", () => applyQuick(b.dataset.from)));
-  document.querySelectorAll("#chartTabs .chart-tab").forEach((b) =>
-    b.addEventListener("click", () => switchDashTab(b.dataset.tab)));
+  document.querySelectorAll("#dashViewSwitch .view-btn").forEach((b) =>
+    b.addEventListener("click", () => applyDashView(b.dataset.view)));
+  applyDashView(dashView);
   $("dashPrev").addEventListener("click", () => {
     if (dashState.page > 1) { dashState.page--; renderDashTable(dashData.rows || []); }
   });

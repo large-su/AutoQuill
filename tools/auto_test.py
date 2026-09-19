@@ -200,13 +200,22 @@ def test_frontend(port):
 
             pg.select_option("#leftModeSel", "dashboard")
             pg.wait_for_function("() => document.querySelectorAll('#dashTable tbody tr').length === 2", timeout=UI_TIMEOUT)
-            check("看板表格", pg.evaluate("() => document.querySelectorAll('#dashTable tbody tr').length") == 2)
-            check("看板 KPI", pg.evaluate("() => document.querySelectorAll('#dashKpis .kpi-card').length") == 4)
-            # 图表 tab 切换 + canvas
-            pg.click("#chartTabs .chart-tab[data-tab='top']"); pg.wait_for_timeout(500)
-            cv = pg.evaluate("() => { const c = document.querySelector('#chartTop canvas'); return c ? c.width > 0 : false; }")
-            check("图表渲染", cv)
-            pg.click("#chartTabs .chart-tab[data-tab='trend']"); pg.wait_for_timeout(300)
+            # 统计视图：默认展示 KPI + 图表栅格（明细视图只留筛选 + 表格）
+            check("看板默认统计视图", pg.evaluate(
+                "() => !document.getElementById('dashViewStats').hidden"
+                " && document.getElementById('dashViewDetail').hidden"))
+            check("看板 KPI", pg.evaluate("() => document.querySelectorAll('#dashKpis .kpi-card').length") >= 4)
+            check("统计摘要条", pg.evaluate(
+                "() => (document.getElementById('dashSummary').textContent || '').includes('数据窗口')"))
+            cv = pg.evaluate("() => { const c = document.querySelector('#chartTrend canvas'); return c ? c.width > 0 : false; }")
+            check("统计图表渲染", cv)
+            # 切到明细：表格可见 + 筛选 chips + 分页
+            pg.click("#dashViewSwitch .view-btn[data-view='detail']"); pg.wait_for_timeout(400)
+            check("明细视图切换", pg.evaluate(
+                "() => document.getElementById('dashViewDetail').hidden === false"
+                " && document.getElementById('dashViewStats').hidden === true"))
+            check("明细表格可见", pg.evaluate(
+                "() => document.querySelectorAll('#dashTable tbody tr').length === 2"))
             # 分页（样例 2 条 < 页容量：应为 1/1 且下一页禁用）
             page_no = pg.evaluate("() => document.getElementById('dashPageNo').textContent")
             next_disabled = pg.evaluate("() => document.getElementById('dashNext').disabled")
@@ -226,7 +235,8 @@ def test_frontend(port):
             check("草稿 KPI", pg.evaluate("() => document.querySelectorAll('#draftKpis .kpi-card').length") == 4)
             pg.click("#draftList .dft-row:nth-child(1) .cb")
             check("草稿勾选", "已选 1 个" in pg.evaluate("() => document.getElementById('draftSelStatus').textContent"))
-            pg.click("#draftList .dft-row:nth-child(2)")
+            # 预览入口是行内的「详情」按钮（点整行是打开知乎编辑页，会新开标签）
+            pg.click("#draftList .dft-row:nth-child(2) .dft-view")
             pg.wait_for_timeout(300)
             check("草稿预览", pg.evaluate("() => document.getElementById('draftViewMask').classList.contains('show')"))
             pg.click("#draftViewClose"); pg.wait_for_timeout(200)

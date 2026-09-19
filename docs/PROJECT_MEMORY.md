@@ -53,6 +53,10 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
   豆包 wait_complete 另加「正文末尾停在章节标题 = 残稿，不判完成」
 - llm_client.py / story_generation.py / story_prompt.py / story_scoring.py：API 生成、提示词、评分、问题池筛选
 - 前端：webui/static/index.html（结构）+ style.css + app.js（已抽离）；四大模式：工作台 / 作者蒸馏 / 已发布内容看板 / 草稿箱素材
+  · 看板双视图（2026-09-19）：**统计**（6 KPI + 摘要条 + 12 栅格图表卡）/ **明细**（筛选 chips +
+    表格），标题栏分段控件切换，状态存 localStorage `aqDashView`；样式见 style.css 的
+    `.view-switch / .stats-grid / .stat-card / .stats-kpis`；改样式后可跑
+    `tools/archive/probes/shot_dashboard.py` 出图肉眼验收（含样例数据，不碰真实账号）
 
 ## 4. 已完成的重大功能（截至 v4.9.0）
 
