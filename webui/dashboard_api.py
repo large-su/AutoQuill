@@ -5,7 +5,10 @@ import threading
 
 from pydantic import BaseModel
 
-from webui.browser_tasks import _DASH_DEL, _DASH_REFRESH, browser_busy
+from webui.browser_tasks import (
+    _DASH_DEL, _DASH_REFRESH, browser_busy, clear_zhihu_login_stale,
+    mark_zhihu_login_stale,
+)
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ def register_dashboard(app):
             return {"ok": False, "status": "busy",
                     "message": "「" + busy[0] + "」任务进行中，请完成后再刷新看板"}
         _DASH_REFRESH.update(status="running", progress="启动抓取…",
-                             count=0, pct=None, error="")
+                             count=0, pct=None, error="", need_login=False)
         log.info("看板刷新任务启动：从知乎创作中心抓取已发布内容")
 
         def _on_scrape_progress(text, pct):
@@ -61,18 +64,26 @@ def register_dashboard(app):
                 count=int(m.group(1)) if m else _DASH_REFRESH["count"])
 
         def _run():
+            from applications.zhihu_story.browser_adapter import ZhihuLoginRequired
             try:
                 from webui import published
                 rows = published.scrape(progress=_on_scrape_progress)
                 if rows:
+                    clear_zhihu_login_stale()      # 抓到了 → 登录态有效
                     _DASH_REFRESH.update(status="done", count=len(rows), pct=100,
                                          progress=f"完成，共 {len(rows)} 条")
                     log.info("看板刷新完成：%d 条", len(rows))
                 else:
                     _DASH_REFRESH.update(
                         status="error",
-                        error="抓取未取到有效数据（可能未登录/页面改版），已保留上次快照")
+                        error="抓取未取到有效数据（可能页面改版），已保留上次快照")
                     log.warning("看板刷新未取到有效数据，已保留上次快照")
+            except ZhihuLoginRequired as exc:
+                # 登录态失效：给出可执行的提示（前端据 need_login 高亮「重新登录」）
+                mark_zhihu_login_stale(str(exc))
+                _DASH_REFRESH.update(status="error", error=str(exc),
+                                     progress="", need_login=True)
+                log.warning("看板刷新中止：知乎登录态已失效")
             except Exception as exc:  # noqa: BLE001
                 log.exception("dashboard 刷新失败")
                 _DASH_REFRESH.update(status="error", error=str(exc))
@@ -119,15 +130,25 @@ def register_dashboard(app):
         log.info("看板删除任务启动：%d 条（%s）",
                  len(aids), ",".join(aids[:20]) + ("…" if len(aids) > 20 else ""))
         _DASH_DEL.update(status="running", progress="开始…", count=len(aids),
-                         deleted=0, error="")
+                         deleted=0, removed=0, error="", need_login=False)
 
         def _run():
+            from applications.zhihu_story.browser_adapter import ZhihuLoginRequired
             try:
                 from webui import published
                 deleted = published.delete_zhihu(
                     aids, progress=lambda t, p: _DASH_DEL.update(progress=t))
-                _DASH_DEL.update(status="done", deleted=len(deleted))
-                log.info("看板删除任务完成：%d/%d 条", len(deleted), len(aids))
+                # ★ 本地同步：知乎上删掉了，看板快照同步剔除（用户不必重抓整页）
+                removed = published.prune_aids(deleted) if deleted else 0
+                clear_zhihu_login_stale()
+                _DASH_DEL.update(status="done", deleted=len(deleted),
+                                 removed=removed)
+                log.info("看板删除任务完成：%d/%d 条，本地同步剔除 %d 条",
+                         len(deleted), len(aids), removed)
+            except ZhihuLoginRequired as exc:
+                mark_zhihu_login_stale(str(exc))
+                _DASH_DEL.update(status="error", error=str(exc), need_login=True)
+                log.warning("看板删除中止：知乎登录态已失效")
             except Exception as exc:  # noqa: BLE001
                 log.exception("知乎删除任务失败")
                 _DASH_DEL.update(status="error", error=str(exc))

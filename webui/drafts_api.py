@@ -5,7 +5,10 @@ import threading
 
 from pydantic import BaseModel
 
-from webui.browser_tasks import _DRAFTS_DEL, _DRAFTS_REFRESH, browser_busy
+from webui.browser_tasks import (
+    _DRAFTS_DEL, _DRAFTS_REFRESH, browser_busy, clear_zhihu_login_stale,
+    mark_zhihu_login_stale,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +48,7 @@ def register_drafts(app):
             return {"ok": False, "status": "busy",
                     "message": "「" + busy[0] + "」任务进行中，请完成后再刷新草稿箱"}
         _DRAFTS_REFRESH.update(status="running", progress="启动抓取…",
-                               count=0, pct=None, error="")
+                               count=0, pct=None, error="", need_login=False)
         log.info("草稿箱刷新任务启动")
 
         def _on_progress(text, pct):
@@ -56,17 +59,24 @@ def register_drafts(app):
                 count=int(m.group(1)) if m else _DRAFTS_REFRESH["count"])
 
         def _run():
+            from applications.zhihu_story.browser_adapter import ZhihuLoginRequired
             try:
                 from webui import drafts
                 rows = drafts.scrape(progress=_on_progress)
                 if rows:
+                    clear_zhihu_login_stale()      # 抓到了 → 登录态有效
                     _DRAFTS_REFRESH.update(status="done", count=len(rows), pct=100,
                                            progress=f"完成，共 {len(rows)} 个")
                     log.info("草稿箱刷新完成：%d 个", len(rows))
                 else:
                     _DRAFTS_REFRESH.update(
                         status="error",
-                        error="未抓取到草稿（可能未登录/页面改版），已保留上次快照")
+                        error="未抓取到草稿（可能页面改版），已保留上次快照")
+            except ZhihuLoginRequired as exc:
+                mark_zhihu_login_stale(str(exc))
+                _DRAFTS_REFRESH.update(status="error", error=str(exc),
+                                       progress="", need_login=True)
+                log.warning("草稿箱刷中止：知乎登录态已失效")
             except Exception as exc:  # noqa: BLE001
                 log.exception("草稿箱刷新失败")
                 _DRAFTS_REFRESH.update(status="error", error=str(exc))
@@ -89,15 +99,25 @@ def register_drafts(app):
         log.info("草稿删除任务启动：%d 个（%s）",
                  len(qids), ",".join(qids[:20]) + ("…" if len(qids) > 20 else ""))
         _DRAFTS_DEL.update(status="running", progress="开始…", count=len(qids),
-                           deleted=0, error="")
+                           deleted=0, removed=0, error="", need_login=False)
 
         def _run():
+            from applications.zhihu_story.browser_adapter import ZhihuLoginRequired
             try:
                 from webui import drafts
                 deleted = drafts.delete_drafts(
                     qids, progress=lambda t, p: _DRAFTS_DEL.update(progress=t))
-                _DRAFTS_DEL.update(status="done", deleted=len(deleted))
-                log.info("草稿删除任务完成：%d/%d 个", len(deleted), len(qids))
+                # ★ 本地同步：知乎草稿删掉了，本地草稿快照同步剔除
+                removed = drafts.prune_qids(deleted) if deleted else 0
+                clear_zhihu_login_stale()
+                _DRAFTS_DEL.update(status="done", deleted=len(deleted),
+                                   removed=removed)
+                log.info("草稿删除任务完成：%d/%d 个，本地同步剔除 %d 个",
+                         len(deleted), len(qids), removed)
+            except ZhihuLoginRequired as exc:
+                mark_zhihu_login_stale(str(exc))
+                _DRAFTS_DEL.update(status="error", error=str(exc), need_login=True)
+                log.warning("草稿删除中止：知乎登录态已失效")
             except Exception as exc:  # noqa: BLE001
                 log.exception("草稿删除任务失败")
                 _DRAFTS_DEL.update(status="error", error=str(exc))

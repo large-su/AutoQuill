@@ -101,6 +101,12 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
   兜底；抄袭红线由 core.originality.opening_copy_signals（默认 12 字连续重合）在重试
   循环里拦截。开关：config/story.py 的 OPENING_MIRROR_REFERENCE / OPENING_VARIETY /
   OPENING_COPY_MIN_RUN
+- 知乎登录态会「cookie 在、服务端已登出」：`is_logged_in()` 只看 z_c0 会假阳性，
+  任何页面被 302 到 /signin（2026-09-19 看板/草稿箱「刷新失败」的真因）。
+  抓取/删除链路统一用 `page_needs_login()` 识别（抛 ZhihuLoginRequired），前端提示
+  重新登录；排查用 tools/archive/probes/probe_state_login.py（一条命令定性）
+- 删除即同步本地：知乎删除成功后由 API 调 `_snapshot.prune_rows()` 剔除本地快照
+  （published.prune_aids / drafts.prune_qids），前端重载列表即可见，不必整页重抓
 - 网页端正文提取：markdown 会被渲染成 DOM（`## **N**` → h2），只读 innerText 必丢
   章节语法 → 一律走 base.MARKDOWN_REBUILD_JS 逐块重建；判「生成完成」前查末尾是否
   停在章节标题（base/豆包已有判据）；格式校验只认文本形态，别让通道差异背锅

@@ -93,6 +93,10 @@ def api_setup_status():
     zhihu_logged_in = os.path.exists(STORAGE_STATE_PATH)
     web_ok = _web_llm_logged_in_cached() if edge_ok else False
     login_running = (_login_thread is not None and _login_thread.is_alive())
+    # 登录态失效标记（2026-09-19）：cookie 还在但服务端已不认时，抓取/删除链路
+    # 会把页面跳登录页的事实记下来，这里带给前端提示「重新登录知乎」。
+    from webui.browser_tasks import zhihu_login_stale
+    stale = zhihu_login_stale()
     return {
         "version": _setup_version(),
         "edge_ok": edge_ok,
@@ -100,6 +104,8 @@ def api_setup_status():
         "web_llm_logged_in": web_ok,
         "web_driver": WEB_DRIVER_NAME,
         "zhihu_logged_in": zhihu_logged_in,
+        "zhihu_login_stale": bool(stale.get("stale")),
+        "zhihu_login_stale_reason": stale.get("reason", ""),
         "login_running": login_running,
         "login_kind": _login_kind if login_running else "",
         "login_error": _login_error,

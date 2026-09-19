@@ -25,6 +25,41 @@ def latest_file(data_dir: Path, pattern: str) -> Path | None:
     return files[0] if files else None
 
 
+def prune_rows(data_dir: Path, pattern: str, key: str, values) -> int:
+    """从最新快照里剔除主键命中 values 的行（本地即时同步用，2026-09-19）。
+
+    场景：在知乎上删掉已发布回答/草稿后，本地快照必须同步剔除，用户不必
+    再整页重抓一次。返回剔除行数；快照缺失/读取或写回失败返回 0（只记日志，
+    由调用方决定是否兜底重抓）。"""
+    path = latest_file(data_dir, pattern)
+    if not path:
+        return 0
+    want = {str(v) for v in values if v not in (None, "")}
+    if not want:
+        return 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            rows = json.load(f)
+    except Exception as exc:      # noqa: BLE001
+        log.warning("快照读取失败，无法本地剔除：%s", exc)
+        return 0
+    if not isinstance(rows, list):
+        return 0
+    keep = [r for r in rows
+            if not (isinstance(r, dict) and str(r.get(key)) in want)]
+    removed = len(rows) - len(keep)
+    if removed <= 0:
+        return 0
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(keep, f, ensure_ascii=False, indent=2)
+    except Exception as exc:      # noqa: BLE001
+        log.warning("快照写回失败（本地剔除未生效）：%s", exc)
+        return 0
+    log.info("快照本地剔除 %d 行（%s，主键 %s）", removed, path.name, key)
+    return removed
+
+
 def load_snapshot(data_dir: Path, pattern: str,
                   coerce_row: Callable[[dict], dict | None],
                   id_keys: Iterable[str],

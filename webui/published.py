@@ -330,23 +330,11 @@ def poor_and_old(rows, before="", max_likes=5, max_reads=100,
 
 
 def prune_aids(aids):
-    """从最新快照移除指定 aid（仅本地看板数据，可重抓恢复）。返回移除数量。"""
-    path = _latest_file()
-    if not path:
-        return 0
-    try:
-        with open(path, encoding="utf-8") as f:
-            rows = json.load(f)
-    except Exception as exc:
-        log.warning("读取快照失败，无法移除：%s", exc)
-        return 0
-    want = {str(a) for a in aids}
-    keep = [r for r in rows if str(r.get("aid")) not in want]
-    removed = len(rows) - len(keep)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(keep, f, ensure_ascii=False, indent=2)
-    log.info("已发布看板本地移除 %d 条（%s）", removed, path)
-    return removed
+    """从最新快照移除指定 aid（本地看板数据，可重抓恢复）。返回移除数量。
+
+    2026-09-19 起：知乎删除成功后由 dashboard_api 自动调用——网页端删掉了，
+    本地看板同步剔除，用户不必再整页重抓一次。"""
+    return _snap.prune_rows(_DATA_DIR, "published_answers_*.json", "aid", aids)
 
 
 def delete_zhihu(aids, progress=None, stop_flag=None):
@@ -356,7 +344,9 @@ def delete_zhihu(aids, progress=None, stop_flag=None):
     → 确认弹窗里点「确定/删除」。不依赖创作中心列表滚动，已实测答案页「设置」
     下拉里有「删除」。返回成功删除的 aid 列表。
     """
-    from applications.zhihu_story.browser_adapter import ZhihuBrowser
+    from applications.zhihu_story.browser_adapter import (
+        LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired, page_needs_login,
+    )
     b = ZhihuBrowser(headless=True)
     deleted = []
     _CLICK_SET = """() => {
@@ -411,6 +401,10 @@ def delete_zhihu(aids, progress=None, stop_flag=None):
                     b.page.goto(f"https://www.zhihu.com/answer/{aid}",
                                 wait_until="domcontentloaded", timeout=30000)
                 time.sleep(2.5)
+                # 登录态失效 → 整批中止（继续跑只会每条都「未找到按钮」）
+                if page_needs_login(b.page):
+                    log.warning("删除任务被中止：页面跳转到登录页 %s", b.page.url)
+                    raise ZhihuLoginRequired(LOGIN_EXPIRED_MSG)
                 # 已删除/不存在的页面：快速识别并跳过，不再浪费时间找按钮
                 if b._safe_evaluate(_DEAD_JS):
                     return "skip_deleted", "页面显示已删除/不存在"
@@ -431,6 +425,8 @@ def delete_zhihu(aids, progress=None, stop_flag=None):
                 if conf or gone:
                     return "deleted", ""
                 return "unconfirmed", "已点「删除」但未确认到结果"
+            except ZhihuLoginRequired:
+                raise          # 登录失效要中断整批，不能降级成「单条异常」
             except Exception as exc:  # noqa: BLE001
                 return "error", str(exc)
 
@@ -490,7 +486,10 @@ def scrape(progress=None, stop_flag=None):
     返回归一化后的 rows（同 load）。progress(text, pct) 可选；stop_flag() 返回
     True 时中止。需要已登录的知乎会话（复用 browser_adapter 登录态）。
     """
-    from applications.zhihu_story.browser_adapter import ZhihuBrowser, _check_cancel
+    from applications.zhihu_story.browser_adapter import (
+        LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired, _check_cancel,
+        page_needs_login,
+    )
 
     def _count(b):
         return b._safe_evaluate(
@@ -518,6 +517,11 @@ def scrape(progress=None, stop_flag=None):
             progress("打开创作中心内容管理页…", None)
         b.page.goto(_URL, wait_until="domcontentloaded", timeout=30000)
         time.sleep(6)
+        # 登录态失效的直接证据：被重定向到登录页（cookie 还在但服务端已不认，
+        # 2026-09-19 真实事故：刷新只报「未取到有效数据」，用户不知道该重新登录）
+        if page_needs_login(b.page):
+            log.warning("看板抓取被重定向到登录页：%s", b.page.url)
+            raise ZhihuLoginRequired(LOGIN_EXPIRED_MSG)
 
         prev = _count(b)
         stable = 0

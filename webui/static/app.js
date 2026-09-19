@@ -1137,8 +1137,12 @@ async function refreshDashboard() {
           loadDashboard(true);
         } else if (s.status === "error") {
           clearInterval(dashPollTimer); dashPollTimer = null;
-          setRefreshBar(null, "刷新失败：" + (s.error || ""));
-          showDashStatus("刷新失败：" + esc(s.error), "err", 8000);
+          // 登录态失效（need_login）：直接给可执行指引，别只说「刷新失败」
+          const errText = s.need_login
+            ? "知乎登录已失效：请点右上角「设置」重新登录知乎，再回来刷新"
+            : ("刷新失败：" + (s.error || ""));
+          setRefreshBar(null, errText);
+          showDashStatus(esc(errText), "err", s.need_login ? 15000 : 8000);
           loadDashboard(true);
         }
       } catch (e) { /* ignore */ }
@@ -1459,7 +1463,11 @@ async function clDeleteZhihu() {
       const s = await sr.json();
       $("clStatus").textContent = s.status === "running"
         ? "删除中：" + s.progress : (s.status === "done"
-          ? "已删除 " + s.deleted + "/" + s.count + " 条" : "删除失败：" + s.error);
+          ? ("已删除 " + s.deleted + "/" + s.count + " 条"
+           + (s.removed ? "，本地看板同步移除 " + s.removed + " 条" : ""))
+        : (s.need_login
+           ? "知乎登录已失效：请到「设置」重新登录知乎"
+           : "删除失败：" + s.error));
       if (s.status === "done" || s.status === "error") { clearInterval(poll); loadDashboard(); }
     } catch (e) { /* ignore */ }
   }, 3000);
@@ -1688,8 +1696,11 @@ async function refreshDrafts() {
           showDraftStatus("刷新完成，共 " + (s.count || 0) + " 个草稿", "ok", 6000);
         } else if (s.status === "error") {
           clearInterval(draftPollTimer); draftPollTimer = null;
-          setDrfBar(null, "刷新失败：" + (s.error || ""));
-          showDraftStatus("刷新失败：" + esc(s.error), "err", 8000);
+          const errText = s.need_login
+            ? "知乎登录已失效：请点右上角「设置」重新登录知乎，再回来刷新"
+            : ("刷新失败：" + (s.error || ""));
+          setDrfBar(null, errText);
+          showDraftStatus(esc(errText), "err", s.need_login ? 15000 : 8000);
           loadDrafts(true);
         }
       } catch (e) { /* ignore */ }
@@ -2116,7 +2127,18 @@ async function loadSetupStatus() {
     renderModeCardState(st);
     selectModeCard(st);
 
-    if (st.zhihu_logged_in) {
+    if (st.zhihu_logged_in && st.zhihu_login_stale) {
+      // ★ 2026-09-19：cookie 还在但服务端已不认（页面被重定向到登录页）——
+      // 抓取/删除都会失败，这里直接提示重新登录，不再假装「已登录」
+      zhihu.classList.remove("done");
+      zhihu.querySelector(".s-badge").textContent = "3";
+      zhihu.querySelector(".s-ctl").style.display = "";
+      $("stepZhihuDesc").innerHTML =
+        "⚠ 知乎登录态已失效（网页端已把会话登出）：请重新登录一次知乎，"
+        + "否则看板/草稿箱刷新与发布都会失败。";
+      $("btnZhihuLogin").disabled = false;
+      $("btnZhihuLogin").textContent = "打开 Edge 重新登录知乎";
+    } else if (st.zhihu_logged_in) {
       zhihu.classList.add("done");
       zhihu.querySelector(".s-badge").textContent = "✓";
       $("stepZhihuDesc").textContent = "已保存知乎登录态。";

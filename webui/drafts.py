@@ -190,7 +190,10 @@ def summarize(rows) -> dict:
 
 def scrape(progress=None, stop_flag=None):
     """抓取草稿箱（回答草稿）快照落盘。返回归一化 rows；空结果不落盘。"""
-    from applications.zhihu_story.browser_adapter import ZhihuBrowser, _check_cancel
+    from applications.zhihu_story.browser_adapter import (
+        LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired, _check_cancel,
+        page_needs_login,
+    )
 
     def _count(b):
         return b._safe_evaluate(
@@ -203,6 +206,11 @@ def scrape(progress=None, stop_flag=None):
             progress("打开草稿箱…", None)
         b.page.goto(_DRAFT_URL, wait_until="domcontentloaded", timeout=30000)
         time.sleep(6)
+        # 登录态失效的直接证据：被重定向到登录页（2026-09-19：此前只报
+        # 「抓取结果为空（可能未登录或页面结构变化）」，用户不知道该重新登录）
+        if page_needs_login(b.page):
+            log.warning("草稿箱抓取被重定向到登录页：%s", b.page.url)
+            raise ZhihuLoginRequired(LOGIN_EXPIRED_MSG)
         prev = _count(b)
         stable = 0
         for i in range(1, 60):
@@ -319,10 +327,20 @@ _GONE_JS = """() => {
 }"""
 
 
+def prune_qids(qids):
+    """从最新草稿快照剔除指定 qid（本地同步用）。返回剔除数量。
+
+    2026-09-19 起：知乎草稿删除成功后由 drafts_api 自动调用——网页端删掉了，
+    本地草稿箱同步剔除，用户不必再整页重抓一次。"""
+    return _snap.prune_rows(_DATA_DIR, "drafts_*.json", "qid", qids)
+
+
 def delete_drafts(qids, progress=None, stop_flag=None):
     """从知乎草稿箱删除指定回答草稿（不可逆）。★ 由界面显式确认后调用。
     单页处理：定位卡片→点删除→确认弹窗→校验消失。单条失败自动跳过继续。"""
-    from applications.zhihu_story.browser_adapter import ZhihuBrowser
+    from applications.zhihu_story.browser_adapter import (
+        LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired, page_needs_login,
+    )
     b = ZhihuBrowser(headless=True)
     deleted = []
     try:
@@ -331,6 +349,9 @@ def delete_drafts(qids, progress=None, stop_flag=None):
             progress("打开草稿箱…", None)
         b.page.goto(_DRAFT_URL, wait_until="domcontentloaded", timeout=30000)
         time.sleep(6)
+        if page_needs_login(b.page):
+            log.warning("草稿删除被中止：页面跳转到登录页 %s", b.page.url)
+            raise ZhihuLoginRequired(LOGIN_EXPIRED_MSG)
         for _ in range(4):
             b._safe_evaluate(
                 "() => { window.scrollTo(0, document.body.scrollHeight); return true; }")

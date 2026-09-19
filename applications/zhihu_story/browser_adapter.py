@@ -175,6 +175,29 @@ def _browser_factory(headless):
 register_browser_factory(_browser_factory)
 
 
+# ---- 登录态失效识别（2026-09-19）----
+# 事故：知乎服务端把会话判失效后，cookie 里的 z_c0 仍在（is_logged_in 只看
+# cookie → 仍报「已登录」），但任何页面都会被重定向到 /signin。抓取端于是
+# 拿到 0 条，界面只显示模糊的「刷新失败」。这里给出「页面是否停在登录页」的
+# 直接证据，供看板/草稿箱抓取与删除链路复用。
+LOGIN_EXPIRED_MSG = (
+    "知乎登录态已失效（页面被重定向到登录页），请在控制台右上角「设置」里"
+    "重新登录知乎，然后再点刷新")
+
+
+class ZhihuLoginRequired(RuntimeError):
+    """知乎登录态失效：页面停在登录页，需要用户重新登录。"""
+
+
+def page_needs_login(page):
+    """当前页面是否停在知乎登录页（登录态失效的直接证据）。"""
+    try:
+        url = page.url or ""
+    except Exception:
+        return False
+    return "/signin" in url
+
+
 def login_zhihu_flow(timeout=300):
     """打开可见 Edge 窗口引导用户手动登录知乎，检测到登录后保存登录态。
 
