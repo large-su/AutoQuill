@@ -45,8 +45,10 @@ def plan_fingerprint(plan) -> str:
     """影响排班的字段指纹（变了就重排未执行部分）。"""
     key = {
         # 排班算法版本：算法改了要 +1，否则「今天已经排过」的旧时间轴不会被重排
-        # （v2 = 2026-09-19 改成「时段内铺开」+ 上限公式）
-        "sched": 2,
+        # （v2 = 2026-09-19 改成「时段内铺开」+ 上限公式；
+        #   v3 = 2026-09-19 修「中途改计划从早上重铺 / 未来作业被凭空顺延」，
+        #        并让新排班只落在「现在之后」）
+        "sched": 3,
         "window": plan.get("window"),
         "min_gap": plan.get("min_gap_minutes"),
         "gap_jitter": plan.get("gap_jitter_ratio"),
@@ -155,12 +157,17 @@ def _done_jobs(schedule, task_type):
     return [j for j in schedule
             if j.get("type") == task_type and j.get("status") in _CONSUMED]
 
-def _build_schedule(day, plan, schedule=None, counters=None):
+def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
     """生成当天作业列表（含去碰撞）。
 
     「今天已经做了多少」有两个来源，取较大者（避免重复计）：
       a) schedule 里 status=done/running 的作业（本进程排班内）；
       b) counters（当天台账统计，跨重启/排班丢失后的依据——用户明确要求）。
+
+    not_before：不要把作业排在这个时间之前（中途改计划/晚上才启动时传「现在」）。
+    否则晚上 22:40 改一次配额，当天时间轴会从早上 05:00 重新铺一遍，
+    生成十几条「已经过去的点」，界面上一片「已跳过」——用户看到的全是噪音
+    （线上踩过：6 发布 + 8 撰写全部在生成那一刻就过期）。
     """
     schedule = schedule or []
     counters = counters or {}
@@ -198,6 +205,8 @@ def _build_schedule(day, plan, schedule=None, counters=None):
         eff_start = win_start
         if last_done is not None:
             eff_start = max(win_start, last_done + timedelta(minutes=min_gap))
+        if not_before is not None and not_before > eff_start:
+            eff_start = not_before          # 只在「现在之后」铺（见函数 docstring）
         window_minutes = (win_end - eff_start).total_seconds() / 60.0
         # ★ 数量上限是算出来的：(N-1) * G ≤ W → N ≤ floor(W/G) + 1
         limit = feasible_count(window_minutes, min_gap)
@@ -276,7 +285,8 @@ def materialize_day(now, plan, day_data, done_counts=None):
         keep = [j for j in day_data.get("schedule", [])
                 if j.get("status") in _CONSUMED or j.get("type") not in TASK_TYPES]
         day_data["schedule"] = keep + _build_schedule(day, plan, keep,
-                                                       day_data.get("counters") or {})
+                                                       day_data.get("counters") or {},
+                                                       not_before=now)
         day_data["plan_hash"] = fingerprint
         day_data.setdefault("notes", []).append(
             "%s 按最新计划重排（保留已完成 %d 项）" % (now.strftime("%H:%M"), len(keep)))
@@ -333,13 +343,24 @@ def apply_catch_up(now, plan, day_data):
         cfg = (plan.get("tasks") or {}).get(task_type) or {}
         gap = float(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
         win_end = _window_bounds(day_data["date"], plan, cfg)[1]
-        base = max(now + timedelta(minutes=2),
-                   anchor.get(task_type, now) + timedelta(minutes=gap))
+        # ★ anchor 里没有该类（今天还什么都没做）→ 第一项就从 now+2 开始，
+        #   不能按「now + 一个完整间隔」推：那要求剩余时段 ≥ 一个间隔，
+        #   否则晚上启动时第一项也会被误判成「当天排不下」而全部跳过
+        prev = anchor.get(task_type)
+        if job.get("caught_up"):
+            # 已经顺延过一次还没轮到（tick 间隔被拖长/电脑休眠）→ 直接现在执行，
+            # 否则「顺延到 now+2、下次又错过、再顺延到 now+2」会永远轮不到它
+            base = now
+        else:
+            base = now + timedelta(minutes=2)
+            if prev is not None:
+                base = max(base, prev + timedelta(minutes=gap))
         if base > win_end:
             job["status"] = STATUS_SKIPPED
             job["note"] = "错过时间点且当天时段已过（未补做）"
             continue
         job["planned_at"] = base.replace(microsecond=0).isoformat()
+        job["caught_up"] = True
         job["note"] = (job.get("note") or "") + "（错过原时间点，当日内顺延）"
         anchor[task_type] = base
         placed_missed += 1
@@ -349,7 +370,11 @@ def apply_catch_up(now, plan, day_data):
         cfg = (plan.get("tasks") or {}).get(task_type) or {}
         gap = float(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
         win_end = _window_bounds(day_data["date"], plan, cfg)[1]
-        base = max(t, anchor.get(task_type, t) + timedelta(minutes=gap))
+        # ★ 只有「前面真有作业被顺延」时才需要跟着推；没有 anchor 就保持原时间。
+        #   旧写法 anchor.get(type, t) 会退化成 t + gap —— 一个还没到点的作业
+        #   会被推到「自己 + 一个间隔」之后，凑巧越过时段末端就被判跳过（线上踩到过）
+        prev = anchor.get(task_type)
+        base = t if prev is None else max(t, prev + timedelta(minutes=gap))
         if base > win_end:
             job["status"] = STATUS_SKIPPED
             job["note"] = "顺延后已超出当天时段（未执行）"

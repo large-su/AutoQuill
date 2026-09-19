@@ -55,6 +55,8 @@ class AutomationScheduler:
         self._notices = []        # 给 UI 的通知（环形，最多 50 条）
         self._last_day_hash = ""
         self._closed_day = ""     # 已经为哪一天做过「时段结束收尾」（每天只通知一次）
+        self._ledgered_day = ""   # 台账补记：已记账的作业 key（按天重置，重启后从台账恢复）
+        self._ledgered_keys = set()
 
     # ---------------- 通知 ----------------
 
@@ -149,6 +151,7 @@ class AutomationScheduler:
         day_data = planner.materialize_day(now, plan, day_data,
                                            store.done_counts(day))
         day_data = planner.apply_catch_up(now, plan, day_data)
+        self._ledger_skips(now, day, day_data)
         self._save_day_if_changed(day, day_data)
         in_window = planner.window_open(now, plan)
         if not in_window:
@@ -174,6 +177,33 @@ class AutomationScheduler:
                 return                     # 手动任务优先，等它跑完再派活
         self._run_job(due[0], day, day_data, plan)
 
+    def _ledger_skips(self, now, day, day_data):
+        """把「跳过 / 需要人工」的作业补进台账。
+
+        为什么不只在执行时记账：作业可能是**没执行**就被跳过（错过时间点、时段结束、
+        排不下），而用户看「今日执行记录」时最想知道的恰恰是这类「为什么没做」。
+        线上就踩过：14 项全被跳过，台账却一条都没有，界面上一片空白。
+        """
+        if self._ledgered_day != day:
+            self._ledgered_day = day
+            self._ledgered_keys = {r.get("key") for r in store.load_ledger(day)
+                                   if r.get("key")}
+        for job in day_data.get("schedule", []):
+            if job.get("status") not in (STATUS_SKIPPED, STATUS_NEEDS_HUMAN):
+                continue
+            key = job.get("key")
+            if not key or key in self._ledgered_keys:
+                continue
+            self._ledgered_keys.add(key)
+            store.append_ledger({
+                "day": day, "key": key, "type": job.get("type"),
+                "status": job.get("status"), "units": 0,
+                "planned_at": job.get("planned_at"),
+                "finished_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                "message": job.get("note") or "已跳过",
+                "artifacts": [], "dry_run": bool(job.get("dry_run")),
+            })
+
     def _close_out_day(self, now, plan, day, day_data):
         """时段已过：给今天剩下的「待执行」作业一个明确收尾（每天只通知一次）。
 
@@ -195,14 +225,7 @@ class AutomationScheduler:
         for job in leftover:
             job["status"] = STATUS_SKIPPED
             job["note"] = (job.get("note") or "") + "（运行时段已结束，今天不再执行）"
-            store.append_ledger({
-                "day": day, "key": job["key"], "type": job["type"],
-                "status": STATUS_SKIPPED, "units": 0,
-                "planned_at": job.get("planned_at"),
-                "finished_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
-                "message": "运行时段已结束，未执行",
-                "artifacts": [], "dry_run": bool(job.get("dry_run")),
-            })
+        self._ledger_skips(now, day, day_data)      # 跳过也要进台账（见该方法说明）
         if leftover:
             self._save_day_if_changed(day, day_data)
         done = len([j for j in schedule if j.get("status") == STATUS_DONE])
@@ -289,6 +312,7 @@ class AutomationScheduler:
         with self._lock:
             self._running_job = None
             self._run_progress = None
+        self._ledgered_keys.add(job.get("key") or "")
         before = self._fails.get(job["type"], 0)
         self._update_failures(job["type"], job["status"], plan)
         # 失败补位：熔断前先试着「当日完成」（用户口径：数量当日完成即可）

@@ -207,6 +207,57 @@ class PlannerTest(unittest.TestCase):
             self.assertLessEqual(datetime.fromisoformat(j["planned_at"]), end,
                                  j["planned_at"])
 
+    def test_late_night_start_does_not_pile_up_past_jobs(self):
+        """复现线上场景：22:40 才改计划/启动，不能再从早上铺出十几条「已经过去的点」。"""
+        plan = normalize_plan({"enabled": True, "tasks": {
+            "publish_drafts": {"enabled": True, "daily_cap": 6},
+            "full_chain": {"enabled": True, "daily_cap": 8}}})
+        late = datetime(2026, 9, 19, 22, 40, 0)
+        day = planner.materialize_day(late, plan, {}, {})
+        planned = [j for j in day["schedule"] if j["status"] == planner.STATUS_PLANNED]
+        past = [j for j in planned
+                if datetime.fromisoformat(j["planned_at"]) < late]
+        self.assertEqual(past, [], [j["planned_at"] for j in past])
+        # 剩余 50 分钟 + 最小间隔 60 分钟 → 每类最多 1 项（数学上限，见 feasible_count）
+        self.assertLessEqual(len(planned), 2)
+        self.assertTrue(any(j["type"] == "publish_drafts" for j in planned))
+        # 排不下的部分只留一条说明，不刷一屏跳过
+        skipped = [j for j in day["schedule"] if j["status"] == planner.STATUS_SKIPPED]
+        self.assertLessEqual(len(skipped), 2)
+        self.assertTrue(any("排不下" in (j.get("note") or "") for j in skipped))
+
+    def test_future_job_is_not_pushed_by_phantom_anchor(self):
+        """还没到点的作业不该被「凭空 + 一个间隔」推走（线上把 22:50 的发布判死了）。"""
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
+        plan["min_gap_minutes"] = 60
+        built = datetime(2026, 9, 20, 8, 0, 0)
+        day = planner.materialize_day(built, plan, {}, {})
+        times = [datetime.fromisoformat(j["planned_at"]) for j in day["schedule"]]
+        # 从「第一个点之后 30 分钟」开始处理：第一项错过、后面的还在未来
+        now = times[0] + timedelta(minutes=30)
+        day = planner.apply_catch_up(now, plan, day)
+        jobs = day["schedule"]
+        self.assertTrue(all(j["status"] == planner.STATUS_PLANNED for j in jobs),
+                        [(j["status"], j.get("note")) for j in jobs])
+        planned = sorted(datetime.fromisoformat(j["planned_at"]) for j in jobs)
+        self.assertEqual(planned[1:], times[1:])       # 未来作业保持原时间
+        self.assertGreaterEqual((planned[1] - planned[0]).total_seconds() / 60, 60)
+
+    def test_repeated_catch_up_eventually_executes(self):
+        """顺延过的作业不能「一直被顺延」：tick 间隔被拖长时下一轮要直接执行。"""
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 1})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        first = datetime.fromisoformat(day["schedule"][0]["planned_at"])
+        later = first + timedelta(minutes=30)          # 错过 → 顺延到 later+2
+        day = planner.apply_catch_up(later, plan, day)
+        job = day["schedule"][0]
+        self.assertTrue(job.get("caught_up"))
+        again = datetime.fromisoformat(job["planned_at"]) + timedelta(minutes=30)
+        day = planner.apply_catch_up(again, plan, day)  # 又错过 → 直接现在执行
+        job = day["schedule"][0]
+        self.assertEqual(job["status"], planner.STATUS_PLANNED)
+        self.assertLessEqual(datetime.fromisoformat(job["planned_at"]), again)
+
     def test_summary_reports_progress(self):
         plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
         day = planner.materialize_day(self.now, plan, {}, {})
@@ -241,11 +292,16 @@ class SchedulerTest(unittest.TestCase):
         self._p.stop()
 
     def _planned_times(self):
-        """当前排班里的待执行时间点（用真实排班驱动，避免把「错过顺延」混进来）。"""
+        """当前排班里的待执行时间点（用真实排班驱动，避免把「错过顺延」混进来）。
+
+        落盘再返回：排班是「第一次生成时按当时的时间铺开」的（not_before=now），
+        不落盘的话 tick 会重新铺一遍、时间点跟着变，测试就会去等一个不存在的点。
+        """
         day = store.load_day("2026-09-20")
         plan = store.load_plan()
         day = planner.materialize_day(self.now, plan, day,
                                       store.done_counts("2026-09-20"))
+        store.save_day("2026-09-20", day)
         return [datetime.fromisoformat(j["planned_at"])
                 for j in day["schedule"] if j["status"] == planner.STATUS_PLANNED]
 
