@@ -9,9 +9,11 @@ import unittest
 
 from core.story_text import (
     clean_story_output,
+    count_chapter_headings,
     enforce_short_sentences,
     replace_em_dashes,
     fix_story_format,
+    restore_bare_chapter_headings,
     validate_story_format,
     parse_score_json,
     sample_reference_sections,
@@ -34,6 +36,22 @@ class TestCleanStoryOutput(unittest.TestCase):
         out = clean_story_output(text)
         self.assertNotIn("希望您喜欢", out)
         self.assertNotIn("修改需求", out)
+
+    def test_removes_meta_plan_opener(self):
+        # ★ 2026-09-08 豆包实测：正文前先说一句「我将贴合…风格/遵守…要求」
+        # 的写作计划（不是故事正文），留在文首会被当成引言污染发布内容
+        plan = ("我将贴合知乎甜宠短篇风格，借鉴爆款开头钩子手法，以先抑后扬、"
+                "层层反转的架构创作全文，严格遵守章节、字数、断句、人设等所有"
+                "要求，打造全程姨母笑的甜暖故事。")
+        text = plan + "\n我被合租的学弟堵在玄关，手里攥着刚签收的回执。"
+        out = clean_story_output(text)
+        self.assertNotIn("我将贴合", out)
+        self.assertTrue(out.startswith("我被合租的学弟"))
+
+    def test_keeps_story_first_line_starting_with_plan_verb(self):
+        # 正常故事首句也可能以「我将」开头 → 不能误删（元词不足 2 个）
+        text = "我将永远记得那个下午。\n她站在门口，没说话。"
+        self.assertTrue(clean_story_output(text).startswith("我将永远记得"))
 
     def test_empty_input(self):
         self.assertIsNone(clean_story_output(None))
@@ -135,6 +153,30 @@ class TestFixStoryFormat(unittest.TestCase):
         self.assertIsNone(fix_story_format(None))
         self.assertEqual(fix_story_format("   "), "   ")
 
+    def test_bare_chapter_numbers_restored_to_markdown(self):
+        # ★ 2026-09-19 事故回归：网页端把 ## **N** 渲染成 h2，只读 innerText
+        # 的通道（DeepSeek）只剩裸章节号 → 格式校验「章节 0 个」必扣 4 分，
+        # 字数略欠的合规稿被判废（当天 5 轮里 4 篇完整稿是这么丢的）
+        text = "\n\n".join(["引言第一段。", "1", "第一章正文。",
+                              "2", "第二章正文。", "3", "第三章正文。"])
+        out = fix_story_format(text)
+        self.assertIn("## **1**", out)
+        self.assertIn("## **3**", out)
+        self.assertEqual(count_chapter_headings(out), 3)
+
+    def test_bare_numbers_not_looking_like_chapters_kept(self):
+        # 判据从严：倒计时 3/2/1 与只有两行的数字不动（不是章节骨架）
+        countdown = "正文。\n\n3\n\n2\n\n1\n\n正文结束。"
+        self.assertNotIn("## **", fix_story_format(countdown))
+        two = "正文。\n\n1\n\n正文。\n\n2\n\n正文。"
+        self.assertNotIn("## **", fix_story_format(two))
+
+    def test_restore_bare_chapter_headings_stops_at_gap(self):
+        text = "正文。\n\n1\n\n甲。\n\n2\n\n乙。\n\n3\n\n丙。\n\n9\n\n丁。"
+        out = restore_bare_chapter_headings(text)
+        self.assertIn("## **3**", out)
+        self.assertIn("\n9\n", out)          # 断档后的数字不补
+
 
 class TestValidateStoryFormat(unittest.TestCase):
     def test_empty_text_invalid(self):
@@ -185,6 +227,41 @@ class TestValidateStoryFormat(unittest.TestCase):
         body += "## **5**\n\n" + long_para + "\n\n## **6**\n\n" + long_para
         score, valid, details = validate_story_format(body)
         self.assertIn("长段", details)
+
+    def test_bare_chapter_numbers_counted(self):
+        # ★ 2026-09-19：丢 markdown 语法的通道只剩裸章节号（1/2/3…），
+        # 校验侧也认，避免「章节 0 个」把合规稿误杀
+        para = "这是正文内容。" * 7
+        chapters = [str(i) + "\n\n" + (para + "\n\n") * 14 + para
+                    for i in range(1, 9)]
+        body = "那是入冬后的第一场雪。\n\n" + "\n\n".join(chapters)
+        self.assertGreaterEqual(len(body), 4000)
+        score, valid, details = validate_story_format(body)
+        self.assertNotIn("章节", details, details)
+        self.assertTrue(valid, details)
+
+    def test_chinese_chapter_labels_counted(self):
+        # 老一代模型可能写「第一章」而非 ## **N**：同样算章节
+        labels = "一二三四五六七八"
+        para = "这是正文内容。" * 7
+        chapters = ["第" + labels[i] + "章\n\n" + (para + "\n\n") * 14 + para
+                    for i in range(8)]
+        body = "那是入冬后的第一场雪。\n\n" + "\n\n".join(chapters)
+        score, valid, details = validate_story_format(body)
+        self.assertNotIn("章节", details, details)
+        self.assertTrue(valid, details)
+
+    def test_bare_number_first_line_is_missing_intro(self):
+        # 裸章节号也是章节标题：开头就是它 → 缺引言（一票否决）
+        body = "1\n\n## **1**\n\n" + "这是正文。" * 600
+        score, valid, details = validate_story_format(body)
+        self.assertIn("引言", details)
+        self.assertFalse(valid)
+
+    def test_prose_number_line_not_counted_as_chapter(self):
+        # 正文里的普通数字行（带文字）不算章节，避免凭空加分
+        body = "3 个男人站在门口。\n\n## **1**\n\n" + "这是正文。" * 500
+        self.assertEqual(count_chapter_headings(body), 1)
 
 
 class TestParseScoreJson(unittest.TestCase):

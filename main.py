@@ -287,18 +287,9 @@ def main():
             return
         print()
     else:
-        from config import WEB_DRIVERS
-        drv_cfg = WEB_DRIVERS.get(WEB_DRIVER_NAME, {})
-        mode_name = ("快速模式" if drv_cfg.get("mode") == "fast"
-                     else "专家模式")
-        extras = []
-        if drv_cfg.get("deep_think"):
-            extras.append("深度思考")
-        if drv_cfg.get("smart_search"):
-            extras.append("智能搜索")
-        extras_str = "+".join(extras) if extras else "无"
-        print(f"  Web 驱动：{WEB_DRIVER_NAME}（DOM）| {mode_name} | "
-              f"附加功能：{extras_str}")
+        # 2026-09 官网改版：网页端不再有快速/专家/识图模式可选，
+        # 驱动一律使用账号默认状态（思考/搜索用网页端自己的默认值）
+        print(f"  Web 驱动：{WEB_DRIVER_NAME}（DOM）| 默认模式")
 
     # 素材模式
     mat_mode_names = {

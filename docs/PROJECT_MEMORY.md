@@ -22,7 +22,7 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 ## 2. 版本与发布
 
-- 版本唯一入口：core/version.py（当前 v4.8.1，tag v4.8.1 随本版发布）
+- 版本唯一入口：core/version.py（当前 v4.9.0，tag v4.9.0 随本版发布）
 - 打包：python tools/build_release.py —— 门禁（git 干净/main）→ 全量测试 → PyInstaller → Inno 安装包 → SHA256，版本号自动注入 installer/AutoQuill.iss（勿手工改 iss）
 - 发布：git tag vX.Y.Z && git push origin main --tags && gh release create（gh 已登录 large-su）；产物在 release/，dist/release/build 不入库
 
@@ -37,7 +37,16 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 - workflows/zhihu.py：知乎 DOM 实现（选题规则+评分、并行提取候选取最优、纯净模式 select_topic_clean / extract_content_clean、发布写草稿）
 - core/originality.py：纯净模式「洗稿/抄袭 + 段落长度分布」对比审核（本地相似度 + LLM 判定，Paragraph 属纯数学）
 - applications/zhihu_story/：browser_adapter（登录/爬取/删除）、author_profiler（文风蒸馏）、prompts.py（系统/评分/筛选提示词）
-- web_drivers/：Web 通道（browser_pool 共享浏览器、deepseek.py DOM 驱动、parallel.py 并行调度、base.py 驱动基类）
+- web_drivers/：Web 通道（browser_pool 共享浏览器、deepseek.py DOM 驱动、parallel.py 并行调度、base.py 驱动基类）。
+  2026-09 已适配 DeepSeek 官网改版：无模式/开关切换（用默认态）、多轮读取用
+  「发送前打锚点 → 只读锚点之后的新消息」防读旧回复、会话删除走
+  `POST /api/v0/chat_session/delete`（Bearer=localStorage.userToken）+ 侧栏 DOM 兜底
+  2026-09-19 再修「格式校验误杀」：网页端把 markdown 渲染成 DOM（`## **N**` → h2），
+  只读 innerText 的通道（DeepSeek）把章节标题丢成裸章节号 → 校验「章节 0 个」必扣 4 分，
+  通道满分只剩 6/10，字数略欠的完整稿直接判废（当天 13 轮丢 5 篇，其中 4 篇是误杀）。
+  逐块重建抽到 base.MARKDOWN_REBUILD_JS（DeepSeek/豆包共用），文本侧
+  story_text.restore_bare_chapter_headings + 校验侧 count_chapter_headings 双兜底；
+  豆包 wait_complete 另加「正文末尾停在章节标题 = 残稿，不判完成」
 - llm_client.py / story_generation.py / story_prompt.py / story_scoring.py：API 生成、提示词、评分、问题池筛选
 - 前端：webui/static/index.html（结构）+ style.css + app.js（已抽离）；四大模式：工作台 / 作者蒸馏 / 已发布内容看板 / 草稿箱素材
 
@@ -55,17 +64,36 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 8. 技能安装：.claude/skills/code-review-skill（审查指南）+ superpowers（writing-plans/systematic-debugging/TDD 等 14 个），已随仓库提交
 9. 纯净模式（v4.8.0，工作台新增运行项）：去限制创作——流量选题（有飙升选飙升/无则按关注量）→ 提取只卡最短回答+点赞（门槛放宽+最高赞兜底）→ 极简生成（学风格+段落长短，禁抄袭洗稿）→ 审核（原创+段落分布）→ 发布草稿；支持多轮（一次设 N）。已答过题自动记台账跳过；后端纯净参数集中在 config/story.py 的 CLEAN_* 系列
 
+10. 历史会话清理（v4.9.0 运维工具，2026-09-15 真机校准）：`tools/ds_history_cleanup.py`
+    scan/delete/smoke 三命令，清理上线前堆积在 DeepSeek 的写故事会话。判定 = 30 天前
+    （updated_at）+ 会话内容命中 AutoQuill 提示词指纹；删除前逐条备份正文、分批 + 熔断 +
+    删后复核。接口：`GET /api/v0/chat_session/fetch_page`（游标 lte_cursor.updated_at，
+    每页 100）、`GET /api/v0/chat/history_messages?chat_session_id=`、
+    `POST /api/v0/chat_session/delete`。**坑**：不带站点 `x-client-*` 头时列表游标被
+    忽略（只回第一页）——客户端头在进站时从页面自身请求捕获。真机全量扫描（2026-09-17，
+    1243 条会话 / 1053 条旧会话）：165 条确认 AutoQuill 写故事链路 + 74 条模板式疑似 +
+    76 条用户手写 + 2 条弱指纹 + 736 条无关；报告 data/cleanup/report_20260917.md。
+    **2026-09-17 已执行清理**：删 314 条（0 失败），备份
+    data/cleanup/backup_20260917_085832/；删后全量复核确认命中 0（仅剩 1 条置顶手写 +
+    2 条「洗稿含义」弱指纹）。日常新会话已由 v4.9.0 的「完成后自动删除」兜住
+
 ## 5. 约定与常见坑（改代码前必读）
 
 - 测试：改完先 python tests/run_all.py（336 用例，浏览器依赖类自动跳过）；前端改动跑 python tools/auto_test.py；发版用 build_release.py；完整手册见 docs/QA-PLAYBOOK.md
 - Python 环境：一律用 .venv/Scripts/python，不用 miniconda 裸 python
 - 行尾：仓库文件多 CRLF（编辑工具默认 LF），改完大文件用脚本归一化行尾；bat 必须纯 ASCII（中文注释会因 GBK 崩）
 - 写入文件的坑：DSH 模板字面量会把反引号、${}、\n 吞噬——写含这些的文件时避免或转义；前/后端 JS 用 node --check 验证
+- 网页端正文提取：markdown 会被渲染成 DOM（`## **N**` → h2），只读 innerText 必丢
+  章节语法 → 一律走 base.MARKDOWN_REBUILD_JS 逐块重建；判「生成完成」前查末尾是否
+  停在章节标题（base/豆包已有判据）；格式校验只认文本形态，别让通道差异背锅
 - 网络：沙箱 bash 无外网，需显式走 Clash 代理 -x http://127.0.0.1:7890 --ssl-no-revoke
 - 端口守卫：测试用 8799 时需在 server 白名单放行（tools/auto_test.py 内建 bootstrap 已处理）
 - Hindsight 工具：仓库记忆服务可能不可达（网络策略）；优先读 docs/*.md + 代码定位
 
 ## 6. 待办 / 建议下一步
+
+- 豆包会话删除仍是「尽力而为」（内部接口 401、无 DOM 兜底）→ 待用与 DeepSeek
+  同款「侧栏悬停 → ⋯ → 删除 → 弹窗确认」链路校准（web_drivers/doubao.py）
 
 - 把「同一生成的格式修正重试」接到 meta.session_id（同窗口连续修正，能力已就绪未接）
 - 批量素材“DOM 提取失败或过短”告警偏多 → 提取阈值/重试调优
@@ -78,5 +106,7 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 - 自动回归：python tools/auto_test.py
 - 快速自检：python tools/auto_test.py --quick
 - AI 味对比：python tools/ai_flavor_check.py output
+- 清 DeepSeek 历史残留会话：python tools/ds_history_cleanup.py scan（只读）
+  / delete --report data/cleanup/scan_*.json --yes（真删，先出报告确认）
 - 发版打包：python tools/build_release.py
 - 启动控制台：python main.py --web

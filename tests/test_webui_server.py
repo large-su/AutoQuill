@@ -192,7 +192,9 @@ class TestServerAPI(unittest.TestCase):
         orig = config.LLM_MODE
         try:
             config.set_runtime_mode("api", persist=False)
-            setup_mod._web_llm_cache.update(ts=time.time(), ok=True)
+            # 缓存按驱动名区分（2026-09：DeepSeek 登录 ≠ 豆包登录）
+            setup_mod._web_llm_cache[setup_mod._web_llm_cache_key()] = {
+                "ts": time.time(), "ok": True}
             with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                    return_value=False) as m:
                 r = self.client.post("/api/mode", json={"mode": "web"})
@@ -924,7 +926,8 @@ class TestSetupEndpoints(unittest.TestCase):
 
     def test_web_login_cached_result_reused(self):
         # TTL 内重复调用不重复拉起浏览器（web_llm_logged_in 只调一次）
-        setup_mod._web_llm_cache.update(ts=0.0, ok=False)
+        setup_mod._web_llm_cache[setup_mod._web_llm_cache_key()] = {
+            "ts": 0.0, "ok": False}
         import applications.zhihu_story.browser_adapter as ba
         with mock.patch("web_drivers.deepseek.web_llm_logged_in",
                                return_value=True) as m:
@@ -937,7 +940,8 @@ class TestSetupEndpoints(unittest.TestCase):
         # 锁去重后 8 个并发调用只触发 1 次真实检测（首启轮询 2.5s 间隔
         # 会撞上检测期，原实现各自排队启动浏览器是「检测慢」的主因）
         import threading
-        setup_mod._web_llm_cache.update(ts=0.0, ok=False)
+        setup_mod._web_llm_cache[setup_mod._web_llm_cache_key()] = {
+            "ts": 0.0, "ok": False}
         import applications.zhihu_story.browser_adapter as ba
         entered = threading.Event()
         release = threading.Event()

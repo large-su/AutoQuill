@@ -40,10 +40,32 @@ from core.detectors import (  # noqa: F401
 # LLM 输出清洗
 # ============================================================
 
+# 「写作计划」式开场（2026-09-08 豆包网页版实测）：
+# 豆包在正文前先说一句元说明，例如「我将贴合知乎甜宠短篇风格，借鉴爆款开头
+# 钩子手法，以先抑后扬、层层反转的架构创作全文，严格遵守章节、字数、断句、
+# 人设等所有要求，打造全程姨母笑的甜暖故事。」——这句不是故事正文，留在文首
+# 会被当成引言，污染发布内容。
+# 判据从严，避免误删正常故事首句（如「我将永远记得那天。」）：
+#   以计划动词开头 + 同一行出现 >=2 个「写作元词」。
+_META_PLAN_VERBS = ("我将", "我会", "接下来我将", "下面我将", "我现在将")
+_META_WORDS = ("风格", "文风", "口吻", "要求", "规范", "格式", "章节", "字数",
+               "篇幅", "题目", "设定", "剧情", "架构", "创作", "写作", "输出",
+               "人称", "钩子", "反转", "节奏")
+
+
+def _is_meta_plan_line(line):
+    """该行是否是「写作计划」式元说明（不是故事正文）。"""
+    s = (line or "").strip()
+    if not s or not s.startswith(_META_PLAN_VERBS):
+        return False
+    return sum(1 for w in _META_WORDS if w in s) >= 2
+
+
 def clean_story_output(text):
     """
     清洗 LLM 生成的故事文本：
     1. 去除开头的废话（"收到""好的""以下是为您创作的故事"等）
+    1.5 去除开头的「写作计划」式元说明（"我将贴合…风格，遵守…要求"）
     2. 去除结尾的废话（"希望您喜欢""如有修改需求"等）
     3. 去除 DeepSeek R1 的 <think> 标签
     """
@@ -69,7 +91,8 @@ def clean_story_output(text):
         stripped = line.strip()
         if not stripped:
             continue
-        is_noise = any(p.search(stripped) for p in start_noise)
+        is_noise = (any(p.search(stripped) for p in start_noise)
+                    or _is_meta_plan_line(stripped))
         if is_noise:
             start_idx = i + 1
         else:
@@ -239,6 +262,77 @@ def replace_em_dashes(text):
     return ''.join(result)
 
 
+# ============================================================
+# 章节标题识别（规范形态 + 丢语法通道的容错形态）
+# ============================================================
+# 规范形态是 prompt 要求的 ## **N**。但网页端把 markdown 渲染成 DOM 后，
+# 只读 innerText 的通道会只剩裸章节号（DeepSeek 2026-09-19 事故：12 篇稿子
+# 无一含 ## **，格式校验「章节 0 个」必扣 4 分，通道满分只剩 6/10），
+# 老一代模型也可能写「第一章」。三种形态都认，避免合规稿被误判。
+_CHAPTER_MD_RE = re.compile(r'##\s*\*\*\d+\*\*')
+_CHAPTER_PLAIN_LINE_RE = re.compile(
+    r'^(?:#{1,6}\s*)?(?:'
+    r'第\s*[0-9一二三四五六七八九十百千万零两]+\s*[章节回]'
+    r'|\d{1,2}'
+    r')\s*$'
+)
+# 引言判定的「章节标题行」：规范形态 / 「第一章」 / 裸章节号（独占一行）
+_CHAPTER_HEAD_LINE_RE = re.compile(
+    r'^(?:'
+    r'#{1,6}\s*\*{0,2}\d+\*{0,2}'
+    r'|#{1,6}\s*第\s*[0-9一二三四五六七八九十百千万零两]+\s*[章节回]'
+    r'|第\s*[0-9一二三四五六七八九十百千万零两]+\s*[章节回]'
+    r'|\d{1,2}'
+    r')\s*$'
+)
+
+
+def count_chapter_headings(text):
+    """统计章节标题数：规范 ## **N** + 容错形态（裸章节号 / 第N章）。
+
+    行级统计，避免把正文行里的数字（如「3 个男人站在门口」）算成章节；
+    同一行只算一次（规范形态不会与容错形态重复匹配）。
+    """
+    n = 0
+    for line in (text or "").split(chr(10)):
+        s = line.strip()
+        if not s:
+            continue
+        if _CHAPTER_MD_RE.search(s) or _CHAPTER_PLAIN_LINE_RE.match(s):
+            n += 1
+    return n
+
+
+def restore_bare_chapter_headings(text):
+    """把丢 markdown 语法的裸章节号补回 ## **N**（innerText 通道的补救）。
+
+    判据从严，避免误伤正文里的普通数字行：
+      - 只认「独占一行、纯 1-2 位数字」的行；
+      - 从第一个这样的行起必须 1,2,3… 逐行 +1（章节骨架形态）；
+      - 连续段至少 3 行。
+    不满足则原样返回——宁可不补，也不把正文里的数字变成章节标题。
+    （「第一章」形态不在此转换：校验侧已认它，保持原样不破坏作者写法。）
+    """
+    if not text or not text.strip():
+        return text
+    lines = text.split(chr(10))
+    idx = [i for i, l in enumerate(lines)
+           if re.fullmatch(r"\d{1,2}", l.strip())]
+    if not idx or int(lines[idx[0]].strip()) != 1:
+        return text
+    run = [idx[0]]
+    for i in idx[1:]:
+        if int(lines[i].strip()) == int(lines[run[-1]].strip()) + 1:
+            run.append(i)
+        else:
+            break
+    if len(run) < 3:
+        return text
+    for i in run:
+        lines[i] = "## **%d**" % int(lines[i].strip())
+    return chr(10).join(lines)
+
+
 def fix_story_format(text):
     """
     对 LLM 生成的故事做格式后处理，自动修复常见格式问题。
@@ -303,6 +397,13 @@ def fix_story_format(text):
             break
     text = stripped
 
+    # --- 3.4 丢失的章节标题补回（只读到 innerText 的通道只剩裸章节号）---
+    # DeepSeek 2026-09-19 事故：## **N** 被渲染成 h2 元素，innerText 只剩
+    # "1/2/3…"，格式校验「章节 0 个」必扣 4 分 → 字数略欠的合规稿直接判废。
+    # 驱动侧已改为逐块重建 markdown（base.MARKDOWN_REBUILD_JS），这里是
+    # 文本侧兜底：判据从严（见 restore_bare_chapter_headings）。
+    text = restore_bare_chapter_headings(text)
+
     # --- 3.5 状态机智能断句 ---
     # 在引号/括号/书名号外的句号、问号、感叹号后强制插入双换行
     text = enforce_short_sentences(text)
@@ -339,7 +440,8 @@ def validate_story_format(text):
 
     评分规则（基础分 10，及格线 >= 6；引言缺失一票否决，直接 is_valid=False）：
     0. 引言：第一非空行必须是故事正文；是章节标题/标签/分割线则缺引言，减 4 分并强制不合格
-    1. 章节标题 ## **N** 至少 6 个，少 1 个减 1 分，封顶减 4 分
+    1. 章节标题至少 6 个，少 1 个减 1 分，封顶减 4 分。认三种形态：
+       规范 ## **N**、容错「第N章」、丢语法的裸章节号（独占一行的 1-2 位数字）
     2. 长段落检测（阈值=PARA_LENGTH_THRESHOLD 字）：
        >5% 减 2 分，>10% 减 3 分，>20% 减 5 分
     3. 对话引号：中文引号 "" "" 出现 >= 5 次减 5 分
@@ -354,24 +456,17 @@ def validate_story_format(text):
 
     # --- 0. 引言存在性（先于章节检测：第一节之前必须有独立引言段）---
     # 判定极简（用户要求）：只看第一个非空行。它是正文故事文字 → 有引言；
-    # 它是章节标题（## **N** / 第一章…）、'引言/引子'标签、或分割线 → 缺引言。
-    # 不限制长度/句数——模型产出 1-2 句干脆开场即算达标。
+    # 它是章节标题（## **N** / 第一章 / 裸章节号）、'引言/引子'标签、
+    # 或分割线 → 缺引言。不限制长度/句数——模型产出 1-2 句干脆开场即算达标。
     # ★ 引言缺失是一票否决项：上来就是章节标题的故事直接判不合格，
     #   扣分之外还强制 is_valid=False，防止"其他项满分冲抵"放行。
     intro_ok = False
     intro_reason = None
-    _chapter_head_re = re.compile(
-        r'^(?:'
-        r'#{1,6}\s*\*{0,2}\d+\*{0,2}'                  # ## **1** / # 1
-        r'|#{1,6}\s*第[一二三四五六七八九十百千万\d]+[章节回]'  # # 第一章
-        r'|第[一二三四五六七八九十百千万\d]+[章节回]'            # 第一章（无#）
-        r')\s*$'
-    )
     for line in text.split(chr(10)):
         s = line.strip()
         if not s:
             continue  # 跳过前导空行
-        if _chapter_head_re.match(s):
+        if _CHAPTER_HEAD_LINE_RE.match(s):
             intro_reason = ("开头直接是章节标题、缺少引言段（请在正文最前面"
                             "补 3-8 句、60-300 字的引言，先抛冲突/钩子再进入章节）")
         elif s.startswith(("引言", "引子")) and len(s) < 12:
@@ -385,8 +480,8 @@ def validate_story_format(text):
         score -= 4
         details["引言"] = f"{intro_reason or '正文第一段缺失'}(-4)"
 
-    # --- 1. 章节标题检测 ---    # --- 1. 章节标题检测 ---
-    chapter_count = len(re.findall(r'##\s*\*\*\d+\*\*', text))
+    # --- 1. 章节标题检测（规范 ## **N** + 容错：第N章 / 裸章节号）---
+    chapter_count = count_chapter_headings(text)
     if chapter_count < 6:
         penalty = min(6 - chapter_count, 4)  # 封顶减 4 分
         score -= penalty

@@ -29,11 +29,17 @@ _login_error = ""
 _login_kind = ""  # 当前登录引导的站点："zhihu" / "deepseek" / ""
 
 # web_llm_logged_in 检查要启动独立浏览器，约数秒；缓存避免首启轮询
-# 反复拉起 Edge（_WEB_LLM_CACHE_TTL 秒内复用结果）
+# 反复拉起 Edge（_WEB_LLM_CACHE_TTL 秒内复用结果）。
+# ★ 按驱动名分别缓存（2026-09 修复）：DeepSeek 已登录 ≠ Doubao 已登录，
+# 切换网页版大模型后若沿用旧缓存会误放行（用户实测：切豆包不弹登录）。
 _WEB_LLM_CACHE_TTL = 15.0
-_web_llm_cache = {"ts": 0.0, "ok": False}
+_web_llm_cache = {}           # {驱动名: {"ts": float, "ok": bool}}
 _web_llm_cache_lock = threading.Lock()
 
+
+def _web_llm_cache_key():
+    from config import WEB_DRIVER_NAME
+    return WEB_DRIVER_NAME
 
 
 def _setup_version():
@@ -41,23 +47,35 @@ def _setup_version():
     return VERSION
 
 
-def _web_llm_logged_in_cached():
-    """带缓存的登录态检测。
+def _web_llm_logged_in_cached(driver=None):
+    """带缓存的登录态检测（按 driver 区分缓存；默认当前驱动）。
 
-    加锁去重：真实检测（独立浏览器，约 5s）进行中时，前端 setup/status
-    每 2.5s 的并发轮询不再各自排队启动浏览器，而是等待同一份结果。
+    driver: 指定目标驱动名（切换网页版大模型时预检用，避免用旧驱动的
+    缓存结果）。加锁去重：真实检测（独立浏览器，约 5s）进行中时，
+    前端 setup/status 每 2.5s 的并发轮询不再各自排队启动浏览器。
     """
+    from config import WEB_DRIVER_NAME
+    key = driver or WEB_DRIVER_NAME
     with _web_llm_cache_lock:
-        ts, ok = _web_llm_cache["ts"], _web_llm_cache["ok"]
-        if time.time() - ts < _WEB_LLM_CACHE_TTL:
-            return ok
-        try:
-            from web_drivers.deepseek import web_llm_logged_in
-            ok = web_llm_logged_in()
-        except Exception:
-            ok = False
-        _web_llm_cache.update(ts=time.time(), ok=ok)
+        entry = _web_llm_cache.get(key)
+        now = time.time()
+        if entry and now - entry["ts"] < _WEB_LLM_CACHE_TTL:
+            return entry["ok"]
+        ok = _web_llm_logged_in_for(key)
+        _web_llm_cache[key] = {"ts": now, "ok": ok}
         return ok
+
+
+def _web_llm_logged_in_for(driver):
+    """对指定驱动做真实登录态检测（无论当前 WEB_DRIVER_NAME 是谁）。"""
+    try:
+        import importlib
+        from web_drivers import _DRIVER_REGISTRY
+        module_path, _cls = _DRIVER_REGISTRY[driver]
+        mod = importlib.import_module(module_path)
+        return bool(mod.web_llm_logged_in())
+    except Exception:
+        return False
 
 
 @router.get("/api/setup/status")
@@ -69,6 +87,7 @@ def api_setup_status():
     """
     from applications.zhihu_story.browser_adapter import (
         EDGE_PATH, STORAGE_STATE_PATH)
+    from config import WEB_DRIVER_NAME
     llm_configured = _llm_configured()
     edge_ok = bool(EDGE_PATH)
     zhihu_logged_in = os.path.exists(STORAGE_STATE_PATH)
@@ -79,6 +98,7 @@ def api_setup_status():
         "edge_ok": edge_ok,
         "llm_configured": llm_configured,
         "web_llm_logged_in": web_ok,
+        "web_driver": WEB_DRIVER_NAME,
         "zhihu_logged_in": zhihu_logged_in,
         "login_running": login_running,
         "login_kind": _login_kind if login_running else "",
@@ -158,7 +178,7 @@ def _start_login_thread(kind, flow_call, log_name):
                 # 清缓存：登录刚完成时 setup/status 的 15s 缓存可能仍为
                 # False，不立即反映会让切换/引导误判未登录
                 with _web_llm_cache_lock:
-                    _web_llm_cache.update(ts=0.0, ok=False)
+                    _web_llm_cache.clear()
                 runner.guide_needed = None  # 登录完成：引导标记解除
             if not ok:
                 _login_error = msg
@@ -182,11 +202,13 @@ def api_setup_zhihu_login():
 
 @router.post("/api/setup/web-login")
 def api_setup_web_login():
-    """后台线程拉起可见 Edge 引导登录 DeepSeek 网页版；轮询 status 收尾。"""
-    from web_drivers.deepseek import login_deepseek_web_flow
-    _start_login_thread("deepseek", login_deepseek_web_flow, "DeepSeek 网页版登录")
+    """后台线程拉起可见 Edge 引导登录当前网页版大模型；轮询 status 收尾。"""
+    from config import WEB_DRIVER_NAME
+    from web_drivers import login_web_flow
+    _start_login_thread("deepseek", login_web_flow,
+                        f"{WEB_DRIVER_NAME} 网页版登录")
     return {"ok": True,
-            "message": "请在弹出的 Edge 窗口中登录 DeepSeek 网页版，"
+            "message": f"请在弹出的 Edge 窗口中登录 {WEB_DRIVER_NAME} 网页版，"
                        "检测到登录后自动保存并关闭"}
 
 

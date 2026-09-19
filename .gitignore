@@ -30,6 +30,9 @@ logs/
 output/
 screenshots/
 
+# DeepSeek 历史会话清理产物（扫描报告 + 逐条正文备份，含个人会话内容）
+data/cleanup/
+
 # Python
 __pycache__/
 *.pyc

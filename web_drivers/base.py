@@ -24,6 +24,41 @@ log = logging.getLogger(__name__)
 # 页面交互超时（毫秒）：与 browser_adapter 约定一致，所有 evaluate 有界
 _EVAL_TIMEOUT = 15000
 
+# ============================================================
+# 回复正文的 markdown 逐块重建（DeepSeek / 豆包共用同一实现）
+# ============================================================
+# 站点把 markdown 渲染成 DOM（章节标题 ## **N** 变成 h2 元素），只读容器
+# innerText 会把标题语法整体丢掉——故事正文里只剩一个裸的章节号，于是
+# validate_story_format 的「章节 0 个」必扣 4 分：通道满分只剩 6/10，
+# 任何一项再扣分（哪怕只差几十字）就直接判废稿，合规稿也被误杀。
+# （2026-09-19 真实事故：DeepSeek 通道 5 轮里 4 篇完整稿就是这么丢的）
+# 逐块遍历块级子元素：h1-h6 还原成 ## **N**，其余块按段落拼接（空行分隔，
+# 与知乎编辑器分段一致）。豆包 2026-09-09 实测同一篇 3/10 → 10/10；
+# DeepSeek 2026-09-19 接入同一实现。
+# 用法（JS 片段，需放在使用它的 evaluate 函数体开头）：
+#   toMarkdown(el) → 重建后的全文；失败时调用方回落 el.innerText。
+MARKDOWN_REBUILD_JS = (
+    "const NL = String.fromCharCode(10);"
+    "const toMarkdown = el => {"
+    "  const parts = [];"
+    "  const walk = n => {"
+    "    const tag = n.tagName;"
+    "    if (/^H[1-6]$/.test(tag)) {"
+    "      const t = (n.innerText || '').trim();"
+    "      if (t) parts.push('#'.repeat(Number(tag[1])) + ' **' + t + '**');"
+    "      return;"
+    "    }"
+    "    const kids = Array.from(n.children).filter(c =>"
+    "        /^(DIV|P|H[1-6]|LI|BLOCKQUOTE|PRE)$/.test(c.tagName));"
+    "    if (kids.length) { kids.forEach(walk); return; }"
+    "    const t = (n.innerText || '').trim();"
+    "    if (t) parts.push(t);"
+    "  };"
+    "  Array.from(el.children).forEach(walk);"
+    "  return parts.join(NL + NL);"
+    "};"
+)
+
 
 class WebLLMDriver:
     """网页版大模型驱动基类：浏览器会话 + 有界页面交互。
@@ -36,6 +71,11 @@ class WebLLMDriver:
         self.config = config or {}
         self._page = None
         self._browser = None
+        # ---- 会话生命周期状态（2026-09 新增：单链路一会话 + 完成后删除）----
+        self._session_owned = False   # 本驱动是否在本会话里发过 prompt（只删自己用过的）
+        self._session_broken = False  # 页面/会话损坏 → 下次开新会话
+        self._session_id = None       # 站点侧会话 ID（探测得到时记录，删除用）
+        self._session_title = ""      # 本会话首条用户消息（DOM 侧栏匹配删除用）
 
     # ---------------- 会话管理 ----------------
 
@@ -94,13 +134,16 @@ class WebLLMDriver:
             except Exception:
                 pass
             self._page = None
+        self._reset_session_state()
 
     def new_chat(self):
         """重置当前页为全新对话（重新导航到站点 URL，丢弃历史上下文）。
 
         并行调度每派发一个任务前调用，防止多轮对话历史污染。
         默认实现 = open_session()；子类可覆盖以等待 SPA 渲染。
+        同时清空本驱动的会话归属记录（新会话未用过，删除钩子不会误删）。
         """
+        self._reset_session_state()
         return self.open_session()
 
     def continue_chat(self, prompt):
@@ -112,6 +155,79 @@ class WebLLMDriver:
         """
         self.input(prompt)
         self.send()
+
+    # ---------------- 会话生命周期（单链路一会话 + 完成后删除） ----------------
+
+    def _can_reuse_session(self):
+        """当前是否存在本驱动创建且健康、可继续提问的会话。"""
+        return (self._page is not None
+                and not self._page.is_closed()
+                and self._session_owned
+                and not self._session_broken)
+
+    def _mark_session_used(self, prompt):
+        """记录本会话已被本驱动使用（发过 prompt）——删除钩子只删这种。"""
+        if not self._session_owned:
+            self._session_owned = True
+            self._session_title = (str(prompt) or "").strip()[:24]
+            self._session_id = self._detect_session_id()
+
+    def _mark_session_broken(self):
+        """标记当前会话损坏：下次 generate 自动新开会话（除非坏才开新）。"""
+        if not self._session_broken:
+            log.warning("web_drivers: 当前会话标记为损坏，"
+                        "下次提问将新开会话")
+        self._session_broken = True
+
+    def _reset_session_state(self):
+        self._session_owned = False
+        self._session_broken = False
+        self._session_id = None
+        self._session_title = ""
+
+    def _detect_session_id(self):
+        """探测站点侧当前会话 ID（子类覆写；默认无）。"""
+        return None
+
+    def delete_current_session(self):
+        """删除本驱动本次「创建/使用过」的网页版会话（完成后清理）。
+
+        只删除 _session_owned 的会话——绝不触碰用户网页里已有的其他
+        会话。删除失败只记日志不抛异常（不影响任务结果）。
+        返回是否删除成功（尽力而为）。
+        """
+        if not self._session_owned:
+            log.info("web_drivers: 无可删除会话（本驱动本次未使用网页会话）")
+            return False
+        if self._page is None or self._page.is_closed():
+            log.info("web_drivers: 页面已关闭，跳过会话删除")
+            self._reset_session_state()
+            return False
+        deleted = False
+        try:
+            deleted = bool(self._delete_current_session_impl())
+        except Exception as exc:
+            log.warning("web_drivers: 删除会话异常（不阻断）：%s", exc)
+        if deleted:
+            log.info("web_drivers: 已删除本次网页会话%s",
+                     (f"（id={self._session_id}）" if self._session_id else ""))
+        else:
+            log.warning("web_drivers: 本次网页会话未能自动删除"
+                        "（站点接口/DOM 未命中，可稍后在网页端手动清理）")
+        self._reset_session_state()
+        return bool(deleted)
+
+    def _delete_current_session_impl(self):
+        """站点内删除实现（子类覆写）；完成返回 True。"""
+        return False
+
+    def _after_wait_before_read(self):
+        """wait_complete 之后、read_result 之前的站点钩子（默认无操作）。
+
+        供站点驱动在读取前做补救：如豆包把故事放到卡片/文档交付界面时，
+        在同一会话内补问一句让模型把全文直接输出到对话，再等它完成。
+        """
+        return None
 
     # ---------------- 有界页面交互 ----------------
 
@@ -171,9 +287,15 @@ class WebLLMDriver:
         log.error("web_drivers: %s。页面状态：url=%s title=%s body=%s",
                   hint, state.get("url"), state.get("title"),
                   state.get("body_text", "")[:80])
+        self._mark_session_broken()
+        # 站点名/驱动模块按当前驱动动态给出（豆包/DeepSeek 共用本兜底，
+        # 写死 DeepSeek 会把豆包故障指向错误文件）
+        from config import WEB_DRIVER_NAME
+        from web_drivers import _DRIVER_REGISTRY
+        module_path = _DRIVER_REGISTRY.get(WEB_DRIVER_NAME, ("", ""))[0]
         raise RuntimeError(
-            f"{hint}。DeepSeek 前端可能改版，上方日志中的页面状态"
-            f"可协助修复 web_drivers/deepseek.py 选择器")
+            f"{hint}。{WEB_DRIVER_NAME} 前端可能改版，上方日志中的页面状态"
+            f"可协助修复 {module_path or 'web_drivers/*'}.py 选择器")
 
     # ---------------- 生命周期（子类实现） ----------------
 
@@ -192,11 +314,35 @@ class WebLLMDriver:
     def read_result(self):
         raise NotImplementedError
 
-    def generate(self, prompt):
-        """完整生成流程（生命周期固定，子类复用）。"""
-        self.open_session()
-        self.setup()
-        self.input(prompt)
-        self.send()
-        self.wait_complete(max_wait=self.config.get("max_wait"))
+    def generate(self, prompt, reuse_session=True):
+        """完整生成流程（生命周期固定，子类复用）。
+
+        reuse_session=True（默认）：若已有本驱动创建的健康会话，在
+        同一会话内继续提问（不重新导航、不新开会话、上下文连贯）——
+        单次完整链路从始至终只开一个聊天会话；仅在会话损坏时新开。
+        reuse_session=False：总是新开会话（并行调度各 slot 用）。
+        生成超时时标记会话损坏，下次自动新开。
+        """
+        if reuse_session and self._can_reuse_session():
+            log.info("web_drivers: 复用当前会话继续提问（单链路一会话）")
+            self.setup()
+            self.continue_chat(prompt)
+        else:
+            if self._session_broken:
+                log.info("web_drivers: 上一会话已损坏，新开会话")
+            self.new_chat()
+            self.setup()
+            self.input(prompt)
+            self.send()
+        self._mark_session_used(prompt)
+        completed = self.wait_complete(max_wait=self.config.get("max_wait"))
+        if not completed:
+            self._mark_session_broken()
+            log.warning("web_drivers: 生成未在期限内完成，会话标记损坏")
+        # 会话 ID 名额在首轮回复后页面 URL 才带上（如豆包 /chat/{id}），
+        # 发送瞬间探测不到——完成后补一次，供 delete_current_session 使用
+        if not self._session_id:
+            self._session_id = self._detect_session_id()
+        # 站点钩子：读取前补救机会（豆包卡片式交付 → 要求全文内联等）
+        self._after_wait_before_read()
         return self.read_result()

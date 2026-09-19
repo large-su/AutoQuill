@@ -109,10 +109,13 @@ class TestWebDriversDomSemantics(unittest.TestCase):
         dsrc = self._src("web_drivers/deepseek.py")
         self.assertIn("故事生成中", dsrc)   # 生成阶段心跳
         self.assertIn("模型思考中", dsrc)   # 思考阶段心跳
-        self.assertIn("_think_len", dsrc)  # 思考容器长度
-        # 思考阶段正文选择器未命中时不得把思考文本计入正文长度
-        # （ds-markdown 兜底会误匹配思考容器，2026-08-15 实测）
-        self.assertIn('"ds-assistant-message-main-content" not in sel', dsrc)
+        self.assertIn("think_len", dsrc)   # 思考容器长度（_read_probe 返回）
+        # 2026-09 改版：正文长度只在 div.ds-message 里按正文容器
+        # （ds-assistant-message-main-content）取，思考容器另算，
+        # 不再用 ds-markdown 兜底把思考文本计入正文
+        self.assertIn("ds-assistant-message-main-content", dsrc)
+        self.assertIn("ds-think-content", dsrc)
+        self.assertIn("_read_probe", dsrc)
         # log_capture 的进度正则能匹配两阶段文案
         import re
         self.assertTrue(
@@ -158,44 +161,111 @@ class TestWebDriversDomSemantics(unittest.TestCase):
         # 兜底候选保留旧版（无思考容器的 UI）
         self.assertEqual(len(d._RESULT_SELECTORS), 4)
 
-    def test_deepseek_setup_target_state_driven(self):
-        # setup() 必须「先读后点」：按目标状态（mode/deep_think/
-        # smart_search）与当前不一致才点击，不得盲目点击破坏手动状态
+    def test_markdown_rebuild_shared_by_both_drivers(self):
+        # ★ 2026-09-19 事故回归：网页端把 ## **N** 渲染成 h2 元素，只读
+        # innerText 的通道会只剩裸章节号 → 格式校验「章节 0 个」必扣 4 分，
+        # 通道满分只剩 6/10（当天 DeepSeek 5 轮丢 4 篇完整稿，一篇差 24 字）。
+        # 逐块重建抽到 base.MARKDOWN_REBUILD_JS，两个驱动共用同一份实现。
+        import web_drivers.base as b
+        walker = b.MARKDOWN_REBUILD_JS
+        for needle in ("toMarkdown", "H[1-6]", "repeat", "parts.join",
+                       "const NL"):
+            self.assertIn(needle, walker, needle)
+        for mod in ("web_drivers/deepseek.py", "web_drivers/doubao.py"):
+            self.assertIn("MARKDOWN_REBUILD_JS", self._src(mod), mod)
+        ds = self._src("web_drivers/deepseek.py")
+        probe = ds[ds.index("def _read_probe"):
+                  ds.index("def _detect_session_id")]
+        self.assertIn("%(walker)s", probe)   # walker 注入 evaluate 函数体
+        self.assertIn("toMarkdown(c)", probe)  # 正文走逐块重建
+
+    def test_deepseek_setup_is_noop_after_ui_revamp(self):
+        # 2026-09 官网取消「快速/专家/识图」三大模式：setup() 必须是空操作，
+        # 不得再点模式 tab，也不得再切深度思考/智能搜索开关
+        # （用户约定：登录后直接用网页端默认状态）
         src = self._src("web_drivers/deepseek.py")
         self.assertIn("def setup(self)", src)
-        self.assertIn("_toggle_state", src)    # 读开关当前状态
-        self.assertIn("_set_toggle", src)      # 目标状态驱动
-        self.assertIn("_radio_group_selected", src)  # 读大模式
-        self.assertIn("--selected", src)       # 开关状态类名
-        self.assertIn("smart_search", src)
-        # 回归：radiogroup 返回完整文本（含「模式」），配置是英文键
-        # （fast/expert），必须经 _MODE_TEXT 映射后才能比对/查找，
-        # 否则会去点「expert模式」这类不存在的文本（2026-08-15 故障）
+        self.assertIn("使用网页端默认模式", src)
+        for gone in ("_radio_group_selected", "_MODE_TEXT", "_set_toggle",
+                     "_toggle_state", "smart_search", "deep_think"):
+            self.assertNotIn(gone, src, f"改版后不该再出现 {gone}")
+        # 只允许 --probe 里把 radiogroup 当"旧结构探测项"报出来，
+        # setup 路径不得再依赖它
+        self.assertNotIn("aria-checked", src)
         import web_drivers.deepseek as d
-        self.assertEqual(d._MODE_TEXT["fast"], "快速模式")
-        self.assertEqual(d._MODE_TEXT["expert"], "专家模式")
-        self.assertNotIn("expert模式", src)
+        drv = d.DeepSeekDriver({"url": "https://chat.deepseek.com/"})
+        self.assertIs(drv.setup(), drv)   # 空操作，返回 self
 
-    def test_config_web_preset_translation(self):
-        # 预设 → 目标字段翻译：fast = 快速+深思+搜索；expert = 专家+深思
-        from config import set_web_mode_preset, WEB_DRIVERS, WEB_DRIVER_NAME
-        old = dict(WEB_DRIVERS[WEB_DRIVER_NAME])
-        try:
-            set_web_mode_preset("fast", persist=False)
-            cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
-            self.assertEqual(cfg["mode"], "fast")
-            self.assertTrue(cfg["deep_think"])
-            self.assertTrue(cfg["smart_search"])
-            set_web_mode_preset("expert", persist=False)
-            cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
-            self.assertEqual(cfg["mode"], "expert")
-            self.assertTrue(cfg["deep_think"])
-            self.assertFalse(cfg["smart_search"])
-            with self.assertRaises(ValueError):
-                set_web_mode_preset("bogus", persist=False)
-        finally:
-            WEB_DRIVERS[WEB_DRIVER_NAME].clear()
-            WEB_DRIVERS[WEB_DRIVER_NAME].update(old)
+    def test_deepseek_reply_anchor_guards_against_stale_reply(self):
+        # 2026-09 虚拟列表适配：读取必须锚定「发送之后的新消息」。
+        # 旧实现用 querySelector 取第一个正文容器，虚拟列表里第一个可能是
+        # 上一轮回复 → 把旧回复当本次结果（2026-09-09 线上故障：
+        # 生成 prompt 发出 11s 后读回上一步筛选的 191 字）
+        src = self._src("web_drivers/deepseek.py")
+        for needle in ("_mark_reply_anchor", "_ANCHOR_ATTR",
+                       "_MESSAGE_SELECTOR", "div.ds-message", "_read_probe"):
+            self.assertIn(needle, src, needle)
+        send_body = src[src.index("def send(self)"):
+                        src.index("def wait_complete")]
+        self.assertIn("self._mark_reply_anchor()", send_body,
+                      "发送前必须先打锚点")
+        rr = src[src.index("def read_result"):src.index("def _mark_reply_anchor")]
+        self.assertIn("_dump_page_state", rr,
+                      "读不到新回复必须 loud-fail，不得回落旧回复")
+
+    def test_deepseek_session_delete_revamped(self):
+        # 2026-09-12 实测链路：
+        #   接口 POST /api/v0/chat_session/delete
+        #        body {"chat_session_ids": ["<uuid>"]}
+        #        header Authorization: Bearer <localStorage userToken.value>
+        #   DOM  侧栏 a[href='/a/chat/s/<uuid>'] → ⋯ → 菜单「删除」
+        #        → 弹窗「删除该对话」
+        src = self._src("web_drivers/deepseek.py")
+        for needle in ("/api/v0/chat_session/delete", "chat_session_ids",
+                       "userToken", "Bearer", "ds-dropdown-menu-option",
+                       "删除该对话", "ds-modal-content", "/a/chat/s/"):
+            self.assertIn(needle, src, needle)
+        # 改版前的旧端点已随站点下线，不得残留（否则每次都白打一遍 404）
+        self.assertNotIn("/api/v0/chat/delete_history", src)
+        self.assertNotIn("/api/v0/chat/session/delete", src)
+
+    def test_deepseek_auth_token_parsing_and_new_chat_text(self):
+        # userToken 是 JSON（{"value": ...}），解析失败/缺失返回空串
+        import web_drivers.deepseek as d
+        drv = d.DeepSeekDriver({"url": "https://chat.deepseek.com/"})
+        drv._safe_evaluate = lambda js, *a, **k: '{"value": "tok123", "__version": 1}'
+        self.assertEqual(drv._auth_token(), "tok123")
+        drv._safe_evaluate = lambda js, *a, **k: "plain-token"
+        self.assertEqual(drv._auth_token(), "plain-token")
+        drv._safe_evaluate = lambda js, *a, **k: ""
+        self.assertEqual(drv._auth_token(), "")
+        # 改版后新会话按钮文案 = 开启新对话（无 aria-label），
+        # 需要按文本找叶子再点最近的可点击祖先
+        src = self._src("web_drivers/deepseek.py")
+        self.assertIn("开启新对话", src)
+        self.assertIn("closest(", src)
+
+    def test_config_web_mode_preset_fully_removed(self):
+        # 2026-09 改版后网页端没有模式可选 → 预设机制整体退役：
+        # 配置里不再有 mode/deep_think/smart_search，config 不再导出
+        # set_web_mode_preset，后端也不再暴露 /api/web-preset
+        import config
+        from config import WEB_DRIVERS
+        self.assertFalse(hasattr(config, "set_web_mode_preset"))
+        for name, cfg in WEB_DRIVERS.items():
+            for key in ("mode", "deep_think", "smart_search", "preset",
+                        "preset_supported"):
+                self.assertNotIn(key, cfg, f"{name} 残留 {key}")
+        with open("webui/api_settings.py", encoding="utf-8") as f:
+            api_src = f.read()
+        self.assertNotIn("/api/web-preset", api_src)
+        self.assertNotIn("WEB_PRESET", api_src)
+        with open("webui/static/index.html", encoding="utf-8") as f:
+            html = f.read()
+        self.assertNotIn("webPresetSel", html)
+        with open("webui/static/app.js", encoding="utf-8") as f:
+            js = f.read()
+        self.assertNotIn("webPreset", js)
 
 
 class TestLegacyFullyRemoved(unittest.TestCase):

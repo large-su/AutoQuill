@@ -107,8 +107,17 @@ class ParallelWebRunner:
         return self
 
     def teardown(self):
-        """关闭所有 slot 的页面（不关共享浏览器，不触碰单例）。"""
+        """删除各 slot 产生的网页会话并关闭页面（不关共享浏览器）。
+
+        批量任务完成后逐个删除会话（仅删本 runner 创建/使用过的），
+        避免网页端聊天记录堆积触发平台风控；删除失败只记日志。
+        """
         for slot in self.slots:
+            try:
+                if hasattr(slot.driver, "delete_current_session"):
+                    slot.driver.delete_current_session()
+            except Exception:
+                pass
             try:
                 slot.driver.close_session()
             except Exception:
@@ -229,10 +238,19 @@ class ParallelWebRunner:
         drv = slot.driver
         cfg = drv.config
         _check_cancel()
-        cur_len = drv._current_reply_len()
-        # 思考阶段心跳（与 deepseek.py:wait_complete 同构；无 _think_len
-        # 的驱动/假驱动兜底为 0，行为退化为纯正文心跳）
-        think_len = drv._think_len() if hasattr(drv, "_think_len") else 0
+        # 2026-09 改版：优先用驱动的新回复探针（_read_probe 只读「本次
+        # 发送之后的新消息」，避免虚拟列表里读到上一轮旧回复）；老驱动/
+        # 单测假驱动（FakeDriver）没有该接口时退回旧的两个原语
+        probe = drv._read_probe() if hasattr(drv, "_read_probe") else None
+        if isinstance(probe, dict):
+            cur_len = len(probe.get("main") or "")
+            think_len = int(probe.get("think_len") or 0)
+        else:
+            cur_len = (drv._current_reply_len()
+                       if hasattr(drv, "_current_reply_len") else 0)
+            # 思考阶段心跳（与 deepseek.py:wait_complete 同构；无 _think_len
+            # 的驱动/假驱动兜底为 0，行为退化为纯正文心跳）
+            think_len = drv._think_len() if hasattr(drv, "_think_len") else 0
         if drv._stop_button_present():
             slot.stop_seen = True
         elif slot.stop_seen:

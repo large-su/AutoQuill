@@ -50,18 +50,6 @@ def api_config():
         cfg["LLM_MODEL"] = LLM_MODEL_ID
     except Exception as exc:
         cfg["_root_error"] = str(exc)
-    try:
-        from config import WEB_DRIVERS, WEB_DRIVER_NAME
-        dcfg = WEB_DRIVERS[WEB_DRIVER_NAME]
-        cfg["WEB_PRESET"] = {
-            "preset": dcfg.get("preset", "fast"),
-            "mode": dcfg.get("mode"),
-            "deep_think": bool(dcfg.get("deep_think")),
-            "smart_search": bool(dcfg.get("smart_search")),
-            "allowed": ["fast", "expert"],
-        }
-    except Exception as exc:
-        cfg["_web_error"] = str(exc)
     return cfg
 
 
@@ -97,22 +85,6 @@ def api_set_tunable(spec: _TunableSpec):
         k: getattr(story, k) for k in _TUNABLE_KEYS})
     log.info("Web 控制台修改选题参数 %s → %s", spec.key, val)
     return {"ok": True, "key": spec.key, "value": val}
-
-
-class _WebPresetSpec(BaseModel):
-    preset: str  # fast（快速+深思+搜索）/ expert（专家+深思）
-
-
-@router.post("/api/web-preset")
-def api_set_web_preset(spec: _WebPresetSpec):
-    """切换 DeepSeek 网页版模式预设（立即生效，持久化到 webui_model.json）。"""
-    from config import set_web_mode_preset
-    try:
-        eff = set_web_mode_preset(spec.preset)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    log.info("Web 控制台切换网页模式预设 → %s", eff["preset"])
-    return {"ok": True, "effective": eff}
 
 
 class _QuestionSourceSpec(BaseModel):
@@ -170,6 +142,55 @@ class _ModelSpec(BaseModel):
     model_id: str
 
 
+class _WebDriverSpec(BaseModel):
+    name: str  # 网页版大模型名（WEB_DRIVERS 键：DeepSeek / Doubao …）
+
+
+@router.get("/api/web-drivers")
+def api_web_drivers():
+    """列出可切换的网页版大模型（已实现驱动的）。"""
+    from config import WEB_DRIVERS, WEB_DRIVER_NAME
+    from web_drivers import _DRIVER_REGISTRY
+    drivers = [
+        {"name": name, "url": (WEB_DRIVERS[name] or {}).get("url", "")}
+        for name in sorted(WEB_DRIVERS)
+        if name in _DRIVER_REGISTRY
+    ]
+    return {"current": WEB_DRIVER_NAME, "drivers": drivers}
+
+
+@router.post("/api/web-driver")
+def api_set_web_driver(spec: _WebDriverSpec):
+    """运行时切换网页版大模型（Web 通道用的浏览器驱动，持久化）。
+
+    闭环预检：当前处于 web 通道时切换需新目标已登录；未登录返回
+    needs=deepseek_login 让前端弹对应登录引导。切换后清掉旧驱动的
+    残留会话（避免旧站点会话堆积）。
+    """
+    from config import (LLM_MODE, WEB_DRIVERS, WEB_DRIVER_NAME,
+                        set_runtime_web_driver)
+    if spec.name not in WEB_DRIVERS:
+        raise HTTPException(400, f"未知网页版大模型：{spec.name}")
+    if LLM_MODE == "web" and spec.name != WEB_DRIVER_NAME:
+        # 预检目标驱动是否已登录（按目标驱动名查/缓存，绝不沿用
+        # 旧驱动 DeepSeek 的登录结果——用户实测切豆包不弹登录的根因）
+        if not _web_llm_logged_in_cached(driver=spec.name):
+            raise HTTPException(400, {
+                "detail": f"{spec.name} 网页版尚未登录，无法切换。"
+                          "请在引导窗口中打开 Edge 完成登录后重试。",
+                "needs": "deepseek_login",
+            })
+    eff = set_runtime_web_driver(spec.name)
+    # 切换驱动后清掉旧驱动的单例会话（删除+关页）
+    try:
+        from web_drivers import reset_driver
+        reset_driver()
+    except Exception:
+        pass
+    log.info("Web 控制台切换网页版大模型 → %s", eff["web_driver"])
+    return {"ok": True, "effective": eff}
+
+
 class _ModeSpec(BaseModel):
     mode: str
 
@@ -193,8 +214,9 @@ def api_set_model(spec: _ModelSpec):
 @router.get("/api/mode")
 def api_mode():
     """生成通道：api（API 调用）/ web（网页版浏览器操作）。"""
-    from config import LLM_MODE
-    return {"mode": LLM_MODE, "allowed": ["api", "web"]}
+    from config import LLM_MODE, WEB_DRIVER_NAME
+    return {"mode": LLM_MODE, "allowed": ["api", "web"],
+            "web_driver": WEB_DRIVER_NAME}
 
 
 @router.post("/api/mode")
@@ -215,9 +237,10 @@ def api_set_mode(spec: _ModeSpec):
         if spec.mode == "web":
             # 走 15s 缓存：登录成功回调会立即清缓存（ts=0），登录刚完成
             # 时此处必定真实检测，不会误拦；重复切换/轮询则命中缓存秒回
+            from config import WEB_DRIVER_NAME
             if not _web_llm_logged_in_cached():
                 raise HTTPException(400, {
-                    "detail": "DeepSeek 网页版尚未登录，无法切换。"
+                    "detail": f"{WEB_DRIVER_NAME} 网页版尚未登录，无法切换。"
                               "请在引导窗口中打开 Edge 完成登录后重试。",
                     "needs": "deepseek_login",
                 })

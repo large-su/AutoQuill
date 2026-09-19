@@ -66,9 +66,10 @@ async function showSetupGuide(need) {
   $("setupMask").classList.add("show");
   renderModeCardState(setupCache);
   selectModeCard(setupCache);
+  const wd = (setupCache && setupCache.web_driver) || "网页版大模型";
   showStStatus(need === "api_key"
     ? "API 模式需要先配置 API Key（见引导窗口）"
-    : "Web 模式需要先登录 DeepSeek 网页版（见引导窗口）", "err");
+    : "Web 模式需要先登录" + wd + " 网页版（见引导窗口）", "err");
 }
 
 /* ---------- 任务阶段进度（文风提炼等） ---------- */
@@ -502,6 +503,7 @@ async function applyMode() {
     hideSetupWizard();
     addLog(`生成通道已切换 → ${genMode === "web" ? "Web 网页版" : "API"}`, "result");
     showStStatus(`生成通道 → ${genMode === "web" ? "Web 网页版" : "API"}`, "ok");
+    syncWebDriverUI();
   } catch (e) {
     // 还原选择并提示
     document.querySelectorAll('input[name="genMode"]').forEach((el) => {
@@ -527,6 +529,69 @@ async function loadMode() {
       el.checked = (el.value === genMode);
     });
   } catch (e) { /* 旧服务无 /api/mode，保持默认 */ }
+  syncWebDriverUI();
+}
+
+/* ---------- 网页版大模型（Web 通道驱动）切换 ---------- */
+
+const webDriverSel = $("webDriverSel");
+let webDrivers = [];
+let webDriverCurrent = null;
+
+async function loadWebDrivers() {
+  try {
+    const r = await fetch("/api/web-drivers");
+    const data = await r.json();
+    webDrivers = data.drivers || [];
+    webDriverCurrent = data.current || null;
+    webDriverSel.innerHTML = "";
+    if (!webDrivers.length) { $("webDriverRow").hidden = true; return; }
+    webDrivers.forEach((d) => {
+      const opt = document.createElement("option");
+      opt.value = d.name;
+      opt.textContent = d.name;
+      webDriverSel.appendChild(opt);
+    });
+    if (webDriverCurrent) webDriverSel.value = webDriverCurrent;
+  } catch (e) { /* 旧服务无该端点：隐藏选择器 */ $("webDriverRow").hidden = true; }
+  syncWebDriverUI();
+}
+
+async function applyWebDriver() {
+  const name = webDriverSel.value;
+  if (!name || name === webDriverCurrent) return;
+  try {
+    const r = await fetch("/api/web-driver", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => null);
+      const d = body && body.detail;
+      if (d && typeof d === "object" && d.needs) {
+        if (webDriverCurrent) webDriverSel.value = webDriverCurrent;
+        showSetupGuide(d.needs);
+        return;
+      }
+      throw new Error(typeof d === "string" ? d : "切换失败");
+    }
+    const data = await r.json();
+    webDriverCurrent = data.effective.web_driver;
+    addLog("网页版大模型已切换 → " + webDriverCurrent, "result");
+    showStStatus("网页版大模型 → " + webDriverCurrent, "ok");
+    loadConfig();
+  } catch (e) {
+    if (webDriverCurrent) webDriverSel.value = webDriverCurrent;
+    showStStatus("网页版大模型切换失败：" + e.message, "err");
+  }
+}
+
+webDriverSel.addEventListener("change", applyWebDriver);
+
+function syncWebDriverUI() {
+  $("webDriverRow").hidden = (genMode !== "web");
+  if (genMode === "web" && !webDrivers.length) loadWebDrivers();
 }
 
 /* 生成通道状态（setup/status 查询结果缓存，首次切换引导用） */
@@ -584,46 +649,6 @@ async function loadBrowserMode() {
     });
   } catch (e) { /* 旧服务无 /api/browser，保持默认 */ }
 }
-
-/* ---------- 网页模式预设 ---------- */
-
-let webPreset = null;
-
-async function loadWebPreset() {
-  try {
-    const r = await fetch("/api/config");
-    const cfg = await r.json();
-    if (!cfg.WEB_PRESET) return;
-    const wp = cfg.WEB_PRESET;
-    $("webPresetRow").hidden = false;
-    webPreset = wp.preset;
-    $("webPresetSel").value = wp.preset;
-  } catch (e) { /* 旧服务无此配置 */ }
-}
-
-async function applyWebPreset() {
-  const val = $("webPresetSel").value;
-  if (val === webPreset) return;
-  try {
-    const r = await fetch("/api/web-preset", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ preset: val }),
-    });
-    if (!r.ok) throw new Error((await r.json()).detail || "切换失败");
-    const data = await r.json();
-    webPreset = data.effective.preset;
-    loadConfig();
-    addLog(`网页模式预设已切换 → ${webPreset === "expert" ? "专家 + 深度思考" : "快速 + 深度思考 + 智能搜索"}`, "result");
-    showStStatus(`网页预设 → ${webPreset === "expert" ? "专家" : "快速"}`, "ok");
-  } catch (e) {
-    $("webPresetSel").value = webPreset;
-    showStStatus("切换失败：" + e.message, "err");
-  }
-}
-
-$("webPresetSel").addEventListener("change", applyWebPreset);
-
 
 /* ---------- 选题来源 ---------- */
 
@@ -2040,9 +2065,10 @@ function renderModeCardState(st) {
     st.llm_configured ? "✓ 已配置 API Key，可随时切换使用。" :
     "付费、响应快。DeepSeek 开放平台申请 API Key。";
   mcWeb.classList.toggle("done", !!st.web_llm_logged_in);
+  const wd = st.web_driver || "DeepSeek";
   mcWeb.querySelector(".mc-d").textContent =
-    st.web_llm_logged_in ? "✓ 已登录 DeepSeek 网页版，可直接使用。" :
-    "免费。登录 chat.deepseek.com 后由浏览器自动操作。";
+    st.web_llm_logged_in ? "✓ 已登录该网页版大模型，可直接使用。" :
+    "免费。登录网页版大模型后由浏览器自动操作。";
   if (st.login_running && st.login_kind === "deepseek") {
     const b = $("btnWebLogin");
     b.disabled = true;
@@ -2050,7 +2076,7 @@ function renderModeCardState(st) {
     $("webErr").textContent = "";
   } else {
     $("btnWebLogin").disabled = false;
-    $("btnWebLogin").textContent = "打开 Edge 登录 DeepSeek";
+    $("btnWebLogin").textContent = "打开 Edge 登录 " + wd;
   }
   if (st.login_error && st.login_kind === "deepseek") {
     $("webErr").textContent = "登录未完成：" + st.login_error;
@@ -2148,7 +2174,7 @@ $("btnSetup").addEventListener("click", () => {
   // 首次引导未完成 → 打开引导向导；已完成 → 打开设置弹窗
   if (setupNeeded) { loadSetupStatus(); return; }
   $("settingsMask").classList.add("show");
-  loadConfig(); loadMode(); loadBrowserMode(); loadWebPreset();
+  loadConfig(); loadMode(); loadBrowserMode();
   loadAuthors(); loadQuestionSource();
 });
 
@@ -2262,7 +2288,7 @@ $("btnWebLogin").addEventListener("click", async () => {
   } catch (e) {
     $("webErr").textContent = e.message;
     btn.disabled = false;
-    btn.textContent = "打开 Edge 登录 DeepSeek";
+    btn.textContent = "打开 Edge 登录 " + ((setupCache && setupCache.web_driver) || "网页版");
   }
 });
 
@@ -2418,7 +2444,6 @@ $("modalMask").addEventListener("click", (e) => {
   loadModels();
   loadMode();
   loadBrowserMode();
-  loadWebPreset();
   loadAuthors();
   loadProfileSources();
   // 已发布内容看板

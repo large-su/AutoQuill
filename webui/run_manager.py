@@ -160,19 +160,25 @@ class TaskRunner:
         # 该检测会锁冲突误报，故只在此处（运行前）检查一次。
         if spec.mode in ("generate", "single", "clean", "batch",
                          "profile", "general_profile"):
-            from config import LLM_MODE
+            from config import LLM_MODE, WEB_DRIVER_NAME
             if LLM_MODE == "web":
-                from web_drivers.deepseek import web_llm_logged_in
+                # 任务开始：清掉上一个任务遗留的网页会话（删除+关页），
+                # 确保「单条完整链路 = 一个全新会话」从零开始
+                from web_drivers import reset_driver
+                reset_driver()
+                from web_drivers import web_llm_logged_in
                 if not web_llm_logged_in():
-                    # 预检失败 = 未登录 DeepSeek 或 无头 Edge 启动失败
+                    # 预检失败 = 未登录当前网页版大模型或 无头 Edge 启动失败
                     # （残留 msedge 占用 profile 锁时会误报未登录）
                     self._finish(
                         "error",
-                        "Web 通道预检未通过（无法确认已登录 DeepSeek 网页版）。"
+                        f"Web 通道预检未通过（无法确认已登录"
+                        f"{WEB_DRIVER_NAME} 网页版）。"
                         "若日志里出现「浏览器启动失败 … Target page, context or "
                         "browser has been closed」则是残留 Edge 进程占用 profile，"
-                        "请重启 AutoQuill 或关闭残留 msedge 进程后重试；否则请点"
-                        "右上角「设置」→「打开 Edge 登录 DeepSeek」完成登录",
+                        f"请重启 AutoQuill 或关闭残留 msedge 进程后重试；"
+                        f"否则请点右上角「设置」→「打开 Edge 登录"
+                        f"{WEB_DRIVER_NAME}」完成登录",
                         guide="deepseek_login")
                     return
             else:
@@ -219,6 +225,13 @@ class TaskRunner:
                 self._finish("error", str(exc))
         finally:
             builtins.input = _orig_input
+            # 完成后先删网页会话、关驱动页（仅删本任务创建/使用过的会话），
+            # 再关共享浏览器——删除需要页面/登录态仍在
+            try:
+                from web_drivers import reset_driver
+                reset_driver(delete_session=True)
+            except Exception:
+                pass
             try:
                 from web_drivers.browser_pool import close_shared_browser
                 close_shared_browser()

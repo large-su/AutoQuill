@@ -5,6 +5,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from webui import published
 
@@ -23,12 +24,22 @@ def _raw_rows():
 class PublishedSnapshotTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="aq_pub_t_"))
-        published._DATA_DIR = self.tmp
-        self._orig_sleep = published.time.sleep
-        published.time.sleep = lambda s: None
+        # 落盘路径全部打补丁：published 的快照目录 + （scrape 末尾会自动
+        # 入账的）反馈闭环台账。此前只改了前者，fixture 会被写进真实的
+        # data/state/story_performance.jsonl（每次跑测试脏一个入库文件）
+        from core import feedback_loop
+        self._patches = [
+            mock.patch.object(published, "_DATA_DIR", self.tmp),
+            mock.patch.object(published.time, "sleep", lambda s: None),
+            mock.patch.object(feedback_loop, "_perf_path",
+                              lambda: self.tmp / "story_performance.jsonl"),
+        ]
+        for p in self._patches:
+            p.start()
 
     def tearDown(self):
-        published.time.sleep = self._orig_sleep
+        for p in reversed(self._patches):
+            p.stop()
 
     def _seed(self, name, rows):
         (self.tmp / name).write_text(json.dumps(rows), encoding="utf-8")

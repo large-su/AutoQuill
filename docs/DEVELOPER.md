@@ -106,6 +106,16 @@ python tools/verify_dom_clicks.py        # DOM 点击链路验证
 python tools/debug_ds_modes.py           # DeepSeek 模式切换调试
 ```
 
+站点运维工具（需真实登录态，默认无头）：
+
+```bash
+# DeepSeek 历史会话审计与清理（30 天前写故事链路残留，防风控）
+python tools/ds_history_cleanup.py scan            # 只读扫描 + 统计报告
+python tools/ds_history_cleanup.py scan --all-content   # 旧会话全部拉内容确认
+python tools/ds_history_cleanup.py delete --report data/cleanup/scan_*.json --yes
+python tools/ds_history_cleanup.py smoke           # 删除链路自检（建空会话再删）
+```
+
 作者风格工具：
 
 ```bash
@@ -236,7 +246,7 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 | `BROWSER_HEADLESS` | 浏览器无头模式 | `False` |
 | `WEB_DRIVER_NAME` / `WEB_DRIVERS` | 网页版驱动注册表 | `"DeepSeek"` |
 
-运行时切换（`config.set_runtime_*`）：模型 / 通道 / 浏览器模式 / 文风 / 网页预设，全部持久化到 `config/webui_model.json`（gitignored），启动自动恢复。
+运行时切换（`config.set_runtime_*`）：模型 / 通道 / 浏览器模式 / 文风 / 选题来源，全部持久化到 `config/webui_model.json`（gitignored），启动自动恢复。（网页模式预设随 2026-09 官网改版取消，已整体退役。）
 
 ### 知乎专用配置（applications/zhihu_story/config.py）
 

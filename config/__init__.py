@@ -126,13 +126,9 @@ WEB_DRIVERS = {
     # 旧 OCR 参数（copy_icon 等）已随重写移除，并行参数为 DOM 版
     "DeepSeek": {
         "url": "https://chat.deepseek.com/",
-        # 模式预设（set_web_mode_preset 运行时改写；setup() 按目标先读后点）
-        #   fast   → mode=fast  深度思考开 智能搜索开（默认，用户习惯）
-        #   expert → mode=expert 深度思考开 智能搜索关
-        "preset": "fast",
-        "mode": "fast",            # "fast" = 快速模式 / "expert" = 专家模式
-        "deep_think": True,        # 深度思考（R1）
-        "smart_search": True,      # 智能搜索（仅快速模式存在）
+        # 2026-09 官网改版：取消「快速/专家/识图」三大模式，只留
+        # 「深度思考 / 智能搜索」两个开关，且默认状态即账号上次的选择。
+        # 驱动不再做任何模式/开关切换（setup() 空操作），一律用默认态。
         # 生成完成检测
         "poll_interval": 4,        # 轮询间隔（秒）
         "stable_count": 2,         # 文本长度连续 N 轮不变 → 完成
@@ -141,6 +137,22 @@ WEB_DRIVERS = {
         "parallel_tabs": 2,                  # 并行页面数；DeepSeek 网页版同账号并发上限实测为 2
         "consecutive_fail_threshold": 2,     # 连续失败 N 次后重置该 slot 的会话
         "scan_interval": 2,                  # 主循环每轮扫描间隔（秒）
+    },
+    # 豆包网页版（www.doubao.com/chat/）。用户诉求：网页端模式只用一个
+    # 默认模型「豆包快速」。selectors 基于 DeepSeek 同构做法给出候选，
+    # 待用户提供实测页面后校准（python -m web_drivers.doubao --probe）。
+    "Doubao": {
+        "url": "https://www.doubao.com/chat/",
+        "model": "doubao_quick",    # 只使用默认「豆包快速」（用户约定）
+        "model_label": "豆包快速",
+        # 生成完成检测（与 DeepSeek 同构，先按通用参数，实测后按需调整）
+        "poll_interval": 4,
+        "stable_count": 2,
+        "max_wait": 600,
+        # 豆包网页版并行上限未知，保守起见先串行（1 个页面）
+        "parallel_tabs": 1,
+        "consecutive_fail_threshold": 2,
+        "scan_interval": 2,
     },
 }
 
@@ -253,29 +265,33 @@ def set_runtime_mode(mode, persist=True):
     return {"mode": LLM_MODE}
 
 
-def set_web_mode_preset(preset, persist=True):
-    """切换 DeepSeek 网页版模式预设，把预设翻译成 WEB_DRIVERS 目标字段。
+def set_runtime_web_driver(name, persist=True):
+    """运行时切换网页版大模型（Web 通道使用的浏览器驱动）。
 
-    预设 → 目标字段（setup() 按目标先读后点，不破坏页面手动状态）：
-      "fast"   → mode="fast", deep_think=True, smart_search=True
-      "expert" → mode="expert", deep_think=True, smart_search=False
-    smart_search 只在快速模式存在，专家模式下自动忽略。
+    name 对应 WEB_DRIVERS 的键（DeepSeek / Doubao …），同时必须已在
+    web_drivers 注册表中实现。切换后持久化到 webui_model.json 的
+    web_driver 字段，下次启动自动恢复。
     """
-    global WEB_DRIVERS
-    presets = {
-        "fast": {"mode": "fast", "deep_think": True, "smart_search": True},
-        "expert": {"mode": "expert", "deep_think": True,
-                   "smart_search": False},
-    }
-    if preset not in presets:
-        raise ValueError(f"未知网页模式预设：{preset}，可选：fast / expert")
-    cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
-    cfg.update(presets[preset])
-    cfg["preset"] = preset
+    global WEB_DRIVER_NAME
+    if not isinstance(name, str) or name not in WEB_DRIVERS:
+        raise ValueError(
+            f"未知网页版大模型：{name}，可用：{list(WEB_DRIVERS.keys())}")
+    # 注册表校验放在这里（不 import web_drivers，避免 config↔web_drivers
+    # 循环依赖）：WEB_DRIVERS 与注册表必须同步更新，防御性检查用惰性导入
+    try:
+        from web_drivers import _impl_available
+        if not _impl_available(name):
+            raise ValueError(
+                f"网页版大模型「{name}」尚未实现驱动（web_drivers 注册表缺失）")
+    except Exception as exc:
+        if "尚未实现" in str(exc):
+            raise
+        # web_drivers 不可用（纯配置场景/测试）时只做配置层校验
+        pass
+    WEB_DRIVER_NAME = name
     if persist:
-        _save_webui_state(web_preset=preset)
-    return {"preset": preset, "config": {k: cfg[k] for k in
-            ("mode", "deep_think", "smart_search")}}
+        _save_webui_state(web_driver=name, mode=LLM_MODE)
+    return {"web_driver": WEB_DRIVER_NAME}
 
 
 def set_runtime_browser_headless(headless, persist=True):
@@ -375,9 +391,12 @@ def _apply_webui_model_override():
                         "文风「%s」签名不存在，回退为「通用」", name)
                     name = "通用"
             set_runtime_author_profile(name, persist=False)
-        web_preset = data.get("web_preset")
-        if web_preset in ("fast", "expert"):
-            set_web_mode_preset(web_preset, persist=False)
+        web_driver = data.get("web_driver")
+        if web_driver:
+            try:
+                set_runtime_web_driver(web_driver, persist=False)
+            except ValueError:
+                pass  # 该驱动已下线/未实现 → 保持默认
         question_source = data.get("question_source")
         if question_source in ("recommend", "invited", "custom"):
             set_runtime_question_source(question_source, persist=False)

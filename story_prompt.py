@@ -112,6 +112,27 @@ DEAI_STYLE_RULE = """
 - 否定式排比"不仅仅是……而是……"、三段并列堆叠要拆开
 - 删掉"金句"：读起来像名言警句、能单独摘出来的句子，一律重写成随口说出的样子"""
 
+# 输出方式硬约束（2026-09-08 豆包实测根因修复）：
+# 网页版豆包对长写作请求会走「写作/文档/工作任务交付」——对话里只留一句
+# 引言（60-100 字），正文被放进独立交付界面，驱动读不到正文，整篇被判
+# 「故事过短」连废 3 次。真实会话对照（同一账号）：
+#   - 未加本约束：对话正文 86-91 字，页面出现 flow-product-card 交付卡片
+#   - 加了本约束：豆包把 8022 字全文直接输出在对话里，无交付卡片
+# 故作为公共约束追加到所有模式 prompt 末尾（API 模式同样无害：本就没有
+# 卡片交付界面，模型只会照常直接输出正文）。
+INLINE_OUTPUT_RULE = """
+
+## 输出方式（硬性）
+
+直接在对话里输出完整正文，一次性输出全文：
+
+- 不要使用卡片 / 文档 / 工作任务 / 附件等交付界面，不要把正文放进任何
+  需要另外打开才能看到正文的容器
+- 不要任何前后缀说明：不要"好的/收到/以下是"开头，不要交代写作思路，
+  不要结尾总结、点评或反问
+- 不要分多次输出、不要中途停下问"需要我继续吗"，正文必须一次写完"""
+
+
 # ============================================================
 # 发布前自检（与 core.story_text.validate_story_format 扣分点一一对应）
 # 生成结束前自查一遍：任何一项不满足都会在格式检测被扣分重试（8/29
@@ -195,6 +216,8 @@ def _render_retry_feedback(feedback):
         "- 章节标题必须用 `## **N**`，且 **不少于 6 节**；总字数 **不少于 4000 字**。",
         "- 每个句号/问号/感叹号后换行并空一行，长段落占比尽可能低。",
         "- 对话引号统一用「」，省略号用 ……（六个点），不出现直引号或 AI 废话前缀。",
+        "- 直接在对话里输出完整正文，不要使用卡片 / 文档 / 任务交付界面"
+        "（上一版正文若被放进交付界面，这次必须把全文写在对话里）。",
         "请重新完整创作一篇全新的故事，不要解释，直接输出正文。",
     ]
     return "\n".join(lines) + "\n"
@@ -424,6 +447,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     user_message += NAMING_CONSTRAINT
     user_message += DEAI_STYLE_RULE
     user_message += FORMAT_SELF_CHECK_RULE
+    user_message += INLINE_OUTPUT_RULE
 
     # === 重试修正反馈（如有：放在最末尾，最醒目，模型应先读到它） ===
     if feedback:
@@ -491,10 +515,12 @@ def build_clean_prompt(question_title, reference_answer=None, feedback=None):
 {para_section}
 
 请撰写新的回答。"""
+    user_message += INLINE_OUTPUT_RULE
 
     if feedback:
         user_message += (
             "\n\n## ⚠ 上一版原创审核未通过，请针对以下问题重新创作\n\n"
             + str(feedback).strip()
-            + "\n\n请直接输出一篇完全原创的新回答正文，不要解释。")
+            + "\n\n请直接输出一篇完全原创的新回答正文，不要解释。"
+            + INLINE_OUTPUT_RULE)
     return user_message, "纯净模式"
