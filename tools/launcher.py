@@ -416,6 +416,11 @@ def open_window(start_hidden=False):
         def _on_start():
             _apply_dark_titlebar(window)
             tray = TrayController(window)
+            # ★ 等窗口原生对象：start(func) 的回调早于窗口创建（详见 wait_native 注释）
+            if not tray.wait_native(timeout=15):
+                _log_diag("托盘：等待窗口原生对象超时（15s），退化为普通窗口")
+                tray._save_status()
+                return
             if tray.attach():
                 try:
                     window.events.closing += tray.on_closing
@@ -498,6 +503,25 @@ class TrayController:
 
     # ---------------- 生命周期 ----------------
 
+    def wait_native(self, timeout=15.0):
+        """等窗口原生对象出现。
+
+        ★ 必须等：pywebview 的 `start(func)` 是**先起 func 线程、再创建窗口**
+        （webview/__init__.py：thread.start() 在 guilib.create_window 之前），
+        所以回调里 `window.native` 可能还是 None。线上实测过这个竞态：
+        同一份代码 22:06 拿到（托盘就绪）、22:15 没拿到（退化成普通窗口，
+        关窗后用户找不到托盘图标）。
+        """
+        deadline = time.time() + max(1.0, float(timeout))
+        while time.time() < deadline:
+            try:
+                if self.window.native is not None:
+                    return True
+            except Exception:      # noqa: BLE001
+                pass
+            time.sleep(0.1)
+        return False
+
     def attach(self):
         """创建托盘图标；失败只写日志，绝不影响窗口本身。"""
         try:
@@ -534,10 +558,22 @@ class TrayController:
             _log_diag(f"托盘：创建失败（{exc!r}）")
             return False
         self.available = bool(self.notify)
+        self._save_status()
         if self.available:
             _log_diag("托盘：已就绪（关窗 = 最小化到托盘）")
             threading.Thread(target=self._poll_loop, daemon=True).start()
         return self.available
+
+    def _save_status(self):
+        """把托盘自检结果写进启动器设置（设置页展示；托盘问题不该只躺在日志里）。"""
+        if launcher_config is None:
+            return
+        try:
+            launcher_config.save({"tray_ok": bool(self.available),
+                                  "tray_checked_at":
+                                      time.strftime("%Y-%m-%d %H:%M:%S")})
+        except Exception:      # noqa: BLE001
+            pass
 
     def _build(self):
         """建图标与菜单（必须运行在 UI 线程）。"""
@@ -666,12 +702,33 @@ class TrayController:
         if self._quitting or not cfg.get("close_to_tray", True):
             return True                            # 放行：真关闭
         if not self.available:
-            # 没有托盘图标还隐藏窗口 = 用户再也找不回来 → 老老实实关闭
-            _log_diag("托盘不可用：按普通关闭处理")
+            # 没有托盘图标还「藏起来」= 用户再也找不回来。
+            # 但直接关掉又违背「关窗 = 后台继续跑」的预期 → 退一步：最小化到任务栏
+            # （任务栏按钮看得见，程序继续跑；用户也能从设置里改成「直接退出」）
+            if self.minimize_to_taskbar():
+                _log_diag("托盘不可用：关窗改为最小化到任务栏")
+                return False
+            _log_diag("托盘不可用且无法最小化：按普通关闭处理")
             return True
         self.window.hide()
         self.hint_once(cfg)
         return False
+
+    def minimize_to_taskbar(self):
+        """把窗口最小化（托盘不可用时的兜底）：任务栏按钮还在，程序不退出。"""
+        try:
+            import clr
+            clr.AddReference("System.Windows.Forms")
+            from System import Action
+            from System.Windows.Forms import FormWindowState
+
+            def _do():
+                self.form.WindowState = FormWindowState.Minimized
+            self.form.Invoke(Action(_do))
+            return True
+        except Exception as exc:      # noqa: BLE001
+            _log_diag(f"最小化失败：{exc!r}")
+            return False
 
     def hint_once(self, cfg):
         """首次藏进托盘时提示一次（Win11 会把新图标收进折叠区，不提示会以为程序没了）。"""
@@ -693,6 +750,14 @@ class TrayController:
         while not self._stopped.wait(20):
             try:
                 self._refresh()
+            except Exception:      # noqa: BLE001
+                pass
+            # 控制台里的「退出 AutoQuill」：用户点完，这里负责真的退
+            try:
+                if launcher_config and launcher_config.load().get("quit_requested_at"):
+                    _log_diag("收到控制台的退出请求，正在退出")
+                    self.quit()
+                    return
             except Exception:      # noqa: BLE001
                 pass
 
@@ -799,6 +864,12 @@ def main():
     frozen = getattr(sys, "frozen", False)
     # 开机自启带 --tray：窗口只创建不显示，直接驻留托盘（不打断用户）
     start_hidden = "--tray" in sys.argv
+    if launcher_config is not None:
+        # 清掉上一次会话留下的退出请求，否则「刚启动就自己退了」
+        try:
+            launcher_config.clear_quit_request()
+        except Exception:      # noqa: BLE001
+            pass
     if launcher_config is not None and not start_hidden:
         # 自愈：设置里开着自启、注册表项却没了（换目录/被杀软清）→ 补写
         try:

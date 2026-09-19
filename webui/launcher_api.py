@@ -47,6 +47,19 @@ def api_launcher_settings():
     return _snapshot()
 
 
+@router.post("/api/launcher/quit")
+def api_launcher_quit():
+    """退出 AutoQuill（窗口 + 服务 + 自动化）。
+
+    真实退出动作由**启动器进程**做（它才是窗口与服务的持有者）：这里只写一个
+    退出请求，启动器 20 秒内轮询到就退出。给托盘图标被系统折叠时的用户留个出口。
+    """
+    stamp = launcher_config.request_quit()
+    log.info("控制台请求退出 AutoQuill（%s）", stamp)
+    return {"ok": True, "requested_at": stamp,
+            "message": "已请求退出：窗口会关闭，服务与自动化一并停止"}
+
+
 @router.post("/api/launcher/settings")
 def api_launcher_settings_save(body: _LauncherBody):
     """保存设置。close_to_tray 立即生效；autostart 会同步写/删注册表。"""

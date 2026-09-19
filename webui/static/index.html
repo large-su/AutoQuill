@@ -104,7 +104,8 @@
           <button class="btn danger" id="autoStopBtn" hidden>停止</button>
         </div>
         <div class="auto-hint" id="autoHint">到点自动执行：发布草稿 / 全链路撰写。
-          停止后再次开始会先看今天已做多少，再补差额。</div>
+          停止后再次开始会先看今天已做多少，再补差额。
+          每日数量上限由「时段 ÷ 最小间隔 + 1」决定（任务卡上会写清最多几个）。</div>
       </div>
 
       <div class="card">
@@ -115,10 +116,12 @@
         </div>
         <label class="auto-line">同类最小间隔（分钟）
           <input type="number" id="autoMinGap" min="5" step="5" value="60"></label>
-        <label class="auto-line">间隔随机化上限（倍）
-          <input type="number" id="autoGapRatio" min="0" max="2" step="0.1" value="0.6"></label>
+        <label class="auto-line">随机幅度（0=均匀铺开）
+          <input type="number" id="autoGapRatio" min="0" max="1" step="0.1" value="0.6"></label>
         <label class="auto-line">时间抖动（±分钟）
           <input type="number" id="autoJitter" min="0" max="120" step="1" value="8"></label>
+        <div class="auto-hint">排班方式：把时段<b>等分成 N 份</b>、每份随机取一点，再统一
+          保证两两间隔 ≥ 最小间隔——动作铺满整段时间，而不是从早到晚「发一个等一小时」。</div>
         <label class="auto-line">错过时间点
           <select id="autoCatchUp">
             <option value="same_day">当日内补做（推荐）</option>
@@ -633,6 +636,20 @@
             <label class="auto-check"><input type="checkbox" id="autostartChk"> 开机后自动运行</label>
           </div>
           <div class="st-d" id="autostartHint">开机后静默驻留托盘（不弹窗），到点继续跑自动化；默认关闭</div>
+        </div>
+        <div class="st-row">
+          <div class="st-k">托盘状态</div>
+          <div class="st-ctl"><span id="trayStatus">检测中…</span></div>
+          <div class="st-d">关窗后程序是否真的驻留在托盘（每次启动自检一次）；
+            托盘图标在 Windows 11 默认收在任务栏右下角的 <b>^</b> 折叠区里</div>
+        </div>
+        <div class="st-row">
+          <div class="st-k">退出程序</div>
+          <div class="st-ctl">
+            <button class="btn danger" id="btnQuitApp">退出 AutoQuill</button>
+          </div>
+          <div class="st-d">彻底关掉窗口 + 后台服务 + 自动化（相当于托盘菜单里的「退出」）；
+            找不到托盘图标时用这里退出</div>
         </div>
       </div>
       <div class="st-group">

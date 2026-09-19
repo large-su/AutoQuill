@@ -3,7 +3,12 @@
 
 用户口径对应到实现：
   - 配额可自由设置 → 每天按 daily_cap 生成作业；当天改配置会重排未执行部分；
-  - 间隔 ≥1 小时且随机化 → 同类作业间隔 ∈ [min_gap, min_gap*(1+gap_jitter_ratio)]；
+  - **时间在时段内「铺开」**（2026-09-19 按用户口径重做）：把时段等分成 N 份，每份里
+    随机取一点，再统一修复到「两两间隔 ≥ min_gap」；不是「间隔 1 小时随机一下、再累加
+    随机一下」的随机游走——那样作业会挤在一天前段、后半天全空；
+  - **数量上限是算出来的**：N 个作业之间只有 N-1 个间隔，所以时段 W 分钟内最多
+    `floor(W / min_gap) + 1` 个（如 08:00–23:30 = 930 分钟、间隔 60 分钟 → 上限 16）；
+    设多了不会硬排，而是按上限排 + 在时间轴上留一条「排不下」的说明；
   - 「当日完成即可」→ 不固定时间点，只在运行时段内铺开；
   - 随时可停、再开始时先看今天已做多少 → 排班按「已完成数量」扣减后生成（幂等键去重）；
   - 错过怎么办 → catch_up：none / same_day（默认，顺延到当天剩余时间）/ next_window。
@@ -65,6 +70,78 @@ def _window_bounds(day, plan, cfg):
             base.replace(hour=end_t.hour, minute=end_t.minute))
 
 
+def feasible_count(window_minutes, min_gap_minutes):
+    """时段内最多能排几个作业（用户问的「数学关系」）。
+
+    N 个作业之间有 N-1 个间隔，每个 ≥ G，且总跨度不能超过时段 W：
+        (N - 1) * G ≤ W   →   N ≤ floor(W / G) + 1
+    例：08:00–23:30 = 930 分钟，G = 60 → floor(930/60) + 1 = 16 个。
+    G ≤ 0（不限制间隔）时退化为「按分钟铺」——上限取时段分钟数。
+    """
+    try:
+        w = float(window_minutes)
+        g = float(min_gap_minutes)
+    except (TypeError, ValueError):
+        return 1
+    if w <= 0:
+        return 1
+    if g <= 0:
+        return max(1, int(w))
+    return max(1, int(w // g) + 1)
+
+
+def spread_times(win_start, win_end, count, min_gap_minutes, rng,
+                 jitter_minutes=0.0, spread=0.6):
+    """把 count 个时间点**铺满** [win_start, win_end]，并保证两两间隔 ≥ G。
+
+    做法（分层随机 + 修复）：
+      1) 时段等分成 count 份，第 i 个点在它那一份里随机取（spread 控制随机幅度：
+         0 = 完全均匀、1 = 份内随便放）→ 天然「相对随机地分布在整段时间里」；
+      2) 再叠加 jitter_minutes 的抖动（± 一半）；
+      3) 修复：正向推一遍保证间隔 ≥ G，若越过终点则回推一遍；可行时结果一定落在时段内。
+
+    可行条件：(count - 1) * G ≤ W（调用方用 feasible_count 保证）。
+    返回按时间升序的 datetime 列表；不可行时尽量铺开（不抛异常，排班不能崩）。
+    """
+    count = int(count)
+    if count <= 0:
+        return []
+    span = (win_end - win_start).total_seconds() / 60.0
+    if span <= 0:
+        return [win_start] * count
+    gap = max(0.0, float(min_gap_minutes or 0))
+    jitter = max(0.0, float(jitter_minutes or 0))
+    spread = min(max(float(spread or 0.0), 0.0), 1.0)
+
+    slot = span / count
+    offsets = []
+    for i in range(count):
+        center = slot * (i + 0.5)
+        raw = center + rng.uniform(-0.5, 0.5) * spread * slot
+        lo, hi = slot * i, slot * (i + 1)
+        offsets.append(min(max(raw, lo), hi))
+    if jitter > 0:
+        offsets = [min(max(o + rng.uniform(-jitter / 2.0, jitter / 2.0), 0.0),
+                        span) for o in offsets]
+    offsets.sort()
+
+    # 修复 1：正向推，保证相邻间隔 ≥ G
+    for i in range(1, count):
+        if offsets[i] - offsets[i - 1] < gap:
+            offsets[i] = offsets[i - 1] + gap
+    # 修复 2：越过终点 → 从末尾回推（保证最后一个不超时段）
+    if offsets[-1] > span:
+        offsets[-1] = span
+        for i in range(count - 2, -1, -1):
+            offsets[i] = min(offsets[i], offsets[i + 1] - gap)
+    # 修复 3：回推可能把第一个推到时段之前 → 再正向收一次
+    if offsets[0] < 0:
+        offsets[0] = 0.0
+        for i in range(1, count):
+            offsets[i] = max(offsets[i], offsets[i - 1] + gap)
+    return [win_start + timedelta(minutes=round(o, 3)) for o in offsets]
+
+
 def _done_jobs(schedule, task_type):
     """已消耗配额的作业（done/running）——用于「先看今天已经做了多少」。"""
     return [j for j in schedule
@@ -94,12 +171,12 @@ def _build_schedule(day, plan, schedule=None, counters=None):
             continue
         cfg_gap = cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60
         min_gap = float(cfg_gap)
-        ratio = float(plan.get("gap_jitter_ratio") or 0.0)
+        # 随机幅度：0 = 完全均匀铺开，1 = 每份里随便放（份内）
+        spread = float(plan.get("gap_jitter_ratio") or 0.0)
         jitter = float(plan.get("jitter_minutes") or 0)
         seed = "%s|%s|%s" % (day, plan_fingerprint(plan), task_type)
         rng = random.Random(seed)
         win_start, win_end = _window_bounds(day, plan, cfg)
-        cursor = win_start
         last_done = None
         for job in done:
             try:
@@ -107,40 +184,48 @@ def _build_schedule(day, plan, schedule=None, counters=None):
             except Exception:
                 continue
             last_done = t if last_done is None else max(last_done, t)
-        for i in range(remaining):
-            if i == 0 and last_done is None:
-                step = rng.uniform(0, max(jitter, 0.1))
-                t = cursor + timedelta(minutes=step)
-            elif i == 0:
-                step = rng.uniform(min_gap, min_gap * (1 + ratio))
-                t = last_done + timedelta(minutes=step)
-            else:
-                step = rng.uniform(min_gap, min_gap * (1 + ratio))
-                t = cursor + timedelta(minutes=step)
-                if jitter > 0:
-                    t += timedelta(minutes=rng.uniform(-jitter / 2.0, jitter / 2.0))
-            if t > win_end:
-                jobs.append({"key": job_key(task_type, day, "overflow", i),
-                             "type": task_type, "planned_at": "",
-                             "status": STATUS_SKIPPED, "units": 1,
-                             "params": cfg.get("params") or {},
-                             "note": "运行时段内排不下（配额 %d，已排 %d 项）" % (cap, i)})
-                break
+        # 续做：已经做过的部分不重排，剩下的在「剩余时段」里铺开
+        # （last_done 只有在本进程排班里才有；重启后只靠 counters 时用整段时段，
+        #   确实错过的由 catch_up 顺延——两者互不打架）
+        eff_start = win_start
+        if last_done is not None:
+            eff_start = max(win_start, last_done + timedelta(minutes=min_gap))
+        window_minutes = (win_end - eff_start).total_seconds() / 60.0
+        # ★ 数量上限是算出来的：(N-1) * G ≤ W → N ≤ floor(W/G) + 1
+        limit = feasible_count(window_minutes, min_gap)
+        if remaining > limit:
+            jobs.append({
+                "key": job_key(task_type, day, "overflow", 0),
+                "type": task_type, "planned_at": "",
+                "status": STATUS_SKIPPED, "units": 0,
+                "params": cfg.get("params") or {},
+                "note": ("配额 %d %s 排不下：时段剩 %.0f 分钟、最小间隔 %.0f 分钟 → "
+                         "最多 %d %s（已按上限排班；想多排就拉长时段或调小间隔）"
+                         % (cap, meta["unit"], window_minutes, min_gap, limit,
+                            meta["unit"])),
+            })
+        times = spread_times(eff_start, win_end, min(remaining, limit), min_gap, rng,
+                             jitter_minutes=jitter, spread=spread)
+        for i, when in enumerate(times):
             jobs.append({
                 "key": job_key(task_type, day, "slot", i),
                 "type": task_type,
-                "planned_at": t.replace(microsecond=0).isoformat(),
+                "planned_at": when.replace(microsecond=0).isoformat(),
                 "status": STATUS_PLANNED,
                 "units": 1,
                 "params": cfg.get("params") or {},
                 "note": "",
             })
-            cursor = t
-    return _deconflict(jobs)
+    _, plan_win_end = _window_bounds(day, plan, {})
+    return _deconflict(jobs, win_end=plan_win_end)
 
 
-def _deconflict(jobs):
-    """去碰撞：任意两个待执行作业至少隔开 DECOLLISION_MINUTES 分钟。"""
+def _deconflict(jobs, win_end=None):
+    """去碰撞：任意两个待执行作业至少隔开 DECOLLISION_MINUTES 分钟。
+
+    只会往后推，所以同类型的最小间隔不会被破坏；但密集排班（比如把时段排满）
+    时可能把尾巴推出运行时段——那样排了也不会执行，索性标记跳过并说明原因。
+    """
     pending = [j for j in jobs
                if j.get("status") == STATUS_PLANNED and j.get("planned_at")]
     pending.sort(key=lambda j: j["planned_at"])
@@ -151,6 +236,13 @@ def _deconflict(jobs):
             floor = prev + timedelta(minutes=DECOLLISION_MINUTES)
             if t < floor:
                 t = floor
+                if win_end is not None and t > win_end:
+                    job["planned_at"] = ""
+                    job["status"] = STATUS_SKIPPED
+                    job["units"] = 0
+                    job["note"] = (job.get("note") or "") + \
+                        "（避让同刻任务后越出运行时段，本次不排）"
+                    continue
                 job["planned_at"] = t.replace(microsecond=0).isoformat()
                 job["note"] = (job.get("note") or "") + "（避让同刻任务）"
         prev = t
@@ -339,6 +431,12 @@ def summarize(now, plan, day_data):
         failed = len([j for j in jobs if j.get("status") == STATUS_FAILED])
         pending = len([j for j in jobs if j.get("status") == STATUS_PLANNED])
         skipped = len([j for j in jobs if j.get("status") == STATUS_SKIPPED])
+        win = cfg.get("window") or plan.get("window") or {}
+        min_gap = int(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
+        start_t = parse_hhmm(win.get("start"), parse_hhmm("08:00"))
+        end_t = parse_hhmm(win.get("end"), parse_hhmm("23:30"))
+        win_minutes = ((end_t.hour * 60 + end_t.minute)
+                       - (start_t.hour * 60 + start_t.minute))
         per_type[task_type] = {
             "label": meta["label"],
             "unit": meta["unit"],
@@ -346,9 +444,11 @@ def summarize(now, plan, day_data):
             "implemented": meta["implemented"],
             "enabled": bool(cfg.get("enabled")),
             "cap": int(cfg.get("daily_cap") or 0),
-            "window": (cfg.get("window") or plan.get("window") or {}),
-            "min_gap_minutes": int(cfg.get("min_gap_minutes")
-                                   or plan.get("min_gap_minutes") or 60),
+            "window": win,
+            "min_gap_minutes": min_gap,
+            # ★ 上限 = floor(时段分钟 / 最小间隔) + 1：设置页据此提示「最多能排几个」
+            "window_minutes": win_minutes,
+            "max_per_day": feasible_count(win_minutes, min_gap),
             "done": done, "pending": pending, "failed": failed, "skipped": skipped,
             "desc": meta["desc"],
         }

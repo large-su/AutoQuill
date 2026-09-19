@@ -534,6 +534,10 @@
   .auto-task-desc { font-size: 11px; color: var(--muted); margin: 3px 0 5px; line-height: 1.5; }
   .auto-task-ctl { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); flex-wrap: wrap; }
   .auto-task-ctl input[type=number] { width: 62px; }
+/* 上限提示：把「时段 ÷ 间隔 + 1」这条数学关系直接摊在配置卡上 */
+.auto-task-note { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+.auto-task-note b { color: #9fd0ff; font-weight: 600; }
+.auto-task-note.warn { color: #fbbf24; }
   .auto-notices { display: flex; flex-direction: column; gap: 5px; max-height: 210px; overflow-y: auto; }
   .auto-notice { font-size: 11.5px; line-height: 1.5; padding: 5px 8px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); }
   .auto-notice .t { color: var(--muted); font-size: 10.5px; margin-right: 6px; font-variant-numeric: tabular-nums; }

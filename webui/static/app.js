@@ -673,6 +673,18 @@ function applyLauncherSettingsToUi(data) {
     chk.checked = !!data.autostart_enabled;
     chk.disabled = !data.autostart_supported;
   }
+  const tray = $("trayStatus");
+  if (tray) {
+    const cfg2 = (data && data.settings) || {};
+    const at = cfg2.tray_checked_at || "";
+    if (!at) {
+      tray.textContent = "尚未自检（下次启动程序时写入）";
+    } else if (cfg2.tray_ok) {
+      tray.textContent = "正常 —— 关窗后驻留托盘（最近自检 " + at + "）";
+    } else {
+      tray.textContent = "不可用 —— 关窗会最小化到任务栏（最近自检 " + at + "，详见 logs/launcher.log）";
+    }
+  }
   const hint = $("autostartHint");
   if (hint) {
     if (!data.autostart_supported) {
@@ -711,6 +723,17 @@ document.querySelectorAll('input[name="closeToTray"]').forEach((el) => {
     saveLauncherSettings({ close_to_tray: val },
       val ? "关闭窗口 → 最小化到托盘（立即生效）" : "关闭窗口 → 直接退出（立即生效）");
   });
+});
+
+$("btnQuitApp") && $("btnQuitApp").addEventListener("click", async () => {
+  if (!confirm("确定退出 AutoQuill？\n\n窗口、后台服务与自动化都会停止（正在执行的作业会被中断）。")) return;
+  try {
+    const r = await fetch("/api/launcher/quit", { method: "POST" });
+    const d = await r.json();
+    showStStatus(d.message || "已请求退出…", "ok");
+  } catch (e) {
+    showStStatus("退出请求失败：" + e.message, "err");
+  }
 });
 
 $("autostartChk") && $("autostartChk").addEventListener("change", (e) => {

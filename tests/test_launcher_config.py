@@ -124,6 +124,17 @@ class AutostartTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("拒绝访问", msg)
 
+    def test_quit_request_roundtrip(self):
+        """控制台请求退出 → 启动器轮询读得到；启动时必须清掉陈旧请求。"""
+        self.assertEqual(lc.load()["quit_requested_at"], "")
+        stamp = lc.request_quit()
+        self.assertTrue(stamp)
+        self.assertEqual(lc.load()["quit_requested_at"], stamp)
+        lc.clear_quit_request()                    # 启动时的自愈
+        self.assertEqual(lc.load()["quit_requested_at"], "")
+        lc.clear_quit_request()                    # 幂等：没有请求也不报错
+        self.assertEqual(lc.load()["quit_requested_at"], "")
+
     def test_ensure_consistent_heals_missing_entry(self):
         reg = _FakeRegistry()
         with mock.patch.object(lc, "autostart_supported", lambda: True):
@@ -178,6 +189,16 @@ class LauncherApiTest(unittest.TestCase):
         self.assertFalse(d["settings"]["close_to_tray"])
         self.assertFalse(self.client.get("/api/launcher/settings")
                          .json()["settings"]["close_to_tray"])
+
+    def test_quit_endpoint_writes_request(self):
+        d = self.client.post("/api/launcher/quit").json()
+        self.assertTrue(d["ok"])
+        self.assertIn("退出", d["message"])
+        self.assertTrue(d["requested_at"])
+        # 启动器读的就是这份设置
+        self.assertEqual(self.client.get("/api/launcher/settings")
+                         .json()["settings"]["quit_requested_at"],
+                         d["requested_at"])
 
     def test_post_autostart_updates_settings_and_registry(self):
         d = self.client.post("/api/launcher/settings",

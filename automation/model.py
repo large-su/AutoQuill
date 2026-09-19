@@ -146,7 +146,7 @@ def normalize_plan(raw):
     plan["window"] = {"start": hhmm(start), "end": hhmm(end)}
     for key, lo, hi, default in (("jitter_minutes", 0, 120, 8),
                                  ("min_gap_minutes", 5, 720, 60),
-                                 ("gap_jitter_ratio", 0.0, 2.0, 0.6)):
+                                 ("gap_jitter_ratio", 0.0, 1.0, 0.6)):
         try:
             val = float(raw.get(key, default))
         except (TypeError, ValueError):

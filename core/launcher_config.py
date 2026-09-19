@@ -26,6 +26,12 @@ DEFAULTS = {
     "autostart": False,
     # 首次「藏进托盘」时提示一次（Win11 会把新图标收进折叠区，不提示用户会以为程序没了）
     "tray_hint_shown": False,
+    # 最近一次启动的托盘自检结果（启动器写、设置页读）：托盘建不起来时用户要能看见原因
+    "tray_ok": False,
+    "tray_checked_at": "",
+    # 控制台点「退出 AutoQuill」时写时间戳；启动器轮询到就退出
+    # （托盘图标被 Windows 折叠进 ^ 时，用户得有个看得见的退出入口）
+    "quit_requested_at": "",
 }
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -185,6 +191,20 @@ def apply_autostart(enabled, backend=None):
     except Exception as exc:      # noqa: BLE001
         log.warning("设置开机自启失败：%s", exc)
         return False, "设置开机自启失败：%s" % exc
+
+
+def request_quit(when=None):
+    """控制台请求退出：写时间戳给启动器（启动器轮询到就真退出）。"""
+    import time as _time
+    stamp = when or _time.strftime("%Y-%m-%d %H:%M:%S")
+    save({"quit_requested_at": stamp})
+    return stamp
+
+
+def clear_quit_request():
+    """启动时清掉上次的退出请求，避免「刚启动就自己退了」。"""
+    if load().get("quit_requested_at"):
+        save({"quit_requested_at": ""})
 
 
 def ensure_autostart_consistent(cfg=None, backend=None):

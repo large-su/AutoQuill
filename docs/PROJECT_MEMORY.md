@@ -36,7 +36,7 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
 
 - automation/：**自动化模块**（2026-09-19 新增，M1 骨架 + M2 发布草稿）——24 小时时间轴调度，无人化运营：
   model（任务类型契约/计划默认值）· store（计划/当日排班/台账，原子写）· planner（排班：
-  配额/时段/≥1h 随机间隔/去碰撞/错过补做/失败补位）· scheduler（tick、串行、幂等、熔断、
+  配额/时段/铺开式随机排班（等分时段+修复间隔，非随机游走）/上限公式 floor(时段÷间隔)+1/去碰撞/错过补做/失败补位）· scheduler（tick、串行、幂等、熔断、
   暂停/停止）· executor（复用 TaskRunner，不直接碰 DOM）。运行数据在
   `data/state/automation/`（已 gitignore）；API 见 webui/automation_api.py；前端独立文件
   `webui/static/automation.js` + `/automation.js` 路由。规划见 docs/AUTOMATION-PLAN.md

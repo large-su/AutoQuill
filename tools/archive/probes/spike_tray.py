@@ -132,8 +132,16 @@ def main():
 
     def worker():
         try:
+            # 回调「刚进来」的第一时间记录原生对象是否就绪：pywebview 的 start(func)
+            # 是先起线程、再创建窗口，所以这里**可能是 None**——线上 launcher.log 里
+            # 22:06 拿到、22:15 没拿到，就是踩了这个竞态（所以生产代码必须先 wait_native）
+            immediate = window.native is not None
+            REPORT["notes"]["native_immediate"] = immediate
+            print("NOTE  回调刚进来时 native 就绪：%s" % immediate, flush=True)
             time.sleep(2.5)
             tray = L.TrayController(window)
+            check("wait_native 能等到窗口原生对象", tray.wait_native(15),
+                  "immediate=%s" % immediate)
             check("生产代码 TrayController 挂载成功", tray.attach(),
                   "available=%s" % tray.available)
             if not tray.available:
@@ -195,6 +203,20 @@ def main():
                                      "status": "planned",
                                      "planned_at": "2026-09-19T08:00:00"}]}
                   )["type"] == "publish_drafts")
+
+            # ---- 托盘不可用时的兜底：关窗必须最小化到任务栏（程序继续跑）----
+            tray.form = form
+            saved_available, tray.available = tray.available, False
+            from System.Windows.Forms import FormWindowState
+            form.Invoke(Action(lambda: setattr(form, "WindowState",
+                                              FormWindowState.Normal)))
+            check("托盘不可用时关窗改为最小化到任务栏",
+                  tray.on_closing() is False
+                  and str(form.WindowState).endswith("Minimized"),
+                  "WindowState=%s" % form.WindowState)
+            form.Invoke(Action(lambda: setattr(form, "WindowState",
+                                              FormWindowState.Normal)))
+            tray.available = saved_available
 
             # ---- 从托盘叫回来 ----
             tray.show_window()

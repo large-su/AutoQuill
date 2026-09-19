@@ -3,7 +3,9 @@
 
    设计口径（用户 2026-09-19 定）：
      · 时间轴要「清晰好看」：24 小时刻度 + 每类任务一条泳道 + 状态配色 + 现在指针；
-     · 全部只读展示 + 几个开关（开始/暂停/停止/立即执行），配置改动即存；
+     · 全部只读展示 + 几个开关（开始/暂停/停止/立即执行/演练发布），配置改动即存；
+     · 排班是「时段内铺开」而不是「发一个等一小时」：任务卡上写明
+       上限 = 时段分钟 ÷ 最小间隔 + 1，设多了要当场提示排不下；
      · 独立文件，避免把 app.js 撑大（app.js 里的 $ / esc / LEFT_MODES 直接复用）。
    ============================================================ */
 
@@ -277,6 +279,16 @@ function renderAutoTaskConfig() {
       + (cfg.daily_cap || 0) + "\"> " + esc(m.unit)
       + "　最小间隔 <input type=\"number\" data-role=\"gap\" min=\"5\" max=\"720\" step=\"5\" value=\""
       + (m.min_gap_minutes || 60) + "\"> 分钟</div>";
+    // 上限提示：N 个作业只有 N-1 个间隔 → 时段内最多 floor(时段/间隔)+1 个
+    const cap = cfg.daily_cap || 0;
+    const maxN = m.max_per_day || 0;
+    const over = maxN > 0 && cap > maxN;
+    html += "<div class=\"auto-task-note" + (over ? " warn" : "") + "\">"
+      + "时段 " + (m.window_minutes || 0) + " 分钟 ÷ 间隔 " + (m.min_gap_minutes || 60)
+      + " 分钟 + 1 → 最多 <b>" + maxN + " " + esc(m.unit) + "</b>/天"
+      + (over ? "　⚠ 你设了 " + cap + " " + esc(m.unit) + "，多出的 " + (cap - maxN) + " "
+                + esc(m.unit) + " 排不下（按上限排班，时间轴上会标原因）" : "")
+      + "</div>";
     if (t === "full_chain") {
       const mode = ((cfg.params || {}).mode) || "single";
       html += "<div class=\"auto-task-ctl\">链路 <select data-role=\"mode\">"

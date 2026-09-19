@@ -87,7 +87,9 @@ class PlannerTest(unittest.TestCase):
     def test_catch_up_same_day_shifts_missed_job(self):
         plan = _plan(full_chain={"enabled": True, "daily_cap": 1})
         day = planner.materialize_day(self.now, plan, {}, {})
-        later = datetime(2026, 9, 20, 12, 0, 0)      # 计划点已过
+        planned = datetime.fromisoformat(day["schedule"][0]["planned_at"])
+        # 推进到「计划点 + 宽限期」之后：确实错过了，才该顺延
+        later = planned + timedelta(minutes=planner.CATCH_UP_GRACE_MINUTES + 5)
         day = planner.apply_catch_up(later, plan, day)
         job = [j for j in day["schedule"] if j["status"] == planner.STATUS_PLANNED][0]
         self.assertGreaterEqual(datetime.fromisoformat(job["planned_at"]), later)
@@ -97,7 +99,10 @@ class PlannerTest(unittest.TestCase):
         plan = _plan(full_chain={"enabled": True, "daily_cap": 1})
         plan["catch_up"] = "none"
         day = planner.materialize_day(self.now, plan, {}, {})
-        day = planner.apply_catch_up(datetime(2026, 9, 20, 12, 0, 0), plan, day)
+        planned = datetime.fromisoformat(day["schedule"][0]["planned_at"])
+        day = planner.apply_catch_up(
+            planned + timedelta(minutes=planner.CATCH_UP_GRACE_MINUTES + 5),
+            plan, day)
         self.assertEqual(day["schedule"][0]["status"], planner.STATUS_SKIPPED)
         self.assertIn("不补做", day["schedule"][0]["note"])
 
@@ -109,6 +114,98 @@ class PlannerTest(unittest.TestCase):
         skipped = [j for j in day["schedule"] if j["status"] == planner.STATUS_SKIPPED]
         self.assertTrue(skipped)
         self.assertIn("排不下", skipped[0]["note"])
+
+    def test_schedule_spreads_across_whole_window(self):
+        """(a) 动作要「在时段内相对随机地分布」——不能挤在一天前段。"""
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        times = sorted(datetime.fromisoformat(j["planned_at"])
+                       for j in day["schedule"]
+                       if j["status"] == planner.STATUS_PLANNED)
+        span = 23 * 60 + 30 - 8 * 60                  # 08:00–23:30 = 930 分钟
+        used = (times[-1] - times[0]).total_seconds() / 60
+        self.assertGreaterEqual(used, span * 0.6,          # 铺开：占满 60% 以上时段
+                                [t.strftime("%H:%M") for t in times])
+        self.assertLessEqual(times[-1], datetime(2026, 9, 20, 23, 30))
+        # 不能是「发一个等一小时」的随机游走：那会让最后一个点早早出现
+        self.assertGreaterEqual(times[-1].hour, 18,
+                                [t.strftime("%H:%M") for t in times])
+
+    def test_gap_is_a_floor_not_a_step(self):
+        """(b) 间隔是「下限」而不是「每次加一个随机间隔」：任何两个动作都 ≥ 间隔。"""
+        for cap, gap in ((2, 60), (4, 90), (6, 60), (9, 45)):
+            plan = _plan(full_chain={"enabled": True, "daily_cap": cap})
+            plan["min_gap_minutes"] = gap
+            day = planner.materialize_day(self.now, plan, {}, {})
+            times = sorted(datetime.fromisoformat(j["planned_at"])
+                           for j in day["schedule"]
+                           if j["status"] == planner.STATUS_PLANNED)
+            self.assertEqual(len(times), cap, (cap, gap))
+            for a, b in zip(times, times[1:]):
+                self.assertGreaterEqual((b - a).total_seconds() / 60, gap,
+                                        (cap, gap, [t.strftime("%H:%M") for t in times]))
+
+    def test_daily_cap_is_bounded_by_window_and_gap(self):
+        """(c) 数学关系：上限 = floor(时段 / 最小间隔) + 1；设多了按上限排并说明原因。"""
+        self.assertEqual(planner.feasible_count(930, 60), 16)    # 08:00–23:30 / 60 分
+        self.assertEqual(planner.feasible_count(930, 120), 8)
+        self.assertEqual(planner.feasible_count(120, 60), 3)
+        self.assertEqual(planner.feasible_count(90, 60), 2)
+        self.assertEqual(planner.feasible_count(60, 60), 2)
+        self.assertEqual(planner.feasible_count(0, 60), 1)
+        self.assertEqual(planner.feasible_count(30, 0), 30)      # 不限间隔 → 按分钟
+
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 20})   # 上限只有 16
+        day = planner.materialize_day(self.now, plan, {}, {})
+        planned = [j for j in day["schedule"] if j["status"] == planner.STATUS_PLANNED]
+        skipped = [j for j in day["schedule"] if j["status"] == planner.STATUS_SKIPPED]
+        self.assertEqual(len(planned), 16)
+        self.assertEqual(len(skipped), 1)                        # 只留一条说明，不刷屏
+        self.assertIn("最多 16", skipped[0]["note"])
+        times = sorted(datetime.fromisoformat(j["planned_at"]) for j in planned)
+        for a, b in zip(times, times[1:]):
+            self.assertGreaterEqual((b - a).total_seconds() / 60, 60)
+        self.assertLessEqual(times[-1], datetime(2026, 9, 20, 23, 30))
+
+    def test_summary_exposes_daily_limit(self):
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        p = planner.summarize(self.now, plan, day)["per_type"]["full_chain"]
+        self.assertEqual(p["window_minutes"], 930)
+        self.assertEqual(p["min_gap_minutes"], 60)
+        self.assertEqual(p["max_per_day"], 16)
+
+    def test_resume_spreads_remaining_after_last_done(self):
+        """续做：做完的部分不重排，剩下的在「剩余时段」里铺开且间隔 ≥ G。"""
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
+        done_jobs = [{"key": "k0", "type": "full_chain", "units": 1,
+                      "status": planner.STATUS_DONE,
+                      "planned_at": "2026-09-20T10:00:00", "note": ""}]
+        day = planner.materialize_day(
+            self.now, plan,
+            {"date": "2026-09-20", "schedule": done_jobs},
+            {"full_chain": 1})
+        pend = sorted(datetime.fromisoformat(j["planned_at"])
+                      for j in day["schedule"]
+                      if j["status"] == planner.STATUS_PLANNED)
+        self.assertEqual(len(pend), 2)
+        self.assertGreaterEqual((pend[0] - datetime(2026, 9, 20, 10, 0)).total_seconds() / 60,
+                                60)
+        self.assertGreaterEqual((pend[1] - pend[0]).total_seconds() / 60, 60)
+        self.assertLessEqual(pend[1], datetime(2026, 9, 20, 23, 30))
+
+    def test_dense_schedule_never_leaves_the_window(self):
+        """两张表都排满时，去碰撞只往后推——但不能把作业推出运行时段。"""
+        plan = normalize_plan({"enabled": True, "min_gap_minutes": 30, "tasks": {
+            "publish_drafts": {"enabled": True, "daily_cap": 16},
+            "full_chain": {"enabled": True, "daily_cap": 16}}})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        planned = [j for j in day["schedule"] if j["status"] == planner.STATUS_PLANNED]
+        self.assertTrue(planned)
+        end = datetime(2026, 9, 20, 23, 30)
+        for j in planned:
+            self.assertLessEqual(datetime.fromisoformat(j["planned_at"]), end,
+                                 j["planned_at"])
 
     def test_summary_reports_progress(self):
         plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
@@ -193,8 +290,9 @@ class SchedulerTest(unittest.TestCase):
         store.save_plan(_only("full_chain", daily_cap=3))
         self.result = RuntimeError("模型无输出")
         # 失败会「当日补位」再试，最多补 2 次 → 第 3 次失败触发熔断；
-        # 这里按 30 分钟步进反复 tick，直到熔断（或步数用尽）
-        for _ in range(12):
+        # 排班是「铺满全天」的（3 篇约落在 10:0x / 15:2x / 21:4x），
+        # 所以按 30 分钟步进要走完整个时段（留足补位时间），不能只走 6 小时
+        for _ in range(40):
             self.sched._tick()
             self._advance(30)
         self.assertFalse(store.load_plan()["tasks"]["full_chain"]["enabled"])
@@ -250,8 +348,10 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_missed_job_is_caught_up_within_window(self):
-        # 程序 11:00 才启动，08:0x 的作业已明显错过 → same_day 顺延到当天剩余时段
-        self._advance(120)
+        # 程序在「第一篇计划点 + 宽限期」之后才启动 → same_day 顺延到当天剩余时段
+        first = self._planned_times()[0]
+        self.now = first + timedelta(
+            minutes=planner.CATCH_UP_GRACE_MINUTES + 5)
         self.sched._tick()
         job = [j for j in store.load_day("2026-09-20")["schedule"]
                if j["status"] == planner.STATUS_PLANNED][0]
