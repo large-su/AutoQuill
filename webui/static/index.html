@@ -615,6 +615,27 @@
         </div>
       </div>
       <div class="st-group">
+        <div class="st-title">常驻与启动</div>
+        <div class="st-row">
+          <div class="st-k">关闭窗口时</div>
+          <div class="st-ctl">
+            <span class="seg">
+              <label class="seg-opt"><input type="radio" name="closeToTray" value="true">最小化到托盘（推荐）</label>
+              <label class="seg-opt"><input type="radio" name="closeToTray" value="false">直接退出</label>
+            </span>
+          </div>
+          <div class="st-d">最小化到托盘 = 关掉窗口后程序还在跑，时间轴上的自动化不中断；
+            双击托盘图标打开控制台，右键可暂停 / 立即执行 / 退出</div>
+        </div>
+        <div class="st-row">
+          <div class="st-k">开机自启</div>
+          <div class="st-ctl">
+            <label class="auto-check"><input type="checkbox" id="autostartChk"> 开机后自动运行</label>
+          </div>
+          <div class="st-d" id="autostartHint">开机后静默驻留托盘（不弹窗），到点继续跑自动化；默认关闭</div>
+        </div>
+      </div>
+      <div class="st-group">
         <div class="st-title">工作设置</div>
         <div class="st-row">
           <div class="st-k">选题来源</div>

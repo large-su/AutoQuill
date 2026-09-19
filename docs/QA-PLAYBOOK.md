@@ -6,12 +6,12 @@
 
 | 脚本 | 用途 | 什么时候用 | 示例 |
 |---|---|---|---|
-| `tests/run_all.py` | 全量单元测试（514 例；自动跳过需要真实浏览器/登录态的用例） | 每次改动后端后、提交前、CI 必跑 | `python tests/run_all.py` |
+| `tests/run_all.py` | 全量单元测试（618 例；自动跳过需要真实浏览器/登录态的用例） | 每次改动后端后、提交前、CI 必跑 | `python tests/run_all.py` |
 | `tools/auto_test.py` | 自动回归测试：后端单测 + Python/app.js 语法 + 前端 Playwright 全流程 + 服务端日志检查 | 改完前端/后端后，模拟“人工测试员”跑一遍；`--quick` 只跑后端+语法（CI 友好） | `python tools/auto_test.py`<br>`python tools/auto_test.py --quick` |
 | `tools/ai_flavor_check.py` | AI 味检测（0-100）：检查生成稿的机器味，与真人基准对比 | 生成效果前后对比、发布前自查 | `python tools/ai_flavor_check.py output`<br>`python tools/ai_flavor_check.py --zhihu data/published_answers_.json` |
 | `tools/build_release.py` | 正式发版：门禁（git 干净/分支 main）→ 全量测试 → PyInstaller → Inno Setup 安装包 → SHA256；**版本号自动从 core/version.py 注入** | 发新版本时 | `python tools/build_release.py` |
-| `tests/test_*.py` | 专项单测（草稿箱/快照/评分回退/并行窗口/大模型筛选/launcher 等） | 定位具体模块问题时单独跑 | `python -m unittest tests.test_drafts` |
-| `tools/archive/probes/` | 历史一次性探查脚本（已归档，只读参考）。其中 `probe_markdown_rebuild.py` 是逐块重建 markdown 的**合成 DOM 真机验证**（不登录不联网，改 walker 后跑一次） | 浏览器 DOM 排查时的历史参考 | `python tools/archive/probes/probe_markdown_rebuild.py` |
+| `tests/test_*.py` | 专项单测（草稿箱/快照/评分回退/并行窗口/大模型筛选/launcher/自动化/启动器设置等） | 定位具体模块问题时单独跑 | `python -m unittest tests.test_drafts` |
+| `tools/archive/probes/` | 历史一次性探查脚本（已归档，只读参考）。其中 `probe_markdown_rebuild.py` 是逐块重建 markdown 的**合成 DOM 真机验证**（不登录不联网，改 walker 后跑一次）；`spike_tray.py` 是 M4 托盘常驻的真机验证（**直接跑生产代码** `launcher.TrayController` + 本地假 API，15 项检查） | 浏览器 DOM / 托盘排查时的历史参考 | `python tools/archive/probes/probe_markdown_rebuild.py`<br>`python tools/archive/probes/spike_tray.py` |
 
 ## 二、推荐工作流（按场景）
 
@@ -33,7 +33,21 @@ python tools/auto_test.py               # 含前端 Playwright 全流程 + 日�
 
 ### 前端单独回归（改样式/JS 后）
 ```bash
-python tools/auto_test.py               # 会起临时服务并逐项点击验证（四大模式/看板/草稿箱/设置）
+python tools/auto_test.py               # 会起临时服务并逐项点击验证（五大模式/看板/草稿箱/自动化/设置）
+```
+
+### 托盘常驻 / 开机自启（M4，改 launcher 或 launcher_config 后）
+```bash
+# 自动部分：真机跑生产代码（托盘图标、关窗隐藏、菜单动作、干净退出，15 项检查）
+python tools/archive/probes/spike_tray.py
+
+# 手动部分（托盘是「人点出来」的功能，机器代替不了）——双击「AutoQuill 启动器」：
+#   1) 窗口右上角 X → 窗口消失、托盘出现 AutoQuill 图标（Win11 在 ^ 折叠区里）
+#   2) 双击托盘图标 → 控制台回来；右键 → 菜单五项齐全、状态行显示今日进度
+#   3) 右键「暂停自动化」→ 控制台里状态变「已暂停」；再点「恢复自动化」→ 恢复运行
+#   4) 设置 →「常驻与启动」：关窗行为切「直接退出」→ 再点 X → 程序真的退出
+#   5) 勾选「开机后自动运行」→ 注册表里出现 HKCU\...\Run\AutoQuill（命令带 --tray）；
+#      取消勾选 → 该项消失。测试完记得取消，别把自启留在机器上
 ```
 
 ### 生成效果与 AI 味对比

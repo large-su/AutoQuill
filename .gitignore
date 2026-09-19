@@ -4,6 +4,9 @@ config/llm_providers.json
 # 界面运行时模型切换的持久化（本机偏好）
 config/webui_model.json
 
+# 启动器偏好（关窗行为 / 开机自启，本机偏好）
+config/launcher.json
+
 # 浏览器登录态（含会话 Cookie，等同账号凭证）
 config/browser_state.json
 data/browser_profile/

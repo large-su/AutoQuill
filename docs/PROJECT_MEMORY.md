@@ -46,6 +46,14 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
   `publish_draft()`（qid 空 = 发最旧一篇；校验 URL `/answer/<aid>` 或服务端草稿清空）。
   护栏：空草稿箱记「跳过」而非失败（防空跑触发熔断）、登录失效转 NeedHuman 暂停全自动化、
   失败不自动重试、`run-now {dry_run:true}` 演练只探按钮不点发布（前端「演练发布」按钮）
+  · **M4 托盘常驻（2026-09-19）**：`tools/launcher.py` 的 TrayController（.NET NotifyIcon，
+  必须 UI 线程创建）——关窗默认 Hide() 到托盘（closing 返回 False）、托盘菜单（打开/状态/
+  暂停恢复/立即执行/退出，立即执行遇到发布作业先确认）、首次隐藏提示一次、托盘建不起来
+  自动退化为真关闭；设置（关窗行为 / 开机自启）在 `core/launcher_config.py`
+  （DATA_ROOT/config/launcher.json，启动器与服务共读写，每次关窗重读即生效），
+  自启写 HKCU Run（命令带 `--tray`，安装态 exe / 源码态 pythonw+launcher.py），
+  API `GET/POST /api/launcher/settings`；探针 `tools/archive/probes/spike_tray.py`
+  直接跑生产代码（真机 15 项检查）
 - webui/server.py：Web 控制台入口（路由注册 + TaskRunner + watchdog + 日志/SSE + 设置/状态）
 - webui/browser_tasks.py：看板/草稿箱四个后台任务状态字典 + browser_busy() 互斥（共用同一浏览器 profile，必须串行）
 - webui/dashboard_api.py / drafts_api.py：看板 / 草稿箱路由（register 模式挂到 server app）

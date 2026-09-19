@@ -196,8 +196,15 @@ def test_frontend(port):
                   modes == ["工作台", "作者蒸馏", "已发布内容看板", "草稿箱素材", "自动化"],
                   json.dumps(modes, ensure_ascii=False))
 
-            pg.click("#btnSetup"); pg.wait_for_timeout(300)
+            pg.click("#btnSetup"); pg.wait_for_timeout(600)
             check("设置弹窗", pg.evaluate("() => document.getElementById('settingsMask')?.classList.contains('show')"))
+            # M4：常驻与启动（关窗行为 + 开机自启）必须在设置页可见、且反映服务端状态
+            check("设置-常驻与启动", pg.evaluate(
+                "() => {"
+                + " const radios = document.querySelectorAll('input[name=closeToTray]');"
+                + " const chk = document.getElementById('autostartChk');"
+                + " return radios.length === 2 && !!chk && !!(document.getElementById('autostartHint')||{}).textContent;"
+                + " }"))
             pg.click("#settingsClose"); pg.wait_for_timeout(200)
 
             pg.select_option("#leftModeSel", "dashboard")

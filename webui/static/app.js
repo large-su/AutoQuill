@@ -650,6 +650,75 @@ async function loadBrowserMode() {
   } catch (e) { /* 旧服务无 /api/browser，保持默认 */ }
 }
 
+/* ---------- 常驻与启动（M4：关窗最小化到托盘 + 开机自启） ---------- */
+
+let launcherSettings = { close_to_tray: true, autostart: false };
+
+async function loadLauncherSettings() {
+  try {
+    const r = await fetch("/api/launcher/settings");
+    const data = await r.json();
+    launcherSettings = data.settings || launcherSettings;
+    applyLauncherSettingsToUi(data);
+  } catch (e) { /* 旧服务无此端点：保持默认（托盘常驻） */ }
+}
+
+function applyLauncherSettingsToUi(data) {
+  const cfg = (data && data.settings) || launcherSettings;
+  document.querySelectorAll('input[name="closeToTray"]').forEach((el) => {
+    el.checked = (el.value === String(!!cfg.close_to_tray));
+  });
+  const chk = $("autostartChk");
+  if (chk) {
+    chk.checked = !!data.autostart_enabled;
+    chk.disabled = !data.autostart_supported;
+  }
+  const hint = $("autostartHint");
+  if (hint) {
+    if (!data.autostart_supported) {
+      hint.textContent = "当前系统不支持（仅 Windows 支持开机自启）";
+    } else if (data.autostart_enabled) {
+      hint.textContent = "已开启：" + (data.autostart_installed_command || "");
+    } else {
+      hint.textContent = "开机后静默驻留托盘（不弹窗），到点继续跑自动化；默认关闭";
+    }
+  }
+}
+
+async function saveLauncherSettings(patch, okText) {
+  try {
+    const r = await fetch("/api/launcher/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const data = await r.json();
+    applyLauncherSettingsToUi(data);
+    launcherSettings = data.settings || launcherSettings;
+    if (data.ok === false) {
+      showStStatus(data.message || "保存失败", "err");
+      return;
+    }
+    showStStatus(okText, "ok");
+  } catch (e) {
+    showStStatus("保存失败：" + e.message, "err");
+  }
+}
+
+document.querySelectorAll('input[name="closeToTray"]').forEach((el) => {
+  el.addEventListener("change", () => {
+    const val = el.value === "true";
+    saveLauncherSettings({ close_to_tray: val },
+      val ? "关闭窗口 → 最小化到托盘（立即生效）" : "关闭窗口 → 直接退出（立即生效）");
+  });
+});
+
+$("autostartChk") && $("autostartChk").addEventListener("change", (e) => {
+  const on = e.target.checked;
+  saveLauncherSettings({ autostart: on },
+    on ? "已开启开机自启（下次开机静默驻留托盘）" : "已关闭开机自启");
+});
+
 /* ---------- 选题来源 ---------- */
 
 let questionSource = "recommend";
@@ -2325,6 +2394,7 @@ $("btnSetup").addEventListener("click", () => {
   $("settingsMask").classList.add("show");
   loadConfig(); loadMode(); loadBrowserMode();
   loadAuthors(); loadQuestionSource();
+  loadLauncherSettings();
   refreshZhihuLoginState();
 });
 
