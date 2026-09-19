@@ -44,6 +44,9 @@ _CONSUMED = (STATUS_DONE, STATUS_RUNNING)
 def plan_fingerprint(plan) -> str:
     """影响排班的字段指纹（变了就重排未执行部分）。"""
     key = {
+        # 排班算法版本：算法改了要 +1，否则「今天已经排过」的旧时间轴不会被重排
+        # （v2 = 2026-09-19 改成「时段内铺开」+ 上限公式）
+        "sched": 2,
         "window": plan.get("window"),
         "min_gap": plan.get("min_gap_minutes"),
         "gap_jitter": plan.get("gap_jitter_ratio"),
