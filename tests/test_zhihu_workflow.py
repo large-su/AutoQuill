@@ -254,6 +254,34 @@ class TestZhihuWorkflowSemantics(unittest.TestCase):
         login_src = self._src("_require_login")
         self.assertIn("is_logged_in", login_src)
 
+    def test_scan_recommend_surfaces_login_expiry(self):
+        """候选页被 302 到登录页 → 立刻抛「登录态失效」，不再空转两轮重试。
+
+        2026-09-23 用户实测：日志只说「候选页 DOM 解析为空（登录态/网络/
+        页面结构，可重试）」，真正原因却是会话已登出——模糊话让人白撞两轮。
+        """
+        import types
+        wf = self.wf
+
+        class _B:
+            def __init__(self):
+                self.page = types.SimpleNamespace(
+                    url="https://www.zhihu.com/signin?next=%2F")
+                self.opened = 0
+
+            def open_recommend_page(self, url=None):
+                self.opened += 1
+
+            def get_recommend_questions(self, max_cards=40):
+                return []
+
+        b = _B()
+        with self.assertRaises(RuntimeError) as cm:
+            wf._scan_recommend(b)
+        self.assertIn("登录态失效", str(cm.exception))
+        self.assertIn("重新登录知乎", str(cm.exception))
+        self.assertEqual(b.opened, 1)        # 一轮就定性，不再重试
+
     def test_auto_select_uses_dom_score_and_open_question(self):
         src = self._src("_select_auto")
         self.assertIn("open_question", src)

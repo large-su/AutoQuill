@@ -8,6 +8,7 @@
 # ============================================================
 
 import unittest
+from unittest import mock
 
 from applications.zhihu_story.browser_adapter import (
     normalize_question_url,
@@ -635,6 +636,293 @@ class TestLoginFlows(unittest.TestCase):
         self.assertIn("ZhihuBrowser(headless=False)", src)
         self.assertIn("_browser_lock", src)
         self.assertNotIn("get_browser(", src)
+
+
+class _LoginFakeResponse:
+    """假 HTTP 响应：probe_ok=True → 200（会话有效），否则 302 到登录页。"""
+
+    def __init__(self, ok):
+        self.status = 200 if ok else 302
+        self.headers = {} if ok else {"location": "//www.zhihu.com/signin?next=%2F"}
+
+
+class _LoginFakeRequest:
+    """假 context.request：只回答知乎首页探测。"""
+
+    def __init__(self, probe_ok=False):
+        self.probe_ok = probe_ok
+        self.calls = 0
+
+    def get(self, url, **kw):
+        self.calls += 1
+        return _LoginFakeResponse(self.probe_ok)
+
+
+class _LoginFakeContext:
+    """假 context：页面列表 + cookie 罐 + HTTP 客户端（探测用）。"""
+
+    def __init__(self, pages, token="tok-old", probe_ok=False):
+        self.pages = pages
+        self.token = token
+        self.request = _LoginFakeRequest(probe_ok)
+
+    def cookies(self, url=None):
+        return [{"name": "z_c0", "value": self.token}] if self.token else []
+
+
+class _LoginFakePage:
+    """登录引导用假页面：每次 goto 从脚本里取一个落点（取完就用请求 URL）。"""
+
+    def __init__(self, urls):
+        self._urls = list(urls)
+        self.url = "about:blank"
+        self.gotos = []
+
+    def goto(self, url, **kw):
+        self.gotos.append(url)
+        self.url = self._urls.pop(0) if self._urls else url
+        return None
+
+
+class _LoginFakeBrowser:
+    """假的可见 Edge：页面落点、凭证 cookie、探测结果都由测试给。"""
+
+    def __init__(self, urls, token="tok-old", probe_ok=False, pages=None):
+        self.page = _LoginFakePage(urls)
+        self.context = _LoginFakeContext(
+            pages if pages is not None else [self.page],
+            token=token, probe_ok=probe_ok)
+        self.saved = False
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+        return False
+
+    def is_logged_in(self):
+        return bool(self.context.token)
+
+    def save_storage_state(self, path=None):
+        self.saved = True
+
+
+class TestZhihuLoginFlow(unittest.TestCase):
+    """登录引导回归（2026-09-23 两次事故）。
+
+    事故一：知乎把会话登出后 z_c0 仍留在 profile 里，登录引导一进函数就判定
+    「已登录」→ 窗口闪一下就被关闭，用户怎么点都登不上（只看 cookie）。
+    事故二：登录在别处完成（新标签页/页面没跳转）时判定不出来 → 等满 5 分钟
+    也不保存、不关窗（只看当前页）。
+    """
+
+    def _run(self, urls, token="tok-old", probe_ok=False, timeout=0,
+             flip_after_sleep=0, retoken_after_sleep=0):
+        """跑一次登录引导，返回 (结果, 假浏览器)。
+
+        flip_after_sleep：第 N 次 sleep 后把页面落点改成知乎首页（模拟扫码
+        登录后页面跳转）；retoken_after_sleep：第 N 次 sleep 后换发新凭证
+        （模拟「登录接口换了 token 但页面还没跳」）。
+        """
+        holder = {}
+
+        def _factory(**kw):
+            b = _LoginFakeBrowser(urls, token=token, probe_ok=probe_ok)
+            holder["b"] = b
+            return b
+
+        steps = {"n": 0}
+
+        def _sleep(_sec):
+            steps["n"] += 1
+            b = holder["b"]
+            if flip_after_sleep and steps["n"] >= flip_after_sleep:
+                b.page.url = "https://www.zhihu.com/"
+            if retoken_after_sleep and steps["n"] >= retoken_after_sleep:
+                b.context.token = "tok-new"
+
+        import applications.zhihu_story.browser_adapter as ba
+        with mock.patch.object(ba, "ZhihuBrowser", _factory):
+            with mock.patch.object(ba.time, "sleep", _sleep):
+                result = ba.login_zhihu_flow(timeout=timeout)
+        return result, holder["b"]
+
+    # ---- 事故一的回归：陈旧 cookie 不能秒回成功 ----
+
+    def test_stale_cookie_does_not_short_circuit(self):
+        """cookie 还在但首页被 302 到登录页 → 走等待流程，绝不秒回「已登录」。"""
+        urls = ["https://www.zhihu.com/signin?next=%2F"]
+        (ok, msg), b = self._run(urls, timeout=0)
+        self.assertFalse(ok)
+        self.assertIn("超时", msg)
+        self.assertFalse(b.saved)                    # 没有假成功、没有覆盖登录态
+        self.assertTrue(b.closed)
+        self.assertIn("https://www.zhihu.com/signin", b.page.gotos)  # 真开了登录页
+
+    def test_already_logged_in_still_saves_and_closes(self):
+        """首页没跳登录页 = 确实登录着 → 保存登录态后正常收工。"""
+        (ok, msg), b = self._run(["https://www.zhihu.com/"])
+        self.assertTrue(ok)
+        self.assertIn("已登录", msg)
+        self.assertTrue(b.saved)
+        self.assertEqual(b.page.gotos, ["https://www.zhihu.com/"])
+
+    # ---- 事故二的回归：登录在别处完成也要能判定 ----
+
+    def test_login_completed_while_waiting(self):
+        """等待期间页面跳到首页 → 判成功并保存。"""
+        urls = ["https://www.zhihu.com/signin?next=%2F"]
+        (ok, msg), b = self._run(urls, timeout=9, flip_after_sleep=2)
+        self.assertTrue(ok)
+        self.assertIn("检测到登录成功", msg)
+        self.assertTrue(b.saved)
+
+    def test_session_probe_catches_login_on_another_tab(self):
+        """页面一直停在登录页，但会话探测显示已登录（用户在新标签页登录）。
+
+        这正是用户 2026-09-23 实测的现象：登完了，窗口却一直不关。判据三
+        （用共享 cookie 的 HTTP 客户端问首页）就是为它准备的。
+        """
+        urls = ["https://www.zhihu.com/signin?next=%2F"]
+        (ok, msg), b = self._run(urls, timeout=9, probe_ok=True)
+        self.assertTrue(ok)
+        self.assertIn("检测到登录成功", msg)
+        self.assertTrue(b.saved)
+        self.assertTrue(b.context.request.calls > 0)
+
+    def test_new_token_counts_as_login(self):
+        """凭证被换新（登录接口已发新 token，页面还没跳）= 登录成功。"""
+        urls = ["https://www.zhihu.com/signin?next=%2F"]
+        (ok, msg), b = self._run(urls, timeout=9, retoken_after_sleep=2)
+        self.assertTrue(ok)
+        self.assertIn("检测到登录成功", msg)
+        self.assertTrue(b.saved)
+
+    def test_page_leaves_signin_without_cookie_is_not_success(self):
+        """没有 z_c0 时一律不算成功（页面变了、探测通过也不认）。"""
+        urls = ["https://www.zhihu.com/signin?next=%2F"]
+        # timeout 取小值：这一轮必然等满整个等待窗口，别让单测干等 10 秒
+        (ok, _msg), b = self._run(urls, token="", timeout=1,
+                                  flip_after_sleep=2, probe_ok=True)
+        self.assertFalse(ok)
+        self.assertFalse(b.saved)
+
+    def test_stale_token_with_signin_page_and_bad_probe_waits(self):
+        """三条判据都不成立时只能等（宁可不关窗，也不能假成功）。"""
+        urls = ["https://www.zhihu.com/signin?next=%2F"]
+        (ok, _msg), b = self._run(urls, token="tok-old", timeout=0,
+                                  probe_ok=False)
+        self.assertFalse(ok)
+        self.assertFalse(b.saved)
+
+    # ---- 判据本身 ----
+
+    def test_confirm_rules(self):
+        """zhihu_login_confirmed 三条判据（都要先有凭证 cookie）。"""
+        from applications.zhihu_story.browser_adapter import zhihu_login_confirmed
+        signin = "https://www.zhihu.com/signin"
+        home = "https://www.zhihu.com/"
+
+        def _b(page_url, token, probe_ok=False, token_before=""):
+            page = _LoginFakePage([])
+            page.url = page_url
+            fake = _LoginFakeBrowser([], token=token, probe_ok=probe_ok,
+                                     pages=[page])
+            return zhihu_login_confirmed(fake, token_before=token_before)
+
+        self.assertFalse(_b(signin, ""))                       # 无凭证 cookie
+        self.assertFalse(_b(home, ""))                         # 无凭证 cookie
+        self.assertFalse(_b(signin, "tok-old"))                # 页面在登录页 + 探测不过
+        self.assertTrue(_b(home, "tok-old"))                   # 判据二：页面离开登录页
+        self.assertTrue(_b(signin, "tok-old", probe_ok=True))  # 判据三：探测通过
+        self.assertTrue(_b(signin, "tok-new", token_before="tok-old"))  # 判据一：换新
+        self.assertTrue(_b(home, "tok-new", token_before="tok-old"))
+
+    def test_last_second_login_is_not_lost(self):
+        """刚好在等待窗口结束前登完（页面没跳、探测这时才通）→ 也要保存。
+
+        2026-09-23 实录：登录窗口 20:56:06 关闭，z_c0 20:56:07 才落盘——
+        差一两秒就白登一次，所以判失败前必须再权威探测一次。
+        """
+        urls = ["https://www.zhihu.com/signin?next=%2F"]
+        (ok, msg), b = self._run(urls, timeout=0, probe_ok=True)
+        self.assertTrue(ok)
+        self.assertIn("检测到登录成功", msg)
+        self.assertTrue(b.saved)
+
+    def test_source_no_longer_trusts_cookie_only(self):
+        """源码锚点：登录判定必须走页面证据，别退回「只看 cookie」。"""
+        import inspect
+        from applications.zhihu_story import browser_adapter as ba
+        src = inspect.getsource(ba.login_zhihu_flow)
+        self.assertIn("page_needs_login", src)
+        self.assertIn("zhihu_login_confirmed", src)
+        self.assertNotIn("if browser.is_logged_in():", src)
+
+
+class TestLoadStorageStateMerge(unittest.TestCase):
+    """登录态文件只补缺、绝不覆盖（2026-09-23 修「登了等于没登」）。
+
+    事故：profile 里刚登录出的新 z_c0，被这份陈旧文件里的旧 z_c0 盖掉——
+    登录窗口 20:56:06 一关，20:56:07 网页版登录检查启动浏览器时又把旧
+    cookie 写回，用户白登一次。
+    """
+
+    def setUp(self):
+        import json
+        import os
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="aq_state_")
+        self.path = os.path.join(self.tmp, "browser_state.json")
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"cookies": [
+                {"name": "z_c0", "domain": ".zhihu.com", "path": "/",
+                 "value": "old-token"},
+                {"name": "d_c0", "domain": ".zhihu.com", "path": "/",
+                 "value": "d"},
+            ]}, f)
+
+    class _Ctx:
+        def __init__(self, live):
+            self.live = live
+            self.added = []
+
+        def cookies(self, url=None):
+            return [{"name": n, "domain": d, "path": p,
+                     "value": "new-token"} for n, d, p in self.live]
+
+        def add_cookies(self, cks):
+            self.added.extend(cks)
+
+    def _browser(self, live):
+        from applications.zhihu_story.browser_adapter import ZhihuBrowser
+        b = ZhihuBrowser.__new__(ZhihuBrowser)       # 不启动真实浏览器
+        b.context = self._Ctx(live)
+        b.storage_state = self.path
+        return b
+
+    def test_existing_cookie_is_never_overwritten(self):
+        """profile 里已有 z_c0（新登录的）→ 文件里的旧 z_c0 不许覆盖它。"""
+        b = self._browser([("z_c0", ".zhihu.com", "/")])
+        self.assertTrue(b.load_storage_state())
+        names = [c["name"] for c in b.context.added]
+        self.assertNotIn("z_c0", names)              # 关键：不覆盖新登录态
+        self.assertIn("d_c0", names)                 # 缺的照样补
+
+    def test_empty_profile_gets_everything(self):
+        """空 profile（首次启动/换机器）→ 全量补，行为与以前一致。"""
+        b = self._browser([])
+        self.assertTrue(b.load_storage_state())
+        self.assertEqual(sorted(c["name"] for c in b.context.added),
+                         ["d_c0", "z_c0"])
+
+    def test_missing_file_is_graceful(self):
+        b = self._browser([])
+        b.storage_state = self.path + ".nope"
+        self.assertFalse(b.load_storage_state())
+        self.assertEqual(b.context.added, [])
 
 
 if __name__ == "__main__":

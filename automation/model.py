@@ -5,8 +5,13 @@
   - 发布草稿 3 篇 / 全链路撰写 3 篇，都可自由设置；**发布顺序从旧到新**；
   - 运行时段默认 08:00–23:30（可设置）；
   - 同类任务最小间隔 ≥60 分钟且**随机化**，当日完成即可（不固定时间点）；
-  - 随时可停；再次开始时先看「今天已发布多少 / 已写多少」，在此基础上续做；
-  - 打卡 / 感谢 / 评论回复：本期只留接口（implemented=False，UI 显示「待接入」）。
+  - 随时可停；再次开始时先看「今天已发布多少 / 已写多少」，在此基础上续做。
+
+**任务类型只保留两个（用户 2026-09-24 口径）**：发布草稿 + 全链路撰写。
+打卡挑战（网页端不好操作）与互动类（感谢/赞同/回复评论，看着太乱）都不做——
+「把写故事、发布故事这两件事做准、做稳」比铺功能重要。
+契约层刻意不再登记任何「预留/未实现」类型：清单里有的就是能跑的，
+免得 UI 与排班里出现永远不执行的空泳道。
 """
 
 import copy
@@ -36,38 +41,10 @@ TASK_TYPES = {
         "desc": "选题 → 提取 → 生成 → 校验 → 写入草稿箱（不公开）",
         "params": {"mode": "single", "rounds": 1},   # single=经典链路，clean=纯净链路
     },
-    "checkin": {
-        "label": "打卡挑战",
-        "unit": "次",
-        "lane": 2,
-        "implemented": False,          # 预留接口
-        "default_cap": 1,
-        "desc": "知乎每日打卡挑战（入口待真机探针确认）",
-        "params": {},
-    },
-    "thank": {
-        "label": "感谢赞同/喜欢",
-        "unit": "条",
-        "lane": 3,
-        "implemented": False,          # 预留接口
-        "default_cap": 20,
-        "desc": "对收到的赞同/喜欢点「感谢」",
-        "params": {"batch": 7},
-    },
-    "reply_comment": {
-        "label": "回复评论",
-        "unit": "条",
-        "lane": 4,
-        "implemented": False,          # 预留接口
-        "default_cap": 5,
-        "desc": "挑选收到的评论生成回复（默认先生成待批准）",
-        "params": {"batch": 3, "mode": "approve"},
-    },
 }
 
 # 执行顺序上的偏好：同一分钟到点时，先发布（对外可见的动作尽量落在白天）
-TASK_PRIORITY = {"publish_drafts": 0, "full_chain": 1, "checkin": 2,
-                 "thank": 3, "reply_comment": 4}
+TASK_PRIORITY = {"publish_drafts": 0, "full_chain": 1}
 
 # 全局去碰撞：任意两个作业至少隔开的分钟数（避免同一分钟挤成一堆）
 DECOLLISION_MINUTES = 15
@@ -115,10 +92,7 @@ def _norm_task(task_type, raw):
     params = copy.deepcopy(meta["params"])
     if isinstance(raw.get("params"), dict):
         params.update(raw["params"])
-    # 未实现的任务类型强制关闭（UI 显示「待接入」），避免配置里留着开着的空任务
     enabled = bool(raw.get("enabled", task_type in ("full_chain", "publish_drafts")))
-    if not meta["implemented"]:
-        enabled = False
     return {
         "enabled": enabled,
         "daily_cap": cap,

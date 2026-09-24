@@ -311,6 +311,111 @@ def check_scene_dump(text):
 
 
 # ============================================================
+# ★ 检测器四：summary_opening（总结体开头 / 简介式引言）
+#
+# 背景（2026-09-19 用户口径）：经典模式最近几批的引言，常常写成一整段
+# "全书简介"——"所有人都说…没人知道…只有我清楚…这场…可惜晚了"——把人物
+# 关系、身世、牺牲、结局用评价句一次讲完，既没有场景也没有对话。用户原话：
+# "每个字我都认识，但是完全抓不住重点，也完全入不了戏。"
+#
+# 实测（2026-09-19 批次 19 篇 vs 采集参考 35 篇，都只看引言前 10 句）：
+#   引言含对话比例      16%   vs 100%
+#   抽象评价句占比      0.30  vs 0.00
+#   具体名词密度(/百字) 0.72  vs 2.40
+# 参考素材的开篇是"微型场景"（谁 + 做了什么 + 一句原话），我们的是"简介"。
+#
+# 只抓三种规则可判定的硬形态（审美交给 prompt 守则，与 scene_dump 同思路）：
+#   A 总结体模板 >=2 处（所有人都…/没人知道…/只有我…/到头来…/这场…）
+#   B 性格自述开场（我不会…/我从不…/我这人…）
+#   C 评价句占比 >= 50%（整段在下结论、讲道理，没有一件事在发生）
+# 三种都要求"引言一句对话都没有"——对话是场景存在的最低证据。
+# 阈值取自实测：采集参考 35 篇误报 0 篇；全库命中率约 2%（历史批次多为 4-11%，
+# 2026-09 批次 21%）。
+# ============================================================
+_SUMMARY_TPL = [
+    "所有人都", "所有人都在", "没人知道", "没人看", "没人问", "只有我",
+    "到头来", "这场", "更讽刺的是", "全世界都", "在所有人眼里",
+    "这一世", "前世", "重活", "这座", "从来不是", "活不过",
+]
+_SUMMARY_EVAL = [
+    "从来", "终究", "到头来", "其实", "原来", "注定", "遗憾", "心疼",
+    "卑微", "偏爱", "深情", "冷漠", "绝望", "讽刺", "世人", "体面",
+    "尊严", "执念", "薄情", "绝情", "懂事", "满场", "人人", "全城",
+    "全网", "全世界", "所有人", "没人", "只有我", "以为", "清楚",
+    "明白", "想通", "认定", "自以为", "一生", "半生", "余生",
+]
+_SUMMARY_SELF = [
+    "我不会", "我从不", "我是一个", "我这人", "我这个人", "我讨厌", "我最",
+]
+
+
+def _summary_intro(text):
+    """取引言（第一个章节标题之前的部分）；找不到标题时退回首 24 段。"""
+    lines = [ln for ln in (text or "").split(chr(10))]
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith("#") or (s.isdigit() and len(s) <= 2) \
+                or (s.startswith("第") and s.endswith(("章", "节", "回"))):
+            return chr(10).join(lines[:i])
+    return chr(10).join(lines[:24])
+
+
+def check_summary_opening(text):
+    """检查"总结体开头"：引言是故事简介/情绪自述，而不是一个正在发生的场景。
+
+    返回 dict：
+        flagged:        是否命中
+        reason:         人类可读提示（details / 重试反馈用）
+        quote_paras:    引言里带对话引号的段落数
+        template_hits:  总结体模板命中数
+        eval_ratio:     评价句占比
+        head_example:   引言前三句（日志核对用）
+    """
+    import re
+    if not text or not text.strip():
+        return {"flagged": False, "reason": "", "quote_paras": 0,
+                "template_hits": 0, "eval_ratio": 0.0, "head_example": ""}
+
+    intro = _summary_intro(text)
+    paras = [p.strip() for p in intro.split(chr(10)) if p.strip()]
+    flat = re.sub("[ " + chr(10) + chr(9) + chr(12288) + "]+", "", intro)
+    if len(flat) < 40:            # 太短谈不上"简介体"，不判
+        return {"flagged": False, "reason": "", "quote_paras": 0,
+                "template_hits": 0, "eval_ratio": 0.0, "head_example": flat[:60]}
+
+    quote_paras = sum(1 for p in paras
+                      if ("「" in p or "“" in p or '"' in p))
+    template_hits = sum(sum(1 for w in _SUMMARY_TPL if w in p) for p in paras)
+
+    sents = [s for s in re.split("[。！？!?…；;]+", flat) if s.strip()]
+    eval_n = sum(1 for s in sents if any(w in s for w in _SUMMARY_EVAL))
+    eval_ratio = eval_n / max(1, len(sents))
+    head2 = "".join(sents[:2])
+    self_trait = any(w in head2 for w in _SUMMARY_SELF)
+
+    reasons = []
+    if quote_paras == 0:
+        if template_hits >= 2:
+            reasons.append("总结体开场（所有人都…/没人知道… 类评价句 %d 处，"
+                           "引言无一句对话）" % template_hits)
+        if self_trait:
+            reasons.append("性格自述开场（引言无场景、无对话，只在介绍自己是什么人）")
+        if eval_ratio >= 0.5 and not reasons:
+            reasons.append("引言 %.0f%% 的句子在下结论/讲道理（无场景、无对话）"
+                           % (eval_ratio * 100))
+    return {
+        "flagged": bool(reasons),
+        "reason": "；".join(reasons),
+        "quote_paras": quote_paras,
+        "template_hits": template_hits,
+        "eval_ratio": round(eval_ratio, 2),
+        "head_example": " / ".join(sents[:3])[:60],
+    }
+
+
+# ============================================================
 # 注册表：id -> 检测函数。返回约定：quant_* / scene_dump 为
 # dict(flagged/reason…)；ai_flavor 为 (metrics, score)/None。
 # ============================================================
@@ -318,6 +423,7 @@ DETECTORS = {
     "quant_density": check_quant_density,
     "ai_flavor": check_ai_flavor,
     "scene_dump": check_scene_dump,
+    "summary_opening": check_summary_opening,
 }
 
 # 提示词小节 <-> 检测器 对应表（生成侧约束与本地质检同源）
@@ -326,6 +432,7 @@ PROMPT_RULE_MAP = {
     "量化克制守则": ["quant_density"],
     "人物命名与出场守则": [],  # naming_burst 待中文分词方案落地
     "环境与场景描写守则": ["scene_dump"],
+    "开篇事件化守则": ["summary_opening"],
 }
 
 
@@ -361,4 +468,82 @@ def classify_genre(text):
         if pattern.search(text):
             return name
     return "其他"
+
+
+# ============================================================
+# 题型分类（问题形态，区别于上面的「题材」）
+#
+# 2026-09-23 效果复盘：真正拉开差距的不是题材也不是文笔，而是**问题形态**——
+# 46 篇有反馈稿件的阅读/天中位：命题作文/微小说 2.0、求推荐 13.4、观点/讨论 28.5。
+# 「以…为开头写一篇微小说」这类题的读者池天生就小，写进去等于把一天的配额
+# 丢进没人走的巷子。这里只做分类，乘数由 config.story.TOPIC_TYPE_* 决定。
+# ============================================================
+
+TOPIC_TYPE_RULES = [
+    ("命题作文", re.compile(
+        r"为开头|以「|以“|写一个|写一篇|写一段|微小说|十个字|七个字|"
+        r"一句话|100字|一百字|用\d+字|编一个|续写")),
+    ("观点讨论", re.compile(
+        r"为什么|为何|如何|怎么|什么叫做|什么是|评价|看法|体验|"
+        r"是不是|算不算|真的|该不该")),
+    ("求推荐", re.compile(r"推荐|有哪些|有没有|哪些|好看|求|安利|书单")),
+]
+
+
+def classify_topic_type(title):
+    """问题形态分类：命题作文 / 观点讨论 / 求推荐 / 其他。
+
+    只吃标题（推荐页卡片给的就是标题），命中顺序即优先级。
+    """
+    text = (title or "").strip()[:120]
+    for name, pattern in TOPIC_TYPE_RULES:
+        if pattern.search(text):
+            return name
+    return "其他"
+
+
+def order_prefer_large_audience(items, title_key="title"):
+    """把「受众面更大」的题型排到前面（稳定排序，其余顺序不动）。
+
+    为什么要单独一个排序函数（2026-09-24 日志实证）：题型折扣只作用在候选卡片
+    打分上，而最终选题还要过一道「大模型筛选」——那天它就把一篇命题作文
+    （「怎样以「一觉醒来我变成了一只猫」为题写一篇小说」）挑成了最佳，
+    折扣等于白打。这里在**保留候选**里把非命题作文提到前面：
+    全都是/全都不是命题作文时，顺序原样不变（大模型的判断仍然算数）。
+    """
+    try:
+        items = list(items or [])
+        if len(items) < 2:
+            return items
+        big = [it for it in items
+               if classify_topic_type((it or {}).get(title_key)) != "命题作文"]
+        small = [it for it in items
+                 if classify_topic_type((it or {}).get(title_key)) == "命题作文"]
+        return big + small if big and small else items
+    except Exception:             # noqa: BLE001 排序永远不该阻断选题
+        return list(items or [])
+
+
+def topic_type_multiplier(title, penalty=None):
+    """题型先验乘数（P1，2026-09-23 复盘）：命题作文类打折，其余 1.0。
+
+    与 feedback_loop.topic_genre_multiplier（按**读者数据**学出来的题材先验）
+    互补：这条是**静态规则**，不依赖反馈数据，冷启动期也生效。
+    任何异常/开关关闭一律返回 1.0（绝不改变原有打分）。
+    """
+    try:
+        from config.story import (TOPIC_TYPE_PRIOR_ENABLE,
+                                  TOPIC_TYPE_PENALTY)
+    except Exception:
+        return 1.0
+    if not TOPIC_TYPE_PRIOR_ENABLE:
+        return 1.0
+    if classify_topic_type(title) != "命题作文":
+        return 1.0
+    p = TOPIC_TYPE_PENALTY if penalty is None else penalty
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return 1.0
+    return p if 0 < p <= 1 else 1.0
 

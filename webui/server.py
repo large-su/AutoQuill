@@ -188,6 +188,15 @@ def run(host=HOST, port=PORT):
     # 取消钩子：browser_adapter 检查点据此中断 workflow（CLI 下为 None）
     from applications.zhihu_story import browser_adapter
     browser_adapter.set_cancel_hook(lambda: runner._stop_flag.is_set())
+    # 重启 ≠ 停工：计划仍是「开启」时把自动化调度线程补回来（线程是
+    # 进程内的，重启后不恢复的话界面显示「运行中」却什么都不执行）。
+    # 放这里而不是 FastAPI startup 事件：测试用 TestClient 直接拿 app，
+    # 不该被拉起后台调度线程。
+    try:
+        from automation.scheduler import get_scheduler
+        get_scheduler().ensure_running()
+    except Exception:          # noqa: BLE001 自动化起不来不能拖垮控制台
+        log.exception("自动化调度恢复失败（不影响控制台启动）")
     print(f"\n  [AutoQuill] Web console: http://{host}:{port}")
     print(f"  Stop: Ctrl+C (interrupts running workflow first)\n")
     uvicorn.run(app, host=host, port=port, log_level="warning")

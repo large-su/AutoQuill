@@ -48,6 +48,22 @@ class TestCleanStoryOutput(unittest.TestCase):
         self.assertNotIn("我将贴合", out)
         self.assertTrue(out.startswith("我被合租的学弟"))
 
+    def test_removes_meta_plan_reporting_our_prompt(self):
+        # ★ 2026-09-20 真机：模型复述我们的 prompt 要求当开场，旧判据（只认
+        # 「我将/我会」）没认出来，这句被当成引言发布了出去（已发布台账里那篇）
+        plan = ("我严格遵循所有格式、剧情、文风要求，采用反差断语开篇打造合规引言，"
+                "搭建 6 + 章节、先压后弹、多层反转、逐节留钩、全程女主无爱的虐文，"
+                "满 4000 字，贴合知乎爆款短篇语感。")
+        text = plan + "\n从来都是他缠着我不放，我自始至终，半分真心都没给过。"
+        out = clean_story_output(text)
+        self.assertNotIn("我严格遵循", out)
+        self.assertTrue(out.startswith("从来都是他缠着我不放"))
+
+    def test_keeps_normal_line_with_action_and_format_words(self):
+        # 「我」+ 动作 + 只沾 1-2 个写作词 → 正常句子，不能误删
+        text = "我按照他说的把作业格式改了一遍。\n她把本子推回来。"
+        self.assertTrue(clean_story_output(text).startswith("我按照他说的"))
+
     def test_keeps_story_first_line_starting_with_plan_verb(self):
         # 正常故事首句也可能以「我将」开头 → 不能误删（元词不足 2 个）
         text = "我将永远记得那个下午。\n她站在门口，没说话。"
@@ -209,6 +225,18 @@ class TestValidateStoryFormat(unittest.TestCase):
         body = "我死了。\n\n## **1**\n\n" + "这是正文。" * 600
         score, valid, details = validate_story_format(body)
         self.assertNotIn("引言", details)
+
+    def test_meta_plan_first_line_vetoes(self):
+        # 首行是写作计划/自我汇报 = 不是故事正文：与"引言缺失"同级，一票否决
+        para = "这是正文内容。" * 7
+        chapters = [f"## **{i}**\n\n" + (para + "\n\n") * 14 + para
+                    for i in range(1, 9)]
+        plan = ("我严格遵循所有格式、剧情、文风要求，采用反差断语开篇打造合规引言，"
+                "搭建 6 + 章节，满 4000 字。")
+        body = plan + "\n\n" + "\n\n".join(chapters)
+        score, valid, details = validate_story_format(body)
+        self.assertFalse(valid, details)
+        self.assertIn("废话", details)
 
     def test_missing_chapters_penalized(self):
         body = "## **1**\n\n" + "这是正文。" * 500 + "\n\n## **2**\n\n" + "这是正文。" * 500

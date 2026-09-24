@@ -24,17 +24,23 @@ from automation.model import normalize_plan
 from applications.zhihu_story.browser_write import WriteActionsMixin
 
 ANSWER_URL = "https://www.zhihu.com/question/100/answer/999"
+SIGNIN_URL = "https://www.zhihu.com/signin?next=%2Fcreator%2Fmanage%2Fcreation%2Fdraft"
 
 
 class _FakePage:
-    """只记录导航：publish_draft 的跳转顺序靠它断言。"""
+    """只记录导航：publish_draft 的跳转顺序靠它断言。
 
-    def __init__(self):
+    redirect 用来模拟「登录态失效」：知乎把草稿箱页 302 到 /signin，
+    页面 URL 停在登录页（此时卡片必然解析为 0 张）。
+    """
+
+    def __init__(self, redirect=""):
         self.url = ""
         self.gotos = []
+        self.redirect = redirect
 
     def goto(self, url, **kw):
-        self.url = url
+        self.url = self.redirect or url
         self.gotos.append(url)
 
 
@@ -45,8 +51,8 @@ class _FakeWriteBrowser(WriteActionsMixin):
     而不是测试里另写一遍逻辑。
     """
 
-    def __init__(self, cards, has_button=True):
-        self.page = _FakePage()
+    def __init__(self, cards, has_button=True, redirect=""):
+        self.page = _FakePage(redirect)
         self.cards = cards
         self.has_button = has_button
         self.clicked = 0
@@ -149,6 +155,21 @@ class DraftPublishTest(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("777", r["detail"])
 
+    def test_signin_redirect_reports_need_login_not_empty(self):
+        """登录态失效必须报「需要登录」，不能报「草稿箱空」。
+
+        草稿箱页被 302 到 /signin 时卡片必然 0 张：若照此报成「草稿箱里没有
+        可发布的草稿」，调度器会记「跳过」（不失败、不熔断、不通知），无人
+        值守时静默空转，用户永远等不到「该重新登录了」这句话（2026-09-23 修）。
+        """
+        b = _FakeWriteBrowser([], redirect=SIGNIN_URL)
+        r = b.publish_draft()
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "need_login")
+        self.assertIn("登录", r["detail"])
+        self.assertEqual(b.clicked, 0)            # 绝不点发布
+        self.assertNotEqual(r.get("reason"), "empty")
+
 
 class _ExecFakeBrowser:
     """执行器假浏览器：记录 qid/headless/close，返回预置结果。"""
@@ -191,8 +212,6 @@ class PublishDraftExecutorTest(unittest.TestCase):
         self._patches = [
             mock.patch("applications.zhihu_story.browser_adapter.ZhihuBrowser",
                        _ExecFakeBrowser),
-            mock.patch("applications.zhihu_story.browser_adapter"
-                       ".page_needs_login", lambda page: False),
             mock.patch("webui.browser_tasks.browser_busy", lambda: []),
         ]
         for p in self._patches:
@@ -259,15 +278,32 @@ class PublishDraftExecutorTest(unittest.TestCase):
         self.assertEqual(r["units"], 0)
         self.assertEqual(r["status"], planner.STATUS_SKIPPED)
 
-    def test_login_expired_needs_human_and_skips_publish(self):
-        self._patches[1].stop()
-        with mock.patch("applications.zhihu_story.browser_adapter"
-                        ".page_needs_login", lambda page: True):
-            with self.assertRaises(NeedHuman):
-                execute({"type": "publish_drafts", "params": {}})
+    def test_need_login_result_maps_to_need_human(self):
+        """发布链路报「登录失效」→ NeedHuman（暂停全部自动化 + 通知人工）。
+
+        2026-09-23 修：识别点在 publish_draft（草稿箱页真被 302 到 /signin 才
+        判，浏览器层测试守着「绝不点发布」），执行器只按 reason 归一。此前那处
+        page_needs_login(b.page) 预检写在 b.start() 之后、任何导航之前（page
+        还是 about:blank），恒为假 → 登录失效时会一路走到「草稿箱空 = 跳过」。
+        """
+        _ExecFakeBrowser.result = {
+            "ok": False, "reason": "need_login", "qid": "", "title": "",
+            "url": SIGNIN_URL,
+            "detail": "知乎登录态已失效（草稿箱页被重定向到登录页）"}
+        with self.assertRaises(NeedHuman):
+            execute({"type": "publish_drafts", "params": {}})
         self.assertTrue(_ExecFakeBrowser.last.started)   # 必须先开页面才能判断
-        self.assertFalse(_ExecFakeBrowser.last.published)  # 但绝不点发布
-        self.assertTrue(_ExecFakeBrowser.last.closed)
+        self.assertTrue(_ExecFakeBrowser.last.closed)    # 异常路径也要关浏览器
+
+    def test_publish_job_takes_the_shared_browser_lock(self):
+        """独占 profile：发布作业必须与共享浏览器/登录引导串行。
+
+        Chromium 单例锁禁止同 user-data-dir 并发——不持锁时撞上一次网页版
+        登录检查就是一次莫名的启动失败（Target page ... has been closed）。
+        """
+        import inspect
+        from automation import executor as _exec
+        self.assertIn("_browser_lock", inspect.getsource(_exec._publish_drafts))
 
     def test_adapter_login_exception_maps_to_need_human(self):
         from applications.zhihu_story.browser_adapter import ZhihuLoginRequired

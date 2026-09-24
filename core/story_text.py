@@ -31,6 +31,7 @@ PARA_LENGTH_THRESHOLD = 80
 from core.detectors import (  # noqa: F401
     check_quant_density,
     check_scene_dump,
+    check_summary_opening,
     QUANT_DENSITY_ARAB,
     QUANT_DENSITY_CN,
     QUANT_STACK_RATIO,
@@ -47,18 +48,43 @@ from core.detectors import (  # noqa: F401
 # 会被当成引言，污染发布内容。
 # 判据从严，避免误删正常故事首句（如「我将永远记得那天。」）：
 #   以计划动词开头 + 同一行出现 >=2 个「写作元词」。
-_META_PLAN_VERBS = ("我将", "我会", "接下来我将", "下面我将", "我现在将")
+# 计划开头词：出现即视为"在交代写作思路"
+_META_PLAN_HEADS = ("我将", "我会", "我现在将", "接下来我将", "下面我将",
+                    "接下来我会", "接下来我", "我严格", "我按照", "我遵循")
+# 「我」+ 计划动作 起手（收得更紧：另见函数里的元词阈值）
+_META_PLAN_ACTIONS = ("严格遵循", "遵循", "按照", "贴合", "紧扣", "采用", "满足",
+                      "确保", "遵守", "打造", "创作", "撰写", "完成", "搭建",
+                      "构建")
 _META_WORDS = ("风格", "文风", "口吻", "要求", "规范", "格式", "章节", "字数",
                "篇幅", "题目", "设定", "剧情", "架构", "创作", "写作", "输出",
                "人称", "钩子", "反转", "节奏")
 
 
 def _is_meta_plan_line(line):
-    """该行是否是「写作计划」式元说明（不是故事正文）。"""
+    """该行是否是「写作计划/自我汇报」式元说明（不是故事正文）。
+
+    2026-09-20 真机补充：模型开始**复述我们的 prompt 要求**当开场——
+    「我严格遵循所有格式、剧情、文风要求，采用反差断语开篇打造合规引言，
+    搭建 6 + 章节…满 4000 字，贴合知乎爆款短篇语感。」——旧判据只认
+    「我将/我会」起手，这句就这么留在文首、被当成引言发布了出去。
+
+    判据（从严，避免误删正常故事首句）：
+      · 写作元词 >= 2 个；且
+      · 以计划开头词起手；或个人认为「我」+ 计划动作起手（此时要求元词 >= 3，
+        免得"我按照他说的把格式改了一遍"这类正常句子被误删）。
+    """
     s = (line or "").strip()
-    if not s or not s.startswith(_META_PLAN_VERBS):
+    if not s:
         return False
-    return sum(1 for w in _META_WORDS if w in s) >= 2
+    meta_hits = sum(1 for w in _META_WORDS if w in s)
+    if meta_hits < 2:
+        return False
+    if s.startswith(_META_PLAN_HEADS):
+        return True
+    head = s[:16]
+    if head.startswith("我") and any(a in head for a in _META_PLAN_ACTIONS):
+        return meta_hits >= 3
+    return False
 
 
 def clean_story_output(text):
@@ -446,7 +472,10 @@ def validate_story_format(text):
        >5% 减 2 分，>10% 减 3 分，>20% 减 5 分
     3. 对话引号：中文引号 "" "" 出现 >= 5 次减 5 分
     4. 字数：<4000 减 2 分；<2000 额外减 3 分
-    5. AI 废话前缀：出现减 2 分
+    5. AI 废话前缀：出现减 2 分；首行是写作计划/自我汇报 → 减 2 分且一票否决
+    6. 量化密度：命中减 1-2 分（软性）
+    7. 环境空镜：空镜开场减 2 / 纯景段减 1（软性）
+    8. 开篇总结体：引言是故事简介/情绪自述（无场景无对话）减 2 分，并一票否决
     """
     if not text or not text.strip():
         return 0, False, {"章节": -10, "字数": 0, "原因": "空文本"}
@@ -517,12 +546,18 @@ def validate_story_format(text):
         score -= 3
         details["字数"] = f"{char_count}字(-2-3)"
 
-    # --- 5. AI 废话前缀 ---
+    # --- 5. AI 废话前缀 / 首行是写作计划（自我汇报）---
+    # 2026-09-20 真机事故：模型把「我严格遵循…格式、文风要求，采用反差断语
+    # 开篇打造合规引言，搭建 6 + 章节…」当成第一行，清洗没认出来 → 直接
+    # 当引言发布。这类首行不是故事正文，与「引言缺失」同级：扣分 + 一票否决。
     first_100 = text[:100]
     ai_prefixes = ['好的', '收到', '明白', '以下是', '根据您', '当然可以', '没问题']
-    if any(p in first_100 for p in ai_prefixes):
+    first_line = next((ln for ln in text.split(chr(10)) if ln.strip()), "")
+    plan_intro = _is_meta_plan_line(first_line)
+    if plan_intro or any(p in first_100 for p in ai_prefixes):
         score -= 2
-        details["废话"] = "-2"
+        details["废话"] = ("首行是写作计划/自我汇报，不是故事正文(-2)"
+                          if plan_intro else "-2")
 
     # --- 6. 量化密度（防数字堆砌 AI 味）：软性减分 + 反馈提示 ---
     qd = check_quant_density(text)
@@ -544,9 +579,22 @@ def validate_story_format(text):
             score -= 1
             details["环境空镜"] = f"{sd.get('reason', '')}(-1)"
 
+    # --- 8. 开篇总结体（简介式引言）：减分 + 否决 + 重试反馈 ---
+    # 用户口径（2026-09-19）："前五六句既没有情节推进，也没有冲突，全是情绪和环境，
+    # 每个字都认识却抓不住重点"。引言是"微型场景"还是"故事简介"是硬形态，可判定。
+    # ★ 本项与"引言缺失"同为一票否决：开篇写成故事简介 = 读者第一屏读不下去，
+    #   属于"宁可不发也不发废稿"的问题（用户 2026-09-19 口径）。
+    so = check_summary_opening(text)
+    opening_bad = bool(so.get("flagged"))
+    if opening_bad:
+        score -= 2
+        details["开篇"] = f"{so.get('reason', '')}(-2)"
+
     score = max(score, 0)
-    # 引言缺失一票否决：其余项满分也不能放行（上来就是章节标题 = 不合格）
-    is_valid = score >= 6 and intro_ok
+    # 一票否决三项：① 引言缺失（上来就是章节标题）；② 开篇是总结体（引言写成
+    # 了故事简介/情绪自述）；③ 首行是写作计划（模型把"我严格遵循…要求"
+    # 当正文）。其余项满分也不能放行。
+    is_valid = score >= 6 and intro_ok and not opening_bad and not plan_intro
 
     log.info(f"  格式检测：{score}/10 {'✓合规' if is_valid else '✗不合规'}"
              f"{' (' + ', '.join(f'{k}:{v}' for k, v in details.items()) + ')' if details else ''}")

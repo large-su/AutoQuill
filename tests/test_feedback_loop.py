@@ -80,6 +80,35 @@ class FeedbackLoopTest(unittest.TestCase):
         self.assertEqual(rec["title"], "标题")
         self.assertEqual(rec["version"], ver.VERSION)
 
+    def test_record_carries_story_and_topic_signals(self):
+        """复盘用的字段要真的落账（2026-09-23 补的可观测性）。
+
+        复盘要能区分「内容不行」还是「题目本来没人看」：题目侧信号只在选题
+        那一刻拿得到，所以必须随台账落盘。
+        """
+        meta = {"story_file": "output/story_x.md"}
+        meta.update(tl.story_meta("第一段。" * 30 + chr(10) + "## **1**" + chr(10) + "正文" * 50,
+                                  "classic"))
+        meta.update({"q_score": 1234.5, "q_followers": 800, "q_answers": 42,
+                     "q_hot": True})
+        tl.record("https://www.zhihu.com/question/3", "有没有好看的虐文？", meta)
+        rec = json.loads(self.ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(rec["mode"], "classic")
+        # 台账字段统一按字符串落盘（沿用既有契约），消费方自行转数
+        self.assertEqual(rec["chapters"], "1")
+        self.assertGreater(int(rec["chars"]), 100)
+        self.assertEqual(rec["q_score"], "1234.5")
+        self.assertEqual(rec["q_followers"], "800")
+        self.assertEqual(rec["q_hot"], "True")
+
+    def test_story_meta_counts_both_chapter_styles(self):
+        """章节数两种写法都认：现在的 `## **N**` 与早期的裸数字行。"""
+        modern = "引言" + chr(10) + "## **1**" + chr(10) + "正文" + chr(10) + "## **2**" + chr(10) + "正文"
+        legacy = "引言" + chr(10) + "1" + chr(10) + "正文" + chr(10) + "2" + chr(10) + "正文"
+        self.assertEqual(tl.story_meta(modern)["chapters"], 2)
+        self.assertEqual(tl.story_meta(legacy)["chapters"], 2)
+        self.assertEqual(tl.story_meta("")["chapters"], 0)
+
     def test_record_without_url_is_noop(self):
         self.assertIsNone(tl.record(""))
 
@@ -198,14 +227,23 @@ class FeedbackLoopTest(unittest.TestCase):
     # ---------------- 题材分类 ----------------
 
     def test_dom_score_unchanged_without_prior_data(self):
-        # 无任何表现观测时，题目带题材也返回原始分（乘数恒 1.0）
+        # 无任何表现观测时，**题材先验**恒 1.0（不动原打分）。
+        # 注意：2026-09-23 起「求推荐」类另有静态降权（P3，×0.6），
+        # 所以这里用中性标题验证「题材先验不干预」。
         from workflows.zhihu import ZhihuWorkflow
         q = {"likes": 100, "comments": 4,
              "title": "量子计算相关的书籍推荐？"}
         self.assertEqual(ZhihuWorkflow._dom_score(q), 500)
         q2 = {"likes": 100, "comments": 4, "is_hot": True,
-              "title": "有没有甜甜的小说推荐？"}
+              "title": "有没有甜甜的恋爱故事？"}
         self.assertEqual(ZhihuWorkflow._dom_score(q2), 1000)
+
+    def test_dom_score_downweights_recommend_topics(self):
+        """求推荐类降权 ×0.6（P3）：仍可被选中，只是排在其它题后面。"""
+        from workflows.zhihu import ZhihuWorkflow
+        q = {"likes": 100, "comments": 4, "is_hot": True,
+             "title": "有没有甜甜的小说推荐？"}
+        self.assertEqual(ZhihuWorkflow._dom_score(q), 600)
 
     def test_classify_genre_basic(self):
         self.assertEqual(classify_genre("有没有好看的病娇双男主文？"),

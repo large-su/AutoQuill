@@ -69,13 +69,27 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual([j.get("planned_at") for j in a["schedule"]],
                          [j.get("planned_at") for j in b["schedule"]])
 
-    def test_unimplemented_types_are_never_scheduled(self):
-        plan = _plan(checkin={"enabled": True, "daily_cap": 5},
-                     thank={"enabled": True, "daily_cap": 9},
-                     reply_comment={"enabled": True, "daily_cap": 9})
+    def test_only_two_task_types_exist(self):
+        """任务类型只有「写故事 + 发布草稿」（用户 2026-09-24 口径）。
+
+        打卡挑战（网页端不好操作）与互动类（感谢/回复评论，看着太乱）都不做；
+        契约层不再登记任何「预留类型」，清单里有的就是能跑的。
+        """
+        self.assertEqual(sorted(TASK_TYPES), ["full_chain", "publish_drafts"])
+
+    def test_removed_types_in_old_plan_are_ignored(self):
+        """老 plan.json 里残留的打卡/互动配置必须被安静丢弃（用户无需手工改文件）。"""
+        legacy = {"enabled": True,
+                  "tasks": {"checkin": {"enabled": True, "daily_cap": 5},
+                            "thank": {"enabled": True, "daily_cap": 9},
+                            "reply_comment": {"enabled": True},
+                            "full_chain": {"enabled": True, "daily_cap": 2}}}
+        plan = normalize_plan(legacy)
+        self.assertEqual(sorted(plan["tasks"]), ["full_chain", "publish_drafts"])
+        self.assertEqual(plan["tasks"]["full_chain"]["daily_cap"], 2)
         day = planner.materialize_day(self.now, plan, {}, {})
         self.assertFalse([j for j in day["schedule"]
-                          if j["type"] in ("checkin", "thank", "reply_comment")])
+                          if j["type"] not in ("full_chain", "publish_drafts")])
 
     def test_resume_uses_done_counts_from_ledger(self):
         plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
@@ -116,20 +130,34 @@ class PlannerTest(unittest.TestCase):
         self.assertIn("排不下", skipped[0]["note"])
 
     def test_schedule_spreads_across_whole_window(self):
-        """(a) 动作要「在时段内相对随机地分布」——不能挤在一天前段。"""
-        plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
-        day = planner.materialize_day(self.now, plan, {}, {})
-        times = sorted(datetime.fromisoformat(j["planned_at"])
-                       for j in day["schedule"]
-                       if j["status"] == planner.STATUS_PLANNED)
+        """(a) 动作要「在时段内铺开」——每个动作落在自己那一段，不挤在一天前段。
+
+        契约（2026-09-19 口径）：把时段等分 N 份、每份放一个动作，份内允许抖动。
+        **不能断言「首尾跨度 ≥60% 时段」**——那不是算法保证的：实测不同随机种子下
+        3 篇的跨度在 445~730 分钟之间浮动。旧断言只是碰巧命中一个好种子，
+        2026-09-24 精简任务类型改变了排班种子后就翻了（改断言而不是改算法，
+        因为「每份一个」才是要守住的性质）。
+        """
+        cap = 3
         span = 23 * 60 + 30 - 8 * 60                  # 08:00–23:30 = 930 分钟
-        used = (times[-1] - times[0]).total_seconds() / 60
-        self.assertGreaterEqual(used, span * 0.6,          # 铺开：占满 60% 以上时段
-                                [t.strftime("%H:%M") for t in times])
-        self.assertLessEqual(times[-1], datetime(2026, 9, 20, 23, 30))
-        # 不能是「发一个等一小时」的随机游走：那会让最后一个点早早出现
-        self.assertGreaterEqual(times[-1].hour, 18,
-                                [t.strftime("%H:%M") for t in times])
+        seg = span / float(cap)
+        for off in range(6):                          # 多跑几个种子，防「碰巧通过」
+            now = self.now + timedelta(days=off)
+            plan = _plan(full_chain={"enabled": True, "daily_cap": cap})
+            day = planner.materialize_day(now, plan, {}, {})
+            times = sorted(datetime.fromisoformat(j["planned_at"])
+                           for j in day["schedule"]
+                           if j["status"] == planner.STATUS_PLANNED)
+            shown = [t.strftime("%H:%M") for t in times]
+            self.assertEqual(len(times), cap, shown)
+            base = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            for i, t in enumerate(times):
+                offset = (t - base).total_seconds() / 60
+                self.assertGreaterEqual(offset, i * seg - 1, shown)
+                self.assertLessEqual(offset, (i + 1) * seg + 1, shown)
+            self.assertLessEqual(times[-1], now.replace(hour=23, minute=30))
+            # 不能是「发一个等一小时」的随机游走：那会让最后一个点早早出现
+            self.assertGreaterEqual(times[-1].hour, 18, shown)
 
     def test_gap_is_a_floor_not_a_step(self):
         """(b) 间隔是「下限」而不是「每次加一个随机间隔」：任何两个动作都 ≥ 间隔。"""
@@ -466,6 +494,60 @@ class SchedulerTest(unittest.TestCase):
         self.assertIn("顺延", job["note"])
         self.assertEqual(self.calls, [])       # 顺延后不立刻执行（留出缓冲）
 
+    def test_manual_run_works_while_automation_is_stopped(self):
+        """停止状态下的「立即执行」也要真跑（线上只回一句通知，作业永远挂着）。
+
+        2026-09-19 实录：未开启时点「立即执行（演练）」，接口回「已安排立即
+        执行」，但 _tick 在函数开头就因 enabled=false 返回，作业一直停在
+        「待执行」——用户以为在跑，其实什么也没发生（连点 4 次）。
+        """
+        times = self._planned_times()
+        self.now = times[0]
+        plan = store.load_plan()
+        plan["enabled"] = False          # 用户点了「停止」，排班还在、作业未跑
+        store.save_plan(plan)
+        self.sched._tick()
+        self.assertEqual(self.calls, [])          # 停止 = 自动派活不再执行
+        r = self.sched.run_now("full_chain")
+        self.assertTrue(r["ok"])
+        self.assertTrue(self.sched._thread and self.sched._thread.is_alive(),
+                        "未开启时也要有 tick 线程把这一次跑掉")
+        self.assertFalse(store.load_plan()["enabled"],
+                         "立即执行不能顺手把自动排班打开")
+        self._advance(1)
+        self.sched._tick()
+        self.assertEqual(len(self.calls), 1)      # 手动：照做
+        self.assertEqual(self.calls[0]["type"], "full_chain")
+        self.sched.stop()                         # 收尾：别把 tick 线程留给下个用例
+
+    def test_stopped_scheduler_still_ignores_automatic_jobs(self):
+        """停止后即使有到点的自动作业也不执行（手动是唯一例外）。"""
+        times = self._planned_times()
+        self.now = times[0] + timedelta(minutes=1)
+        plan = store.load_plan()
+        plan["enabled"] = False
+        store.save_plan(plan)
+        for _ in range(3):
+            self.sched._tick()
+        self.assertEqual(self.calls, [])
+
+    def test_ensure_running_resumes_only_when_plan_enabled(self):
+        """重启 ≠ 停工：计划是「开启」就把 tick 线程补回来。
+
+        plan.json 的 enabled 只代表「用户上次点过开始」，而 tick 线程是进程内
+        的——重启后不恢复的话，界面显示「运行中」却什么都不执行。
+        """
+        plan = store.load_plan()
+        plan["enabled"] = False
+        store.save_plan(plan)
+        self.assertFalse(self.sched.ensure_running())
+        self.assertFalse(self.sched._thread and self.sched._thread.is_alive())
+        plan["enabled"] = True
+        store.save_plan(plan)
+        self.assertTrue(self.sched.ensure_running())
+        self.assertTrue(self.sched._thread and self.sched._thread.is_alive())
+        self.sched.stop()
+
     def test_resume_continues_from_ledger(self):
         # 今天已写完 2 篇（配额 2）→ 再次开始时不应再排活（用户要求「先看已做多少」）
         store.append_ledger({"day": "2026-09-20", "type": "full_chain",
@@ -502,14 +584,12 @@ class AutomationApiTest(unittest.TestCase):
             self.assertIn(key, d)
         self.assertIn("per_type", d["summary"])
 
-    def test_types_catalog_includes_reserved(self):
+    def test_types_catalog_lists_only_real_tasks(self):
+        """目录里只有两个能跑的任务（UI 泳道/配置表据此渲染，不留空泳道）。"""
         d = self.client.get("/api/automation/types").json()
-        ids = [t["id"] for t in d["types"]]
-        self.assertIn("full_chain", ids)
-        self.assertIn("publish_drafts", ids)
-        todo = {t["id"]: t["implemented"] for t in d["types"]}
-        self.assertTrue(todo["full_chain"])
-        self.assertFalse(todo["checkin"])          # 预留接口，未实现
+        ids = sorted(t["id"] for t in d["types"])
+        self.assertEqual(ids, ["full_chain", "publish_drafts"])
+        self.assertTrue(all(t["implemented"] for t in d["types"]))
 
     def test_plan_saved_and_normalized(self):
         r = self.client.post("/api/automation/plan", json={"plan": {
@@ -520,7 +600,7 @@ class AutomationApiTest(unittest.TestCase):
         plan = r.json()["plan"]
         self.assertEqual(plan["window"]["start"], "09:00")
         self.assertEqual(plan["tasks"]["full_chain"]["daily_cap"], 5)
-        self.assertFalse(plan["tasks"]["checkin"]["enabled"])
+        self.assertEqual(sorted(plan["tasks"]), ["full_chain", "publish_drafts"])
 
     def test_start_stop_toggles_enabled(self):
         # 全部任务关闭 → start 后调度线程起来也不会执行任何作业

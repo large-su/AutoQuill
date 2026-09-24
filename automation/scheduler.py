@@ -77,6 +77,36 @@ class AutomationScheduler:
 
     # ---------------- 生命周期 ----------------
 
+    def _ensure_thread(self):
+        """确保 tick 线程在跑（幂等）；返回本次是否新起了一个。
+
+        为什么单独抽出来：除了「开始」，还有两条路径需要 tick——
+        重启后按计划恢复（ensure_running）、以及未开启时用户手动点
+        「立即执行」（run_now）要真把这一次跑掉。
+        """
+        if self._thread and self._thread.is_alive():
+            return False
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="automation-scheduler")
+        self._thread.start()
+        return True
+
+    def ensure_running(self):
+        """进程启动时按计划恢复调度（重启 ≠ 停工）；返回是否恢复了调度。
+
+        线上坑（2026-09-23 复盘）：plan.json 的 enabled=true 只代表「用户上次
+        点过开始」，而 tick 线程是进程内的——控制台重启后线程没了，界面照旧
+        显示「运行中」，实际什么都不会执行。无人值守时这种假象最致命，所以
+        启动时按落盘的计划把线程补回来（用户点过「停止」的不会复活：stop 会
+        把 enabled 置回 false）。
+        """
+        if not store.load_plan().get("enabled"):
+            return False
+        self._ensure_thread()
+        log.info("自动化：按已保存的计划恢复调度线程（enabled=true）")
+        return True
+
     def start(self):
         """用户点「开始」：置计划 enabled、按今日台账续做、拉起 tick 线程。"""
         plan = store.load_plan()
@@ -85,11 +115,7 @@ class AutomationScheduler:
         with self._lock:
             self._paused = False
             self._pause_reason = ""
-        self._stop_event.clear()
-        if not (self._thread and self._thread.is_alive()):
-            self._thread = threading.Thread(target=self._loop, daemon=True,
-                                            name="automation-scheduler")
-            self._thread.start()
+        self._ensure_thread()
         done = store.done_counts(self._now().strftime("%Y-%m-%d"))
         self._push_notice("info", "自动化已启动；今日已完成：%s"
                           % (", ".join("%s %d" % (k, v) for k, v in done.items())
@@ -137,10 +163,33 @@ class AutomationScheduler:
             self._sleep(self._tick_seconds)
         log.info("自动化调度器已退出")
 
+    def _tick_manual_only(self, now, plan):
+        """未开启时的 tick：只执行用户手动排进来的作业。
+
+        不做自动排班/补做/时段收尾——那些语义属于「已开启」。线上坑
+        （2026-09-19 实录）：未开启时点「立即执行（演练）」，接口只回一句
+        「已安排立即执行」，作业却一直挂在「待执行」（老 _tick 在函数开头
+        就 return 了），用户以为在跑，其实什么也没发生。
+        """
+        with self._lock:
+            if self._paused or self._running_job:
+                return
+        day = now.strftime("%Y-%m-%d")
+        day_data = store.load_day(day)
+        due = [j for j in planner.due_jobs(now, day_data) if j.get("manual")]
+        if not due:
+            return
+        if plan.get("pause_when_user_busy"):
+            from webui.browser_tasks import browser_busy
+            if browser_busy():
+                return                     # 手动任务优先，等它跑完再派活
+        self._run_job(due[0], day, day_data, plan)
+
     def _tick(self):
         now = self._now()
         plan = store.load_plan()
         if not plan.get("enabled"):
+            self._tick_manual_only(now, plan)
             return
         with self._lock:
             if self._paused or self._running_job:
@@ -395,10 +444,18 @@ class AutomationScheduler:
         else:
             target["note"] = (target.get("note") or "") + "（手动立即执行）"
         self._save_day_if_changed(day, day_data)
+        not_enabled = not plan.get("enabled")
+        if not_enabled:
+            # 未开启时也要真把这一次跑掉：tick 线程只在 start()/启动恢复时
+            # 存在，没有线程 = 作业永远停在「待执行」。这里只补线程，不启用
+            # 自动排班（enabled 仍为 false，_tick 只认手动作业）。
+            self._ensure_thread()
         outside = "" if planner.window_open(now, plan) else "（当前不在运行时段，手动执行照做）"
-        self._push_notice("info", "已安排立即执行：%s%s%s"
+        self._push_notice("info", "已安排立即执行：%s%s%s%s"
                           % (target["type"], "（演练）" if dry_run else "",
-                             outside))
+                             outside,
+                             "（自动化未开启：只做这一次，不启动自动排班）"
+                             if not_enabled else ""))
         return {"ok": True, "job": target, "outside_window": bool(outside)}
 
     # ---------------- 状态（给 UI） ----------------

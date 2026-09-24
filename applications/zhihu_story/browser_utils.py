@@ -70,6 +70,21 @@ _NAV_TIMEOUT = 35000
 _LAUNCH_TIMEOUT_MS = 60000
 
 
+def page_needs_login(page):
+    """当前页面是否停在知乎登录页（登录态失效的直接证据）。
+
+    判定口径唯一来源：cookie 里的 z_c0 会因「服务端已登出」而假阳性
+    （2026-09-19 看板/草稿箱「刷新失败」的真因），页面被 302 到
+    /signin 才是硬证据。放叶子模块供 adapter / 写通道 / 抓取链路共用
+    （2026-09-23 从 browser_adapter 迁入，adapter 继续 re-export 兼容）。
+    """
+    try:
+        url = page.url or ""
+    except Exception:             # noqa: BLE001 页面已关/上下文已断
+        return False
+    return "/signin" in url
+
+
 def build_draft_marker(text, limit=60):
     """从故事原文生成草稿确认 marker：剥掉全部空白。
 

@@ -165,16 +165,33 @@ class SessionMixin:
         log.info("browser_adapter: 登录态已保存 → %s", path)
 
     def load_storage_state(self, path=None):
-        """从本地文件恢复登录态；文件不存在时返回 False（需手动登录一次）。"""
+        """从本地文件恢复登录态；文件不存在时返回 False（需手动登录一次）。
+
+        ★ 2026-09-23 修：**只补缺，绝不覆盖**。持久化 profile 本身就带 cookie，
+        而这份文件可能是几小时前的旧登录态——原先无条件 add_cookies 会用文件里
+        的旧 z_c0 盖掉 profile 里刚登录出来的新 z_c0。线上现象：用户在登录窗口
+        里登成功，窗口一关（20:56:06）紧接着网页版登录检查启动浏览器又把旧
+        cookie 写回（20:56:07「已恢复登录态（79 条 cookie）」）→「登了等于没登」。
+        文件的作用只剩「profile 是空的/新建的」时兜底，语义与注释一致。
+        """
         path = path or self.storage_state
         if not os.path.exists(path):
             log.info("browser_adapter: 无登录态文件 %s，需手动登录一次", path)
             return False
         with open(path, encoding="utf-8") as f:
             state = json.load(f)
-        self.context.add_cookies(state.get("cookies", []))
-        log.info("browser_adapter: 已恢复登录态（%d 条 cookie）",
-                 len(state.get("cookies", [])))
+        saved = state.get("cookies", []) or []
+        try:
+            live = {(c.get("name"), c.get("domain"), c.get("path"))
+                    for c in self.context.cookies()}
+        except Exception:          # noqa: BLE001 取不到就按全量补（首次启动）
+            live = set()
+        missing = [c for c in saved
+                   if (c.get("name"), c.get("domain"), c.get("path")) not in live]
+        if missing:
+            self.context.add_cookies(missing)
+        log.info("browser_adapter: 已恢复登录态（文件 %d 条，补入 %d 条，"
+                 "profile 已有的不覆盖）", len(saved), len(missing))
         return True
 
     # ----------------------------------------------------------

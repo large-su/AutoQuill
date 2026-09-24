@@ -241,6 +241,19 @@ def _load_performance():
     return out
 
 
+def _prior_min_age_days():
+    """题材先验的最小观测年龄（天）；读 config，取不到按 7 天。
+
+    2026-09-23 复盘 P5：见 summarize() 里的说明——发布头几天的互动量级远未
+    稳定，用它调选题会误杀好题材。
+    """
+    try:
+        from config.story import TOPIC_GENRE_PRIOR_MIN_AGE_DAYS as days
+        return max(0, int(days))
+    except Exception:
+        return 7
+
+
 def _reader_score(rec, as_of):
     """单篇互动分（按发布天数归一 + 90 天衰减）。as_of: date。"""
     from config.story import (READER_SCORE_W_LIKES, READER_SCORE_W_COMMENTS,
@@ -286,9 +299,19 @@ def summarize(genre=None, as_of=None, auto_seed=True):
     by_url = {}
     for rec in _load_performance():
         by_url.setdefault(rec["url"], []).append(rec)
+    min_age = _prior_min_age_days()
+    skipped_young = 0
     arts = []
     for url, recs in by_url.items():
         latest = max(recs, key=lambda r: r.get("observed") or "")
+        # ★ 2026-09-23 复盘 P5：发布不足 N 天的篇目不计入题材先验。
+        # 本期两篇爆款第 3 天只有 674 / 296 阅读（9 / 2 个赞），那时计入会得出
+        # 「先婚后爱/追妻火葬场是劣质题材」——它们最终却贡献了本期 45% 的赞同。
+        # 用头几天的数据调选题，错误会自我强化（越不选越拿不到翻身数据）。
+        pub = _pubdate(latest)
+        if min_age and pub and (as_of - pub).days < min_age:
+            skipped_young += 1
+            continue
         score = _reader_score(latest, as_of)
         if score is None:
             continue
@@ -302,6 +325,10 @@ def summarize(genre=None, as_of=None, auto_seed=True):
             "collects_per_day": _num(latest.get("collects")) / max(1, (
                 (as_of - _pubdate(latest)).days if _pubdate(latest) else 1)),
         })
+    if skipped_young:
+        log.info("题材先验：跳过 %d 篇发布不足 %d 天的稿件"
+                 "（数据还没稳定，别用前三天的票房否定题材）",
+                 skipped_young, min_age)
     if not arts:
         return {"as_of": as_of.isoformat(), "n_articles": 0,
                 "overall": {"score": 0.0, "n": 0}, "genres": {}}

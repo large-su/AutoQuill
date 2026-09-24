@@ -8,13 +8,18 @@
           拉起自身 `AutoQuill.exe --service` 作为服务进程
   通用：8787 已有服务 → 直接开独立窗口复用；关窗/强杀 → Job Object 连带
         服务进程清理；就绪后打开独立窗口（pywebview 失败时回退系统浏览器）
+  单实例：已经在跑（含"正在启动中"）→ 新进程只唤起已有窗口后自己退出，
+        绝不再叠窗口/托盘图标；真退出 = 托盘菜单或控制台的「退出 AutoQuill」，
+        关窗 = 最小化到托盘（launcher.json 的 close_to_tray，默认开）
 
 打包态数据目录与 core/paths.py 保持一致（%APPDATA%/AutoQuill），
 程序文件（含服务代码）全部内置于 exe，不依赖系统 Python。
 """
 
+import atexit
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -372,6 +377,310 @@ def _prewarm_webview():
         pass
 
 
+# ------------------------------------------------------------
+# 单实例（2026-09-20 用户口径）
+#
+# 现象：连点两次启动 → 右下角叠出两个托盘图标。根因是"服务已在跑"分支
+#   （以及"启动中再点一次"）会**再开一个窗口 + 再建一个 TrayController**；
+#   关窗只是 Hide，于是每多启动一次就多留一个托盘图标，而且那个进程既不
+#   拥有服务、也不知道该由谁退。
+# 口径：已经在跑（含"正在启动中"）→ 新进程只负责把那个窗口显示出来，然后
+#   自己退出；没有在跑 → 正常启动。托盘菜单「退出 AutoQuill」是唯一的真退出
+#   入口（关窗 = 最小化到托盘，默认行为不变）。
+# 做法：
+#   · 权威锁 = Windows 命名互斥体（名字按数据目录取，源码态与安装版互不干扰；
+#     进程退出/被杀由系统自动释放，不会留死锁文件）；
+#   · 通知通道 = 127.0.0.1 上的小 TCP 服务（端口写在实例文件里），只认
+#     SHOW（显示窗口）/ PING（探活）两条命令——托盘图标被 Win11 折叠时，
+#     这也是"再点一次图标就能唤出窗口"的可靠通道；
+#   · 启动中收到 SHOW → 记 _show_pending，窗口一建出来就露面（开机自启带
+#     --tray 时也不再藏回托盘）。
+# ------------------------------------------------------------
+INSTANCE_FILE = "launcher_instance.json"
+CONTROL_HOST = "127.0.0.1"
+# 回复里一律带 AutoQuill 字样：万一实例文件里的端口被别的本机服务占用，
+# 也不会把陌生回复当成"通知成功"（实测本机 32xx 段有回显服务会原样返回命令）
+CONTROL_OK = "OK AutoQuill"                 # 窗口已显示
+CONTROL_PENDING = "PENDING AutoQuill"       # 对方还在启动中：窗口稍后自己出来
+CONTROL_NO_WINDOW = "NOWIN AutoQuill"       # 对方在浏览器回退模式：没有独立窗口可唤
+
+_MUTEX_HANDLE = None               # 进程存活期间一直握着（别让 GC 关掉）
+_CONTROL_STOP = threading.Event()
+_ACTIVE_WINDOW = None              # open_window 建好的窗口（控制通道要能显示它）
+_SHOW_PENDING = threading.Event()  # 启动中收到过 SHOW 请求
+_WINDOW_MODE = "starting"          # starting → window / browser（浏览器回退）
+
+
+def instance_file_path():
+    """实例文件路径（与启动器设置同目录：源码态项目根、安装态 %APPDATA%）。"""
+    return data_root() / "config" / INSTANCE_FILE
+
+
+def read_instance():
+    """读实例文件 → {"pid": int, "port": int}；缺失/损坏/端口非法 → None。"""
+    try:
+        with open(instance_file_path(), "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        port = int(raw.get("port") or 0)
+        if port <= 0:
+            return None
+        return {"pid": int(raw.get("pid") or 0), "port": port,
+                "started_at": raw.get("started_at") or ""}
+    except Exception:      # noqa: BLE001
+        return None
+
+
+def write_instance(port, pid=None):
+    """原子写实例文件；失败只记日志（单实例是增强，不该阻断启动）。"""
+    try:
+        path = instance_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"pid": int(pid or os.getpid()), "port": int(port),
+                       "started_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
+        os.replace(tmp, str(path))
+        return True
+    except Exception as exc:      # noqa: BLE001
+        _log_diag(f"实例文件写入失败：{exc!r}")
+        return False
+
+
+def clear_instance(port=None):
+    """删除实例文件；port 与之不符（已被新实例接管）就不动它。"""
+    try:
+        current = read_instance()
+        if port is not None and current and current.get("port") != int(port):
+            return
+        os.remove(str(instance_file_path()))
+    except FileNotFoundError:
+        pass
+    except Exception:      # noqa: BLE001
+        pass
+
+
+def _mutex_name():
+    """互斥体名按数据目录取：源码态（项目根）与安装版（%APPDATA%）各自独立，
+    不会因为开发时开着一个就把用户装的那个拦下来。"""
+    import hashlib
+    key = str(data_root()).lower().encode("utf-8", "replace")
+    return "Local\\AutoQuillLauncher-" + hashlib.sha1(key).hexdigest()[:12]
+
+
+def acquire_single_instance():
+    """尝试成为唯一实例。
+
+    返回 True = 本进程是唯一实例（互斥体句柄一直握着，进程退出自动释放）；
+    False = 已有实例在跑（可能在启动中）。
+    非 Windows 或互斥体不可用 → 一律当作唯一实例：宁可重复启动一次，
+    也不能因为平台差异把用户挡在门外。
+    """
+    global _MUTEX_HANDLE
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        handle = kernel32.CreateMutexW(None, False, _mutex_name())
+        if not handle:
+            return True
+        if ctypes.get_last_error() == 183:      # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _MUTEX_HANDLE = handle                  # 保活即可，不需要 ReleaseMutex
+        return True
+    except Exception as exc:      # noqa: BLE001
+        _log_diag(f"单实例互斥体不可用（按唯一实例继续）：{exc!r}")
+        return True
+
+
+def _present_window(window):
+    """把窗口显示到前台：显示 → 取消最小化 → 抢焦点。
+
+    托盘不可用时关窗会退化成"最小化到任务栏"，所以只 show() 不够，
+    还得 restore() 才能从任务栏弹回来（pywebview 6.x 有 restore）。
+    """
+    if window is None:
+        return False
+    try:
+        window.show()
+    except Exception as exc:      # noqa: BLE001
+        _log_diag(f"唤起窗口失败：{exc!r}")
+        return False
+    try:
+        restore = getattr(window, "restore", None)
+        if callable(restore):
+            restore()
+    except Exception:      # noqa: BLE001
+        pass
+    try:
+        native = getattr(window, "native", None)
+        if native is not None:
+            native.Activate()      # 从别的窗口抢回焦点（托盘双击的常见诉求）
+    except Exception:      # noqa: BLE001
+        pass
+    return True
+
+
+def show_active_window():
+    """把本进程的窗口显示出来。返回 CONTROL_OK / CONTROL_PENDING / CONTROL_NO_WINDOW。"""
+    global _WINDOW_MODE
+    _SHOW_PENDING.set()
+    window = _ACTIVE_WINDOW
+    if window is None:
+        # 还在启动中（服务就绪/窗口创建之前）→ 请求先记下，窗口出来再露面
+        return CONTROL_PENDING if _WINDOW_MODE == "starting" \
+            else CONTROL_NO_WINDOW
+    return CONTROL_OK if _present_window(window) else CONTROL_NO_WINDOW
+
+
+def handle_control_command(line):
+    """控制通道命令处理（纯函数，便于单测）：返回一行回复文本。"""
+    cmd = (line or "").strip().upper()
+    if cmd == "PING":
+        return f"OK AutoQuill launcher pid={os.getpid()}"
+    if cmd == "SHOW":
+        return show_active_window()
+    return "ERR AutoQuill unknown command"
+
+
+def send_instance_command(command, port=None, timeout=1.5):
+    """给已在运行的实例发一条命令，返回回复行；连不上/无实例文件 → None。"""
+    if port is None:
+        inst = read_instance()
+        if not inst:
+            return None
+        port = inst["port"]
+    try:
+        with socket.create_connection((CONTROL_HOST, int(port)),
+                                      timeout=timeout) as sock:
+            sock.sendall((str(command).strip().upper() + chr(10)).encode("utf-8"))
+            sock.settimeout(timeout)
+            data = b""
+            while chr(10).encode() not in data and len(data) < 256:
+                chunk = sock.recv(256)
+                if not chunk:
+                    break
+                data += chunk
+        return (data.decode("utf-8", "replace").strip().splitlines() or [""])[0] \
+            or None
+    except OSError:
+        return None
+
+
+def notify_running_instance(show=True, timeout=6.0, interval=0.25):
+    """让已在运行的实例把窗口显示出来。
+
+    正在启动中的实例可能还没挂上控制端口 → 在 timeout 内重试。
+    返回回复行（"OK"/"PENDING"/"NOWIN"）或 None（没通知上）。
+    """
+    deadline = time.time() + max(0.5, float(timeout))
+    command = "SHOW" if show else "PING"
+    while True:
+        reply = send_instance_command(command)
+        if reply and "AutoQuill" in reply:
+            return reply          # 只认自己人的回复（端口被别人占用时不当成功）
+        if time.time() >= deadline:
+            return None
+        time.sleep(max(0.05, float(interval)))
+
+
+def start_control_server():
+    """起单实例控制通道（只监听 127.0.0.1，端口由系统分配）。
+
+    返回实际端口；失败返回 0（此时退化为"只能靠互斥体拦住重复启动"）。
+    """
+    try:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((CONTROL_HOST, 0))
+        server.listen(4)
+        server.settimeout(1.0)
+    except OSError as exc:
+        _log_diag(f"单实例控制通道启动失败：{exc!r}")
+        return 0
+    port = int(server.getsockname()[1])
+
+    def _serve():
+        while not _CONTROL_STOP.is_set():
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                conn.settimeout(2.0)
+                data = b""
+                while chr(10).encode() not in data and len(data) < 256:
+                    chunk = conn.recv(256)
+                    if not chunk:
+                        break
+                    data += chunk
+                line = data.decode("utf-8", "replace").splitlines()
+                reply = handle_control_command(line[0] if line else "")
+                conn.sendall((reply + chr(10)).encode("utf-8"))
+            except Exception:      # noqa: BLE001
+                pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:      # noqa: BLE001
+                    pass
+        try:
+            server.close()
+        except Exception:      # noqa: BLE001
+            pass
+
+    threading.Thread(target=_serve, daemon=True, name="aq-instance").start()
+    return port
+
+
+def second_instance(start_hidden=False):
+    """已有实例在跑：让它的窗口露面，然后本进程直接退出。
+
+    关键点：**绝不再建窗口/托盘**——多出来的那个窗口正是"多个托盘图标"的来源。
+    """
+    inst = read_instance()
+    who = ("已在运行（pid=%s）" % inst["pid"]) if inst and inst.get("pid") \
+        else "已在运行"
+    if start_hidden:
+        # 开机自启的静默启动：不打断用户，探活即退出
+        notify_running_instance(show=False, timeout=2.0)
+        _log_diag("重复启动（--tray）：已有实例，直接退出")
+        print(f"AutoQuill {who}，本次为静默启动，不再重复驻留。")
+        return 0
+
+    reply = notify_running_instance(show=True)
+    if reply and reply.startswith("OK"):
+        _log_diag("重复启动：已唤起现有实例的窗口，本进程退出")
+        print(f"AutoQuill {who}，已为你显示它的窗口。")
+        return 0
+    if reply == CONTROL_PENDING:
+        _log_diag("重复启动：现有实例正在启动中，窗口稍后自行出现")
+        print(f"AutoQuill {who}，正在启动中，窗口马上就出来。")
+        return 0
+    if reply == CONTROL_NO_WINDOW:
+        # 对方走的是"独立窗口失败 → 回退浏览器"路径：照它的样子开浏览器
+        _log_diag("重复启动：现有实例没有独立窗口，按浏览器回退处理")
+        print(f"AutoQuill {who}（窗口回退为浏览器），正在打开浏览器…")
+        webbrowser.open(BASE_URL)
+        return 0
+
+    # 完全没通知上：对方可能卡在启动早期或控制通道被占用。
+    # 这里仍然不建第二个窗口/托盘（否则又是多个托盘图标），提示用户走托盘。
+    _log_diag("重复启动：唤起现有实例失败")
+    text = (f"AutoQuill {who}，但没能唤起它的窗口。\n\n"
+            "请点右下角托盘图标（Win11 可能收在 ^ 折叠区）打开控制台；"
+            "要完全退出，用托盘菜单里的「退出 AutoQuill」。")
+    print(text)
+    if getattr(sys, "frozen", False):
+        _message_box("AutoQuill 已在运行", text)
+    return 0
+
+
 def open_window(start_hidden=False):
     """打开控制台窗口：pywebview 独立窗口（WebView2 内核），失败回退系统浏览器。
 
@@ -414,8 +723,14 @@ def open_window(start_hidden=False):
         # start(func) 在窗口创建后、显示前调用回调 → 标题栏在用户看到前已染深
         # （start 本身阻塞直到窗口关闭，样式调用不能放在其后面）
         def _on_start():
+            global _ACTIVE_WINDOW, _WINDOW_MODE
             _apply_dark_titlebar(window)
+            # 控制通道要能唤起这个窗口（重复启动 / 托盘折叠时的第二条通道）
+            _ACTIVE_WINDOW = window
+            _WINDOW_MODE = "window"
             tray = TrayController(window)
+            # 退出请求的监听与托盘可用性解耦：托盘挂了，控制台的退出按钮也得管用
+            _start_quit_watcher(tray)
             # ★ 等窗口原生对象：start(func) 的回调早于窗口创建（详见 wait_native 注释）
             if not tray.wait_native(timeout=15):
                 _log_diag("托盘：等待窗口原生对象超时（15s），退化为普通窗口")
@@ -427,10 +742,16 @@ def open_window(start_hidden=False):
                 except Exception as exc:      # noqa: BLE001
                     _log_diag(f"托盘：关窗钩子挂载失败（{exc!r}）")
                 if start_hidden:
-                    # 开机自启：不弹窗打断用户，只提示一次「已在托盘运行」
-                    window.hide()
-                    tray.hint_once(
-                        launcher_config.load() if launcher_config else {})
+                    if _SHOW_PENDING.is_set():
+                        # 启动中又被启动了一次 → 用户要的是窗口，别再藏回托盘
+                        _SHOW_PENDING.clear()
+                        _log_diag("启动中收到二次启动请求：窗口直接显示（不入托盘）")
+                        window.show()
+                    else:
+                        # 开机自启：不弹窗打断用户，只提示一次「已在托盘运行」
+                        window.hide()
+                        tray.hint_once(
+                            launcher_config.load() if launcher_config else {})
 
         webview.start(_on_start, **start_kwargs)
         return True
@@ -438,6 +759,7 @@ def open_window(start_hidden=False):
         # 独立窗口失败原因写进诊断日志（否则回退浏览器时无迹可查——
         # V4.2.1 用户反馈"变成浏览器打开"即此路径，曾完全不可见）
         _log_diag(f"独立窗口打开失败，回退系统浏览器：{exc!r}")
+        globals()["_WINDOW_MODE"] = "browser"
         webbrowser.open(BASE_URL)
         return False
 
@@ -624,11 +946,7 @@ class TrayController:
 
     def show_window(self):
         """打开控制台（双击图标 / 菜单第一项）。"""
-        self.window.show()
-        try:
-            self.form.Activate()
-        except Exception:      # noqa: BLE001
-            pass
+        _present_window(self.window)
 
     def toggle_pause(self):
         status = api_call("/api/automation")
@@ -747,17 +1065,10 @@ class TrayController:
     # ---------------- 状态刷新 ----------------
 
     def _poll_loop(self):
+        # 只刷状态；「退出」请求由 _start_quit_watcher 单独盯（托盘挂了也要能退）
         while not self._stopped.wait(20):
             try:
                 self._refresh()
-            except Exception:      # noqa: BLE001
-                pass
-            # 控制台里的「退出 AutoQuill」：用户点完，这里负责真的退
-            try:
-                if launcher_config and launcher_config.load().get("quit_requested_at"):
-                    _log_diag("收到控制台的退出请求，正在退出")
-                    self.quit()
-                    return
             except Exception:      # noqa: BLE001
                 pass
 
@@ -788,6 +1099,31 @@ class TrayController:
             self.form.Invoke(self._Action(_do))
         except Exception:      # noqa: BLE001
             pass
+
+
+def _start_quit_watcher(tray, interval=5.0):
+    """盯控制台的「退出 AutoQuill」请求（写 launcher.json 的 quit_requested_at）。
+
+    刻意独立于托盘：托盘建不起来时（驱动异常/Win11 把图标收进折叠区），
+    关窗按钮退化成"真关闭"，但控制台里的退出按钮仍然必须有效——
+    退出入口不能因为托盘挂了就失效，否则用户只剩任务管理器。
+    """
+    if launcher_config is None:
+        return None
+
+    def _watch():
+        while not tray._stopped.wait(interval):
+            try:
+                if launcher_config.load().get("quit_requested_at"):
+                    _log_diag("收到控制台的退出请求，正在退出")
+                    tray.quit()
+                    return
+            except Exception:      # noqa: BLE001
+                pass
+
+    thread = threading.Thread(target=_watch, daemon=True, name="aq-quit-watch")
+    thread.start()
+    return thread
 
 
 def _set_title(title):
@@ -864,6 +1200,19 @@ def main():
     frozen = getattr(sys, "frozen", False)
     # 开机自启带 --tray：窗口只创建不显示，直接驻留托盘（不打断用户）
     start_hidden = "--tray" in sys.argv
+
+    # === 单实例（2026-09-20 用户口径）：已经在跑就只唤起它的窗口 ===
+    # 必须早于"建窗口/建托盘"：每多开一个窗口就会多留一个托盘图标，
+    # 而且那个进程既不拥有服务、也不知道退出该由谁负责。
+    if not acquire_single_instance():
+        return second_instance(start_hidden=start_hidden)
+    _ctrl_port = start_control_server()
+    if _ctrl_port:
+        write_instance(_ctrl_port)
+        atexit.register(clear_instance, _ctrl_port)
+    else:
+        _log_diag("单实例控制通道不可用：重复启动只能靠互斥体拦截，无法唤起窗口")
+
     if launcher_config is not None:
         # 清掉上一次会话留下的退出请求，否则「刚启动就自己退了」
         try:

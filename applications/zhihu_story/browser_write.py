@@ -19,6 +19,7 @@ from .browser_utils import (
     _NAV_TIMEOUT,
     build_draft_marker,
     clean_story_markdown,
+    page_needs_login,
     story_markdown_to_html,
 )
 
@@ -167,7 +168,7 @@ class WriteActionsMixin:
     def list_draft_cards(self):
         """打开草稿箱并返回卡片列表（DOM 顺序 = 「编辑于」倒序，最后一张最旧）。"""
         self.page.goto(self._DRAFT_URL, wait_until="domcontentloaded",
-                       timeout=_NAV_TIMEOUT * 1000)
+                       timeout=_NAV_TIMEOUT)
         time.sleep(5)
         for _ in range(6):          # 滚动加载（列表分页/懒加载）
             self._safe_evaluate(
@@ -198,6 +199,16 @@ class WriteActionsMixin:
 
         _say("打开草稿箱…")
         cards = self.list_draft_cards()
+        if page_needs_login(self.page):
+            # 登录态失效：草稿箱页被 302 到 /signin → 卡片必然是 0 张。
+            # 不识别就会误报成「草稿箱里没有可发布的草稿」，调度器把它记
+            # 「跳过」（不失败、不熔断、不通知）→ 无人值守时静默空转，用户
+            # 永远等不到「该重新登录了」这句话（2026-09-23 修）。reason=
+            # need_login 由执行器转成 NeedHuman：暂停自动化 + 通知人工。
+            detail = ("知乎登录态已失效（草稿箱页被重定向到登录页），请先在"
+                      "控制台「设置 → 知乎账号」重新登录知乎")
+            return {"ok": False, "reason": "need_login", "qid": "",
+                    "title": "", "url": self.page.url or "", "detail": detail}
         _say("草稿箱可见 %d 篇草稿" % len(cards))
         target = None
         if qid:
@@ -212,7 +223,7 @@ class WriteActionsMixin:
                     "detail": "草稿箱里没有可发布的草稿" + ("（找不到 qid=%s）" % qid if qid else "")}
         _say("准备发布最旧的一篇：《%s》" % (target.get("title") or target.get("qid")))
         self.page.goto(target["href"], wait_until="domcontentloaded",
-                       timeout=_NAV_TIMEOUT * 1000)
+                       timeout=_NAV_TIMEOUT)
         time.sleep(6)
         # 等编辑器就绪（草稿正文可能还在异步填充）
         for _ in range(10):

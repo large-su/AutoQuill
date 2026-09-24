@@ -4,7 +4,9 @@
 刻意的分层：本模块**不直接操作 DOM**，只调用既有能力：
   - full_chain → webui.run_manager.TaskRunner（经典/纯净完整链路，rounds=1 = 一篇）；
   - publish_drafts（M2）→ applications/zhihu_story 的草稿发布能力；
-  - 其余类型（打卡/感谢/评论回复）→ 本期留接口，返回「未实现」而不是假装成功。
+  - 任务类型只有两个（用户 2026-09-24 口径）：full_chain（写故事）、
+    publish_drafts（发布草稿）。打卡/互动类不做——登记表里没有的类型
+    一律返回「未知任务类型」，不假装成功。
 
 异常语义（调度器据此决策，不混为一谈）：
   BrowserBusy   浏览器被手动任务占用 → 排队稍后再来，**不算失败**；
@@ -82,78 +84,81 @@ def _publish_drafts(job, should_stop=None, progress=None):
     草稿列表 → 编辑页 → 「发布回答」→ 确认弹窗 → 校验）。
     失败不自动重试（不可逆动作），交给调度器的熔断与人工介入；
     登录失效统一转成 NeedHuman，避免把「未登录」误判成发布失败而反复重试。
+
+    ★ 2026-09-23 两处修（自动化发布「一直跑不通」的直接原因）：
+      · 登录预检原本写在这句 page_needs_login(b.page)——此刻 page 还是
+        about:blank（b.start() 只拉起上下文，没有任何导航），判断恒为假。
+        于是登录失效时照样去开草稿箱页、拿到 0 张卡，被归成「草稿箱里
+        没有可发布的草稿 = 跳过」：不失败、不熔断、不通知，无人值守时
+        静默空转。识别下沉到 publish_draft（草稿箱页真被 302 到 /signin
+        才判），这里只按 reason 归一成 NeedHuman；
+      · 独占 profile 必须持 _browser_lock（与共享浏览器、登录引导、网页版
+        登录检查串行）——原先裸起实例，撞上网页版登录检查就是一次莫名的
+        启动失败（Chromium 单例锁禁止同目录并发）。
     """
     from applications.zhihu_story.browser_adapter import (
-        LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired, page_needs_login,
+        LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired,
     )
+    from web_drivers.browser_pool import _browser_lock
     busy = _browser_busy()
     if busy:
         raise BrowserBusy("浏览器被占用：" + "、".join(busy))
-    b = ZhihuBrowser(headless=True)
-    try:
-        b.start()
-        if page_needs_login(b.page):
-            # 统一成语义异常：调度器收到 NeedHuman 会暂停全部自动化并通知
-            raise NeedHuman(LOGIN_EXPIRED_MSG)
-        params = job.get("params") or {}
-        qid = str(params.get("qid") or "")
-
-        def _say(text):
-            """浏览器层只回报文本；这里转成调度器的状态字典（界面据此显示进度）。"""
-            if progress:
-                try:
-                    progress({"message": text})
-                except Exception:      # noqa: BLE001
-                    pass
-
-        r = b.publish_draft(qid=qid, progress=_say,
-                            dry_run=bool(job.get("dry_run")))
-    except ZhihuLoginRequired as exc:
-        raise NeedHuman(str(exc))
-    finally:
+    with _browser_lock:
+        b = ZhihuBrowser(headless=True)
         try:
-            b.close()
-        except Exception:          # noqa: BLE001
-            pass
-    ok = bool(r.get("ok"))
-    if not ok and r.get("reason") == "dry_run":
-        # 演练：走完「找草稿 → 开编辑页 → 确认发布按钮」，绝不点发布。
-        # 通过记跳过（不是发布成功，也不占配额）；未通过才是真问题。
-        return {"ok": False, "units": 0,
-                "status": (STATUS_SKIPPED if r.get("rehearsed")
-                           else STATUS_FAILED),
-                "message": r.get("detail") or "演练完成（未发布）",
-                "artifacts": []}
-    if not ok and r.get("reason") == "empty":
-        # 草稿箱空 = 今天没有可发的，记「跳过」：不计失败、不触发熔断，
-        # 也不占用当日配额（done_counts 只累加 status=done 的 units）。
-        return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
-                "message": r.get("detail") or "草稿箱里没有待发布的草稿",
-                "artifacts": []}
-    return {
-        "ok": ok,
-        "units": 1 if ok else 0,
-        "status": STATUS_DONE if ok else STATUS_FAILED,
-        "message": ("已发布《%s》" % r.get("title")) if ok
-                   else (r.get("detail") or "发布未确认"),
-        "artifacts": [r.get("url")] if r.get("url") else [],
-    }
+            b.start()
+            params = job.get("params") or {}
+            qid = str(params.get("qid") or "")
 
+            def _say(text):
+                """浏览器层只回报文本；这里转成调度器的状态字典（界面据此显示进度）。"""
+                if progress:
+                    try:
+                        progress({"message": text})
+                    except Exception:      # noqa: BLE001
+                        pass
 
-def _unimplemented(job, should_stop=None, progress=None):
-    """留接口的任务类型（打卡 / 感谢 / 评论回复 / 草稿发布未接入时）。"""
-    from automation.model import task_label
-    return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
-            "message": "%s：能力尚未接入（预留接口）" % task_label(job.get("type")),
-            "artifacts": []}
+            r = b.publish_draft(qid=qid, progress=_say,
+                                dry_run=bool(job.get("dry_run")))
+        except ZhihuLoginRequired as exc:
+            raise NeedHuman(str(exc))
+        finally:
+            try:
+                b.close()
+            except Exception:          # noqa: BLE001
+                pass
+        if r.get("reason") == "need_login":
+            # 登录失效：调度器收到 NeedHuman 会暂停全部自动化并通知人工，
+            # 绝不记成「发布失败」而反复重试（也不该静默跳过）
+            raise NeedHuman(r.get("detail") or LOGIN_EXPIRED_MSG)
+        ok = bool(r.get("ok"))
+        if not ok and r.get("reason") == "dry_run":
+            # 演练：走完「找草稿 → 开编辑页 → 确认发布按钮」，绝不点发布。
+            # 通过记跳过（不是发布成功，也不占配额）；未通过才是真问题。
+            return {"ok": False, "units": 0,
+                    "status": (STATUS_SKIPPED if r.get("rehearsed")
+                               else STATUS_FAILED),
+                    "message": r.get("detail") or "演练完成（未发布）",
+                    "artifacts": []}
+        if not ok and r.get("reason") == "empty":
+            # 草稿箱空 = 今天没有可发的，记「跳过」：不计失败、不触发熔断，
+            # 也不占用当日配额（done_counts 只累加 status=done 的 units）。
+            return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
+                    "message": r.get("detail") or "草稿箱里没有待发布的草稿",
+                    "artifacts": []}
+        return {
+            "ok": ok,
+            "units": 1 if ok else 0,
+            "status": STATUS_DONE if ok else STATUS_FAILED,
+            "message": ("已发布《%s》" % r.get("title")) if ok
+                       else (r.get("detail") or "发布未确认"),
+            "artifacts": [r.get("url")] if r.get("url") else [],
+        }
 
 
 _HANDLERS = {
     "full_chain": _full_chain,
     "publish_drafts": _publish_drafts,
-    "checkin": _unimplemented,
-    "thank": _unimplemented,
-    "reply_comment": _unimplemented,
 }
 
 

@@ -118,10 +118,28 @@ class ZhihuWorkflow(WorkflowBase):
                 hot_qs = [q for q in all_qs if q.get("is_hot")]
                 normal_qs = [q for q in all_qs if not q.get("is_hot")]
                 return all_qs, hot_qs, normal_qs
+            if self._page_needs_login(browser):
+                # 登录态失效（候选页被 302 到 /signin）：再重试多少次都是空，
+                # 直接给可执行的结论——别用「页面结构可能变了」这种模糊话
+                # 让用户连撞两轮（2026-09-23 用户实测：日志只说解析为空，
+                # 真正原因是会话已登出）
+                raise RuntimeError(
+                    "知乎登录态失效（候选页被重定向到登录页）。\n"
+                    "请点击控制台右上角「设置」→「知乎账号」→「重新登录知乎」"
+                    "完成登录后再运行。")
             log.warning(f"  推荐页解析为空（第 {attempt + 1}/"
                         f"{retries + 1} 次），等待后重试")
             time.sleep(3)
         return None, None, None
+
+    @staticmethod
+    def _page_needs_login(browser):
+        """候选页是否停在知乎登录页（登录态失效的直接证据）。"""
+        from applications.zhihu_story.browser_adapter import page_needs_login
+        try:
+            return bool(page_needs_login(browser.page))
+        except Exception:          # noqa: BLE001 页面不可用：按未失效处理
+            return False
 
     # ============================================================
     # 提取门槛自适应（P1）：首轮按原门槛，之后逐轮放宽并打日志，
@@ -156,10 +174,15 @@ class ZhihuWorkflow(WorkflowBase):
 
     def _log_gate_relax(self, attempt, length_used, likes_used,
                         base_length, base_likes):
-        """放宽发生（attempt>0 且与原值不同）时记一条醒目日志。"""
+        """放宽发生（attempt>0 且与原值不同）时记一条醒目日志。
+
+        措辞用「本批」而不是「首轮」（2026-09-24 修）：这条日志在第 2~N 批重选时
+        都会打，写成「首轮未获合格素材」会让人误以为只在第一轮出现，
+        排查时数不清到底重选了几批。
+        """
         if attempt > 0 and (length_used != base_length
                             or likes_used != base_likes):
-            log.warning("⚠ 首轮未获合格素材，第 %d 轮放宽提取门槛："
+            log.warning("⚠ 本批未获合格素材，第 %d 轮放宽提取门槛："
                         "长度 %d → %d，点赞 %d → %d",
                         attempt + 1, base_length, length_used,
                         base_likes, likes_used)
@@ -171,9 +194,15 @@ class ZhihuWorkflow(WorkflowBase):
         两种候选页信号不同，自适应：
           - 创作中心推荐页：关注/回答（followers/answers）
           - 首页推荐流：赞/评论（likes/comments）
-        含义一致——互动越强越优先。随后按题目题材叠加读者先验乘数
-        （feedback_loop.topic_genre_multiplier；无数据/失败时恒等于 1.0，
-        不改变原打分行为）。"""
+        含义一致——互动越强越优先。随后叠加三个乘数（都只打折、不排除，
+        任何一步取不到数据/开关关闭都恒等于 1.0，不改变原打分行为）：
+          1. 题材口碑 feedback_loop.topic_genre_multiplier（读者数据学出来的）；
+          2. 题型先验 detectors.topic_type_multiplier（2026-09-23 复盘：命题作文/
+             微小说类流量池小得多——实测阅读/天中位 2.0 vs 求推荐 13.4、
+             观点/讨论 28.5，写进去等于把当天配额丢进没人走的巷子）；
+          3. 「求推荐」类降权 STORY_DOWNWEIGHT_FACTOR（这类题流量大但命中率
+             参差，从硬排除改成降权——回放里有本期第一就出在这类题下）。
+        """
         main = q.get("likes") or q.get("followers") or 0
         sec = q.get("comments") or q.get("answers") or 0
         score = main * (sec + 1)
@@ -191,6 +220,18 @@ class ZhihuWorkflow(WorkflowBase):
                         q["title"], weight=TOPIC_GENRE_PRIOR_WEIGHT,
                         min_boost=TOPIC_GENRE_BOOST_MIN,
                         max_boost=TOPIC_GENRE_BOOST_MAX)
+            except Exception:
+                pass
+            try:
+                from core.detectors import topic_type_multiplier
+                score *= topic_type_multiplier(q["title"])
+            except Exception:
+                pass
+            try:
+                from config.story import (STORY_DOWNWEIGHT_FACTOR,
+                                          STORY_DOWNWEIGHT_KEYWORDS)
+                if any(k in q["title"] for k in STORY_DOWNWEIGHT_KEYWORDS):
+                    score *= STORY_DOWNWEIGHT_FACTOR
             except Exception:
                 pass
         return score
@@ -271,6 +312,17 @@ class ZhihuWorkflow(WorkflowBase):
 
         log.info("")
         log.info(f"✓ 最终选择：{best['title'][:50]}...")
+        # 选题信号留痕（2026-09-23 复盘补的可观测性）：题目侧的流量信号只在
+        # 这一刻拿得到（卡片上有 关注/回答/评分/飙升标记），发布时随台账落盘后，
+        # 复盘就能把「内容不行」与「题目本来就没人看」分开——本期复盘正是因为
+        # 缺这个字段，只能按题型粗分（题型之间的阅读/天差了 13 倍）。
+        self.last_topic_meta = {
+            "q_score": round(float(best.get("score") or 0), 1),
+            "q_followers": best.get("followers"),
+            "q_answers": best.get("answers"),
+            "q_likes": best.get("likes"),
+            "q_hot": bool(best.get("is_hot")),
+        }
         browser.open_question(best["href"])
         return best["href"]
 
@@ -590,12 +642,20 @@ class ZhihuWorkflow(WorkflowBase):
                       "answer": r.get("answer") or "",
                       "_raw": r}
                      for i, r in enumerate(good)]
-            picked = screen_question_pool(cands, keep_best_only=True)
+            picked = screen_question_pool(cands, keep_best_only=False)
             if not picked:
                 # 空列表 = LLM 成功判定全部 keep=false（不适合写故事）。
                 # 失败时 screen_question_pool 原样返回非空的 cands，不会到这里。
                 return _AI_SCREEN_REJECT_ALL
-            best_raw = picked[0].get("_raw")
+            # 题型先验在最终选优处的落地（2026-09-24 日志实证：只打折扣不够，
+            # 大模型仍可能把命题作文挑成最佳——受众只有求推荐类的 1/7）
+            from core.detectors import order_prefer_large_audience
+            ordered = order_prefer_large_audience(picked)
+            if ordered[0] is not picked[0]:
+                log.info("  题型先验：跳过命题作文《%s》，改选《%s》",
+                         (picked[0].get("title") or "")[:30],
+                         (ordered[0].get("title") or "")[:30])
+            best_raw = ordered[0].get("_raw")
             if not best_raw:
                 return None
             log.info("大模型筛选：从 %d 个合格候选中挑出最适合写故事的 1 个：%s",

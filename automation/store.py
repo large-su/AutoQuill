@@ -147,8 +147,8 @@ def done_counts(day: str) -> dict:
     """当天各任务类型「已完成数量」——重启后续跑的依据（用户明确要求）。
 
     口径：
-      - publish_drafts / thank / reply_comment：按**条目数**计（一次作业可能发多篇）；
-      - full_chain / checkin：按**作业数**计（一次作业就是一篇/一次）。
+      - publish_drafts：按**条目数**计（一次作业可能发多篇）；
+      - full_chain：按**作业数**计（一次作业就是一篇）。
     """
     counts = {}
     for row in load_ledger(day):

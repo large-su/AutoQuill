@@ -46,8 +46,20 @@ AutoQuill = 知乎故事自动创作助手：自动选题 → 提取高赞回答
   `publish_draft()`（qid 空 = 发最旧一篇；校验 URL `/answer/<aid>` 或服务端草稿清空）。
   护栏：空草稿箱记「跳过」而非失败（防空跑触发熔断）、登录失效转 NeedHuman 暂停全自动化、
   失败不自动重试、`run-now {dry_run:true}` 演练只探按钮不点发布（前端「演练发布」按钮）
+  · **任务类型只有两个（2026-09-24 用户定案）**：全链路撰写（写故事）+ 发布草稿（发布故事）。
+  打卡挑战（网页端不好操作）与互动类（感谢/赞同/回复评论，看着太乱）**整体取消**，
+  `automation/model.py` 不再登记任何「预留类型」——目录里有的就是能跑的；
+  老 plan.json 里残留的 checkin/thank/reply_comment 会被 normalize_plan 安静丢弃（用户无需手工改文件）
   · 运行时段语义：只约束自动动作的时间（时段外待机、不自动退出、跨零点自动续排），
   手动「立即执行」不受时段限制；时段结束时剩余作业统一收尾（跳过 + 通知一次）
+  · **状态语义（2026-09-23 修，排查「发布一直跑不通」时补的洞）**：`plan.enabled` 只代表
+  「用户点过开始」——tick 线程是进程内的，所以 `webui/server.py` 启动时按落盘计划
+  `ensure_running()` 把线程补回来（重启 ≠ 停工；stop 会把 enabled 置回 false，故不会复活）；
+  未开启时 `_tick` 走「只认手动作业」分支、`run_now` 会补线程并在通知里写明「只做这一次」
+  （此前未开启时点「立即执行/演练发布」只回一句通知，作业永远挂在待执行）；
+  发布链路的登录识别已下沉 `publish_draft`（草稿箱页 302 到 /signin → reason=need_login →
+  NeedHuman），执行器那处 `page_needs_login(b.page)` 预检是死代码（page 还是 about:blank），
+  发布作业另补 `_browser_lock`（独占 profile 必须串行）
   · **M4 托盘常驻（2026-09-19）**：`tools/launcher.py` 的 TrayController（.NET NotifyIcon，
   必须 UI 线程创建）——关窗默认 Hide() 到托盘（closing 返回 False）、托盘菜单（打开/状态/
   暂停恢复/立即执行/退出，立即执行遇到发布作业先确认）、首次隐藏提示一次、托盘建不起来
@@ -118,7 +130,16 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 
 ## 5. 约定与常见坑（改代码前必读）
 
-- 测试：改完先 python tests/run_all.py（605 例，浏览器依赖类自动跳过）；前端改动跑 python tools/auto_test.py；发版用 build_release.py；完整手册见 docs/QA-PLAYBOOK.md
+- 启动器单实例（2026-09-20 用户口径）：多次启动不再叠窗口/托盘图标——启动器进程持有
+  Windows 命名互斥体（按 data_root 取名，源码态与安装版互不干扰）+ 实例文件里的控制端口
+  （DATA_ROOT/config/launcher_instance.json），第二次启动只唤起已有窗口后 exit=0；
+  `--service` 子进程不受守卫影响。真退出 = 托盘菜单或控制台设置页的「退出 AutoQuill」
+  （关窗 = 最小化到托盘，launcher.json 的 close_to_tray）；退出监听已与托盘解耦
+  （托盘挂了按钮照样管用）。残留实例文件无害：互斥体一释放就会被新实例覆盖
+- 首行自我汇报（2026-09-20 真机）：模型会把"我严格遵循…格式/字数要求，采用反差断语
+  开篇，搭建 6+ 章节"当正文第一行（复述我们的 prompt）。清洗（_is_meta_plan_line）要求
+  写作元词 >=2 且计划动词起手；格式校验把它当一票否决项（details["废话"]）
+- 测试：改完先 python tests/run_all.py（691 例，浏览器依赖类自动跳过）；前端改动跑 python tools/auto_test.py；发版用 build_release.py；完整手册见 docs/QA-PLAYBOOK.md
 - Python 环境：一律用 .venv/Scripts/python，不用 miniconda 裸 python
 - 行尾：仓库文件多 CRLF（编辑工具默认 LF），改完大文件用脚本归一化行尾；bat 必须纯 ASCII（中文注释会因 GBK 崩）
 - 写入文件的坑：DSH 模板字面量会把反引号、${}、\n 吞噬——写含这些的文件时避免或转义；前/后端 JS 用 node --check 验证
@@ -129,10 +150,31 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
   兜底；抄袭红线由 core.originality.opening_copy_signals（默认 12 字连续重合）在重试
   循环里拦截。开关：config/story.py 的 OPENING_MIRROR_REFERENCE / OPENING_VARIETY /
   OPENING_COPY_MIN_RUN
+- 开篇"读不进去"（2026-09-19 用户口径）：约束叠加的另一面——守则只管引言的"形式"
+  （句数/字数/第一行不是标题/禁空镜），没人管"内容必须是一件正在发生的事"，模型就写
+  评价句简介（"所有人都说…／没人知道…／只有我…"）。对策 = OPENING_EVENT_RULE（开篇事件化
+  守则）+ core.detectors.check_summary_opening（validate_story_format 第 8 项，一票否决）。
+  判定口径：引言无对话 且（总结体模板 ≥2 处 / 性格自述 / 评价句 ≥50%）；采集参考 35 篇零误报
 - 知乎登录态会「cookie 在、服务端已登出」：`is_logged_in()` 只看 z_c0 会假阳性，
   任何页面被 302 到 /signin（2026-09-19 看板/草稿箱「刷新失败」的真因）。
   抓取/删除链路统一用 `page_needs_login()` 识别（抛 ZhihuLoginRequired），前端提示
   重新登录；排查用 tools/archive/probes/probe_state_login.py（一条命令定性）
+  **登录引导本身也要守这条（2026-09-23 用户报「弹窗闪一下就被关」的真因）**：
+  `login_zhihu_flow` 原先只看 cookie 判「已登录」就 return，于是窗口一拉起就被 close
+  （日志里 0.9 秒走完全程）。判定改 `zhihu_login_confirmed()`＝页面离开登录页 **且**
+  z_c0 在（两个条件缺一不可：只看 cookie 是本次事故，只看页面会把「未登录也能打开的
+  首页」误判成功）。凡「靠 cookie 判断登录态」的新代码，先想一遍这条
+  · 第二轮实测又补两条（用户报「登完了不关窗 / 登了等于没登」）：
+  (a) 判定要**三条**：凭证换新 / 当前页或**上下文任一页**离开登录页 / 会话探测
+  （`context.request` 问首页，登出态 302→/signin、登录态 200；不开标签页、不打扰
+  用户）；登录可能在别的标签页完成，只看 `browser.page` 会一直等到超时。判失败前
+  再权威探测一次（用户可能刚好在最后几秒登完）
+  (b) `load_storage_state()` **只补缺、绝不覆盖**：陈旧 state 文件会把 profile 里刚
+  登录出的新 cookie 盖回去（时间线：登录窗口关 → 下一秒网页版登录检查启动浏览器又把
+  旧 cookie 写回）——这是「登了等于没登」的直接机制
+  · 排查入口：`tools/archive/probes/probe_signin_page.py`（登录页渲染了什么：二维码/表单/
+  风控词）；profile 的 History/Cookies 库能还原「窗口里到底访问过什么」（注意库被浏览器
+  占用时要重试复制）
 - 登录入口：设置弹窗「知乎账号」区块 = 状态显示 + 「检查登录状态」（POST /api/setup/zhihu-check，
   真实打开知乎首页判断）+「重新登录知乎」；browser_adapter.verify_zhihu_login() 可复用。
   首启引导的知乎步骤在失效态下也会重新显示登录按钮（此前被判「已完成」而隐藏）
@@ -156,6 +198,23 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
 - 把「同一生成的格式修正重试」接到 meta.session_id（同窗口连续修正，能力已就绪未接）
 - 批量素材“DOM 提取失败或过短”告警偏多 → 提取阈值/重试调优
 - 前端 dashboard/drafts 渲染函数进一步合并（已去重状态/进度条助手，列表/筛选仍双份）
+- **选题/写作的三处开关（2026-09-23 按复盘结论改的，都可一键回退）**：
+  · `config.story.TOPIC_TYPE_PRIOR_ENABLE/TOPIC_TYPE_PENALTY`（默认 0.4）——命题作文/微小说类
+    打分打折（实测这类题阅读/天中位 2.0，是求推荐类的 1/7）；
+  · `config.story.STORY_DOWNWEIGHT_KEYWORDS/STORY_DOWNWEIGHT_FACTOR`（默认 0.6）——「求推荐」类
+    从硬排除改降权（旧黑名单把本期第一那道题也封了）；纯书单（书荒/书单/求书）仍在 STORY_EXCLUDE_KEYWORDS；
+  · `config.story.TOPIC_GENRE_PRIOR_MIN_AGE_DAYS`（默认 7）——题材先验只采纳发布满 7 天的篇目；
+    两篇爆款第 3 天只有 674/296 阅读，那时计入会把好题材判死（且会自我强化）
+  · 篇幅与命名：story_prompt 的「不少于 4000 字、鼓励 5000-7000、每节不设上限」+
+    命名规则从硬性降为建议（改回旧口径就改这两处文案）
+- **效果复盘的两个入口（2026-09-23 新增，建议每周跑一次）**：
+  · 生成侧（过程）：`python tools/version_feedback_report.py --write` → 每版生成量/合规/重试/废稿；
+  · 结果侧（读者买不买账）：`python tools/published_review.py --days 60 --write` → 版本×题型×榜单，
+    口径是「阅读/天」+「固定 20 天窗口增量」（两者都有偏差，要交叉看）。结论与待办见
+    docs/REVIEW-perf-2026-09-23.md
+  · **已确认的教训**：两篇最高阅读（3639/3058，v4.7.0）在第 3 天只有 674/296 阅读，20 天后才涨到
+    3 千+ → 别用发布头几天的数据判断内容好坏（题材先验尤其危险）；**题型差距（13 倍）远大于任何
+    正文特征差距** → 选题环节才是杠杆
 - 后续功能建议优先参考 QA-PLAYBOOK 与用户真实测试反馈（webui.log 有详细链路日志）
 
 ## 7. 日常高频命令速查

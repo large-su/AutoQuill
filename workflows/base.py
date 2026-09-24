@@ -88,6 +88,9 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             # 失败时 screen_question_pool 原样返回非空 materials，不会走到这。
             log.warning("大模型筛选判定全部候选均不适合写故事，排除全部")
             return []
+        # 题型先验：把受众面更大的题型排到前面再截断（见 core/detectors 说明）
+        from core.detectors import order_prefer_large_audience
+        screened = order_prefer_large_audience(screened)
         if len(screened) > target:
             screened = screened[:target]
         for i, m in enumerate(screened):
@@ -169,9 +172,12 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
 
         self.publish(story, title, url, md_path)
         try:
-            from core import feedback_loop
-            feedback_loop.record_story_published(
-                url, title, {"story_file": md_path})
+            from core import feedback_loop, topic_ledger
+            # 稿件特征 + 选题信号一并落账（反馈闭环的复盘数据源）
+            meta = {"story_file": md_path}
+            meta.update(topic_ledger.story_meta(story, "classic"))
+            meta.update(getattr(self, "last_topic_meta", None) or {})
+            feedback_loop.record_story_published(url, title, meta)
         except Exception:
             log.debug("反馈闭环落账失败(不影响结果)", exc_info=True)
         log.info("本轮完成！")
@@ -223,9 +229,12 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
 
         self.publish(story, title, url, md_path)
         try:
-            from core import feedback_loop
-            feedback_loop.record_story_published(
-                url, title, {"story_file": md_path})
+            from core import feedback_loop, topic_ledger
+            # 稿件特征 + 选题信号一并落账（反馈闭环的复盘数据源）
+            meta = {"story_file": md_path}
+            meta.update(topic_ledger.story_meta(story, "classic"))
+            meta.update(getattr(self, "last_topic_meta", None) or {})
+            feedback_loop.record_story_published(url, title, meta)
         except Exception:
             log.debug("反馈闭环落账失败(不影响结果)", exc_info=True)
         log.info("纯净模式本轮完成！")
@@ -558,10 +567,12 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                              md_path=item.get('md_path'))
                 published += 1
                 try:
-                    from core import feedback_loop
+                    from core import feedback_loop, topic_ledger
+                    meta = {"story_file": item.get('md_path')}
+                    meta.update(topic_ledger.story_meta(
+                        item.get('story') or "", "batch"))
                     feedback_loop.record_story_published(
-                        item.get('url'), item.get('title'),
-                        {"story_file": item.get('md_path')})
+                        item.get('url'), item.get('title'), meta)
                 except Exception:
                     pass
                 log.info("  ✓ 发布成功")

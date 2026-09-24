@@ -56,6 +56,7 @@ from .browser_utils import (   # noqa: F401
     extract_answer_id,
     normalize_author_url,
     normalize_question_url,
+    page_needs_login,
     story_markdown_to_html,
 )
 from .browser_dom import DomReadMixin
@@ -189,32 +190,130 @@ class ZhihuLoginRequired(RuntimeError):
     """知乎登录态失效：页面停在登录页，需要用户重新登录。"""
 
 
-def page_needs_login(page):
-    """当前页面是否停在知乎登录页（登录态失效的直接证据）。"""
-    try:
-        url = page.url or ""
-    except Exception:
-        return False
-    return "/signin" in url
+# page_needs_login 已下沉 browser_utils（2026-09-23：写通道 publish_draft
+# 也要用同一口径识别登录失效，放叶子模块避免 adapter <-> write 循环引用）。
+# 这里由上面的兼容门面 re-export，历史调用方/测试的导入路径不变。
 
 
-def verify_zhihu_login(headless=True):
+def verify_zhihu_login(headless=True, lock_timeout=8):
     """真实检查知乎登录态：打开知乎首页，看是否被重定向到登录页。
 
     与 is_logged_in()（只看 z_c0 cookie）不同——cookie 还在但服务端已把会话
     登出时，cookie 检查会假阳性（2026-09-19 看板/草稿箱「刷新失败」的真因）。
     返回 (logged_in: bool, detail: str)；异常按「检查失败」返回，不抛出。
+
+    ★ 2026-09-23：本检查要与共享浏览器/登录引导共用同一 user-data-dir，而
+      Chromium 单例锁禁止同目录并发——原先没加锁，撞上「登录引导」或网页版
+      登录检查就是一次莫名失败（「Target page, context or browser has been
+      closed」）。这里取 _browser_lock 且有界等待：拿不到就明确回报「被占用」，
+      不让请求线程干等（登录引导最长持有 5 分钟）。
     """
+    from web_drivers.browser_pool import _browser_lock
+    if not _browser_lock.acquire(timeout=lock_timeout):
+        return False, ("检查失败：浏览器正被其它任务占用（登录引导/任务运行中），"
+                       "请稍后重试")
     try:
         with ZhihuBrowser(headless=headless) as browser:
-            browser.page.goto("https://www.zhihu.com/",
-                              wait_until="domcontentloaded", timeout=30000)
+            browser.page.goto(_ZHIHU_HOME,
+                              wait_until="domcontentloaded", timeout=_NAV_TIMEOUT)
             time.sleep(2.5)
             if page_needs_login(browser.page):
                 return False, "已登出（知乎把会话登出，页面被重定向到登录页）"
             return True, "登录态有效（知乎首页正常打开）"
     except Exception as exc:      # noqa: BLE001
         return False, f"检查失败：{exc}"
+    finally:
+        _browser_lock.release()
+
+
+def _zhihu_token(browser):
+    """当前上下文的知乎凭证 cookie 值（z_c0）；没有则空串。
+
+    比 is_logged_in() 多给一个「值」：登录接口会换发新 token，凭值的变化
+    就能判断「刚刚真的登录过」，而不是只看 cookie 在不在（老代码的坑）。
+    """
+    try:
+        for c in browser.context.cookies(_ZHIHU_HOME):
+            if c.get("name") == "z_c0" and c.get("value"):
+                return c["value"]
+    except Exception:             # noqa: BLE001 页面/上下文已断
+        return ""
+    return ""
+
+
+def _any_page_off_signin(browser):
+    """上下文里是否已有页面离开登录页。
+
+    为什么要看全部页面：用户可能在**新标签页/弹窗**里完成登录（扫码、
+    第三方登录都会另开页），原页面会一直停在 /signin——只盯当前页就会
+    一直等到超时（2026-09-23 用户实测：登完了但窗口不关）。
+    """
+    pages = []
+    try:
+        pages = list(browser.context.pages)
+    except Exception:             # noqa: BLE001
+        pass
+    if not pages:
+        try:
+            pages = [browser.page]
+        except Exception:         # noqa: BLE001
+            return False
+    for p in pages:
+        try:
+            if p.url and not page_needs_login(p):
+                return True
+        except Exception:         # noqa: BLE001 页面已关
+            continue
+    return False
+
+
+def _probe_session_ok(browser, timeout_ms=15000):
+    """会话探测：用共享 cookie 的 HTTP 客户端问一次知乎首页。
+
+    2026-09-23 实测：登录失效时 https://www.zhihu.com/ 直接 302 到
+    /signin；登录有效则 200。用 context.request 探测**不开标签页、不碰
+    用户正在操作的页面**（他可能还在输验证码），所以可以周期性跑。
+    返回 True 只在拿到 200 时——其余（302/异常）一律按「还没登上」处理，
+    下一轮再探，避免又一次假成功。
+    """
+    try:
+        resp = browser.context.request.get(
+            _ZHIHU_HOME, max_redirects=0, timeout=timeout_ms,
+            headers={"User-Agent": _CLEAN_EDGE_UA})
+    except Exception as exc:      # noqa: BLE001 网络抖动：下一轮再试
+        log.debug("登录引导：会话探测失败（忽略）：%s", exc)
+        return False
+    if resp.status == 200:
+        return True
+    if resp.status in (301, 302, 303, 307, 308):
+        loc = resp.headers.get("location", "") or ""
+        if "/signin" in loc:
+            return False
+        log.debug("登录引导：会话探测到重定向 %s（按未登录处理）", loc[:80])
+    return False
+
+
+def zhihu_login_confirmed(browser, token_before="", probe=True):
+    """手动登录是否真的完成。三条判据（都必须先有凭证 cookie z_c0）：
+
+      1. 凭证被换新（与流程开始时的值不同）→ 服务端刚换发会话 = 登录成功；
+      2. 当前页或上下文里任一页面已离开登录页（用户可能在新标签页登录）；
+      3. 会话探测：知乎首页不再 302 到 /signin（probe=False 时跳过）。
+
+    ★ 为什么不是「只看 cookie」也不是「只看页面」（2026-09-23 两次事故）：
+      · 只看 cookie：知乎把会话登出后 z_c0 仍留在 profile 里 → 一进函数就
+        假成功，引导窗口「闪一下就被关闭」，用户永远登不上；
+      · 只看当前页：登录在别的标签页完成、或登录接口换了 token 但页面还没
+        跳转时，会一直判「没登上」，等满 5 分钟也不保存、不关窗。
+    """
+    token = _zhihu_token(browser)
+    if not token:
+        return False              # 没有凭证 cookie：一定没登上
+    if token_before and token != token_before:
+        return True
+    if _any_page_off_signin(browser):
+        return True
+    return bool(probe) and _probe_session_ok(browser)
 
 
 def login_zhihu_flow(timeout=300):
@@ -222,23 +321,51 @@ def login_zhihu_flow(timeout=300):
 
     供 CLI（--login）与 Web 首启引导（/api/setup/zhihu-login）共用。
     返回 (是否成功, 提示信息)。独立实例 + 持 _browser_lock（与
-    login_deepseek_web_flow 同理：不碰共享浏览器、独占 profile）。"""
+    login_deepseek_web_flow 同理：不碰共享浏览器、独占 profile）。
+
+    ★ 2026-09-23 修「弹窗闪一下就被关闭、怎么点都登不上」：原实现先看
+      is_logged_in()（只看 z_c0 cookie）——知乎把会话登出后 z_c0 仍在
+      profile 里，于是一进函数就判定「已登录」，窗口还没画出来就走完
+      with 块 close() 掉。现与 verify_zhihu_login 同一口径：先打开知乎
+      首页看是否被重定向到登录页，确实失效才打开登录页等用户操作；等待
+      期间同样要求「页面已离开登录页」才算成功（否则旧 cookie 会让循环
+      第一轮就假成功）。
+    """
     with _browser_lock:
         with ZhihuBrowser(headless=False) as browser:
-            if browser.is_logged_in():
+            browser.page.goto(_ZHIHU_HOME, wait_until="domcontentloaded",
+                              timeout=_NAV_TIMEOUT)
+            time.sleep(2.5)
+            if not page_needs_login(browser.page):
                 browser.save_storage_state()
                 return True, "已登录，登录态已保存"
+            log.info("知乎登录态已失效（首页被重定向到登录页），"
+                     "打开登录页等待手动登录…")
             browser.page.goto("https://www.zhihu.com/signin",
-                              wait_until="domcontentloaded")
+                              wait_until="domcontentloaded",
+                              timeout=_NAV_TIMEOUT)
+            token_before = _zhihu_token(browser)   # 登出前的旧凭证（用于判换新）
             deadline = time.time() + timeout
+            round_no = 0
             while time.time() < deadline:
                 time.sleep(3)
-                if browser.is_logged_in():
-                    break
-            else:
-                return False, f"超时（{timeout // 60} 分钟）未检测到登录"
-            browser.save_storage_state()
-            return True, "检测到登录成功"
+                round_no += 1
+                # 本地判据（token 换新 / 页面离开登录页）每轮都查；会话探测
+                # 要发一次 HTTP，改成每 4 轮（约 12 秒）一次，别反复打知乎首页
+                if zhihu_login_confirmed(browser, token_before=token_before,
+                                         probe=(round_no % 4 == 0)):
+                    browser.save_storage_state()
+                    return True, "检测到登录成功"
+            # 临门一脚：判失败前再做一次权威探测——用户可能刚好在最后几秒
+            # 登完（2026-09-23 实录：登录窗口 20:56:06 关闭，z_c0 20:56:07
+            # 才落盘，差一两秒就白登一次）
+            if zhihu_login_confirmed(browser, token_before=token_before,
+                                     probe=True):
+                browser.save_storage_state()
+                return True, "检测到登录成功"
+            log.warning("登录引导：等满 %d 分钟仍未判定登录成功（页面 %s）",
+                        timeout // 60, getattr(browser.page, "url", "?"))
+            return False, f"超时（{timeout // 60} 分钟）未检测到登录"
 
 
 def main():

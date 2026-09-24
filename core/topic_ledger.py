@@ -14,6 +14,7 @@ import datetime
 import json
 import logging
 import pathlib
+import re
 
 from core import paths
 
@@ -59,15 +60,23 @@ def load_seen_urls(max_age_days=_MAX_AGE_DAYS):
 def record(url, title="", meta=None):
     """追加一条发布记录；写失败仅告警不抛出（不影响发布结果）。
 
-    meta 可选字段：aid / genre / story_file / session_id（有值才落账），
-    版本号自动注入（core.version.VERSION）——复盘可按版本直接出账。
+    meta 可选字段（有值才落账）：aid / genre / story_file / session_id / source，
+    稿件特征 chars / chapters / mode，题目侧信号 q_score / q_followers /
+    q_answers / q_likes / q_hot；版本号自动注入（core.version.VERSION）。
+
+    为什么要把「稿件特征 + 题目信号」也记进来（2026-09-23 复盘补）：
+    复盘要回答的是「内容不行」还是「题目本来就没人看」，而题目侧的流量信号
+    （关注数/回答数/卡片评分/飙升标记）只在选题那一刻拿得到——发布时不落账，
+    事后就只能靠题型粗分（本期实测题型之间差 13 倍，但同题型内仍分不清）。
     """
     if not url:
         return
     rec = {"url": url, "title": title,
            "date": datetime.date.today().isoformat()}
     if meta:
-        for key in ("aid", "genre", "story_file", "session_id", "source"):
+        for key in ("aid", "genre", "story_file", "session_id", "source",
+                    "chars", "chapters", "mode",
+                    "q_score", "q_followers", "q_answers", "q_likes", "q_hot"):
             val = meta.get(key)
             if val:
                 rec[key] = str(val)
@@ -83,6 +92,25 @@ def record(url, title="", meta=None):
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
         log.warning("已发布台账写入失败（不影响本次发布）", exc_info=True)
+
+
+_CHAPTER_RE = re.compile(r"^\s*(?:#{1,4}\s*)?\*{0,2}\s*\d{1,2}\s*\*{0,2}\s*$",
+                         re.M)
+
+
+def story_meta(story_text, mode=""):
+    """稿件特征（复盘用）：字数 / 章节数 / 模式。
+
+    2026-09-23 复盘发现「篇幅中位」随版本从 5606 字掉到 2960 字，而这条曲线
+    当时只能事后重读 output/*.md 反推（还得先猜稿件归属）。发布时顺手记一笔，
+    下次复盘直接出数——章节数两种写法都认（`## **1**` 与裸数字行）。
+    """
+    text = story_text or ""
+    meta = {"chars": len(re.sub(r"\s+", "", text)),
+            "chapters": len(_CHAPTER_RE.findall(text))}
+    if mode:
+        meta["mode"] = mode
+    return meta
 
 
 def record_answered_elsewhere(url, title=""):

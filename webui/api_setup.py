@@ -47,12 +47,33 @@ def _setup_version():
     return VERSION
 
 
+def _browser_lock_free():
+    """独占 profile 的浏览器锁当前是否空闲（非阻塞探测）。
+
+    为什么必须探这一下（2026-09-23 修）：登录引导会把 _browser_lock 持满整个
+    等待窗口（最长 5 分钟）。setup/status 若照旧去发起真实检测，就会一直阻塞
+    在锁上——前端每 2.5~3 秒轮询一次，很快把 FastAPI 线程池占满，整个控制台
+    （包括「登录完成没有」的那个轮询）一起卡死。锁被占时不做真实检测：沿用
+    上次结果（没有就按未登录，此时界面本来就在引导登录），并且**不写缓存**，
+    等对方放手后下一轮再实测。
+    """
+    try:
+        from web_drivers.browser_pool import _browser_lock
+    except Exception:             # noqa: BLE001 理论上不会发生
+        return True
+    if not _browser_lock.acquire(blocking=False):
+        return False
+    _browser_lock.release()
+    return True
+
+
 def _web_llm_logged_in_cached(driver=None):
     """带缓存的登录态检测（按 driver 区分缓存；默认当前驱动）。
 
     driver: 指定目标驱动名（切换网页版大模型时预检用，避免用旧驱动的
     缓存结果）。加锁去重：真实检测（独立浏览器，约 5s）进行中时，
     前端 setup/status 每 2.5s 的并发轮询不再各自排队启动浏览器。
+    浏览器被登录引导独占时不做检测、也不写缓存（见 _browser_lock_free）。
     """
     from config import WEB_DRIVER_NAME
     key = driver or WEB_DRIVER_NAME
@@ -61,6 +82,9 @@ def _web_llm_logged_in_cached(driver=None):
         now = time.time()
         if entry and now - entry["ts"] < _WEB_LLM_CACHE_TTL:
             return entry["ok"]
+        if not _browser_lock_free():
+            # 登录引导/任务正独占 profile：直接返回（绝不排队等锁）
+            return entry["ok"] if entry else False
         ok = _web_llm_logged_in_for(key)
         _web_llm_cache[key] = {"ts": now, "ok": ok}
         return ok
@@ -186,6 +210,12 @@ def _start_login_thread(kind, flow_call, log_name):
                 with _web_llm_cache_lock:
                     _web_llm_cache.clear()
                 runner.guide_needed = None  # 登录完成：引导标记解除
+            if ok and kind == "zhihu":
+                # 登录成功即清「登录态已失效」标记：不清的话设置页/首启引导
+                # 仍挂着红色警示，用户会以为白登了（这一步只去掉陈旧提示，
+                # 前端随后照旧用 zhihu-check 实测确认）
+                from webui.browser_tasks import clear_zhihu_login_stale
+                clear_zhihu_login_stale()
             if not ok:
                 _login_error = msg
         except Exception as exc:
