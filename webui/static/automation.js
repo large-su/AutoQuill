@@ -13,6 +13,35 @@ let autoData = null;
 let autoTimer = null;
 let autoSaveTimer = null;
 
+/* ── 表单编辑保护（2026-09-25 修：用户实测「每日 N 篇」改几遍都弹回旧值）────
+   事故链：面板每 4 秒轮询一次状态并**整块重建**配置表单（box.innerHTML=…），
+   于是 ① 正在输入的框被销毁重建 → 刚敲的数字被清掉、焦点也丢了；
+   ② 保存只挂在 change（失焦）上，被清掉的编辑连一次保存都触发不了；
+   ③ 重建后用旧值回写服务器 → 服务端也变成旧值，看起来就是「自动改回默认」。
+   现在：有未保存编辑、或焦点还在表单里时，轮询只更新数据、**不重建表单**；
+   焦点离开（或保存成功）后再补一次渲染。 */
+let autoDirty = false;          // 有未保存的编辑
+let autoPendingRender = false;  // 被保护期间攒下的「该重建」信号
+let autoSaveRetry = 0;          // 保存失败重试次数（有界，避免死循环）
+
+const AUTO_PLAN_INPUT_IDS = ["autoWinStart", "autoWinEnd", "autoMinGap",
+                             "autoGapRatio", "autoJitter", "autoCatchUp",
+                             "autoPauseBusy"];
+
+function autoFormBusy() {
+  const el = document.activeElement;
+  const box = $("autoTaskConfig");
+  const inTasks = !!(box && el && box.contains(el));
+  const inPlan = !!(el && el.id && AUTO_PLAN_INPUT_IDS.indexOf(el.id) >= 0);
+  return autoDirty || inTasks || inPlan;
+}
+
+function flushAutoRender() {
+  if (autoFormBusy() || !autoPendingRender) return;
+  autoPendingRender = false;
+  renderAutoTaskConfig();
+}
+
 const AUTO_STATUS_TEXT = {
   planned: "待执行", running: "执行中", done: "已完成",
   failed: "失败", skipped: "已跳过", needs_human: "需要人工",
@@ -260,6 +289,10 @@ function renderAutoNotices() {
 function renderAutoTaskConfig() {
   const box = $("autoTaskConfig");
   if (!box) return;
+  if (autoFormBusy()) {          // 用户正在改配置：不重建表单（见文件头说明）
+    autoPendingRender = true;
+    return;
+  }
   const st = autoData || {};
   const plan = st.plan || {};
   const per = ((st.summary || {}).per_type || {});
@@ -312,7 +345,13 @@ function renderAutoTaskConfig() {
   if ($("autoCatchUp")) $("autoCatchUp").value = plan.catch_up || "same_day";
   if ($("autoPauseBusy")) $("autoPauseBusy").checked = plan.pause_when_user_busy !== false;
   box.querySelectorAll("input,select").forEach(function (el) {
+    // input = 边打边存（500ms 防抖）；change = 失焦/回车兜底
+    el.addEventListener("input", queueAutoSave);
     el.addEventListener("change", queueAutoSave);
+  });
+  box.addEventListener("focusout", function () {
+    // 等防抖保存落地（500ms）再放行重建，避免用旧值回写
+    setTimeout(flushAutoRender, 700);
   });
 }
 
@@ -337,8 +376,16 @@ function collectAutoPlan() {
     const gap = el.querySelector("[data-role=gap]");
     const mode = el.querySelector("[data-role=mode]");
     if (en) cfg.enabled = en.checked;
-    if (cap) cfg.daily_cap = parseInt(cap.value, 10) || 0;
-    if (gap) cfg.min_gap_minutes = parseInt(gap.value, 10) || 60;
+    // 空/非法一律**保留原值**：边打边存时用户可能正处在「清空重打」的中间态，
+    // 用 `|| 0` 会把配额瞬间写成 0（任务直接不排班），也是「改几遍都变回去」的帮凶
+    if (cap) {
+      const v = parseInt(cap.value, 10);
+      cfg.daily_cap = isNaN(v) ? (parseInt(cfg.daily_cap, 10) || 0) : v;
+    }
+    if (gap) {
+      const v = parseInt(gap.value, 10);
+      cfg.min_gap_minutes = isNaN(v) ? (parseInt(cfg.min_gap_minutes, 10) || 60) : v;
+    }
     if (mode) { cfg.params = cfg.params || {}; cfg.params.mode = mode.value; }
     plan.tasks[t] = cfg;
   });
@@ -346,6 +393,7 @@ function collectAutoPlan() {
 }
 
 function queueAutoSave() {
+  autoDirty = true;              // 未保存期间禁止重建表单
   if (autoSaveTimer) clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(saveAutoPlan, 500);
 }
@@ -360,9 +408,18 @@ async function saveAutoPlan() {
     const d = await r.json();
     if (d && d.status) {
       autoData = d.status;
+      autoDirty = false;           // 服务端已确认 → 解除保护
+      autoSaveRetry = 0;
       renderAutoState(); renderAutoProgress(); renderAutoTimeline();
+      setTimeout(flushAutoRender, 0);
     }
-  } catch (e) { /* 忽略：下次轮询会刷新 */ }
+  } catch (e) {
+    // 保存失败：保留 dirty（不把用户刚输入的值冲掉），有界重试
+    if (autoSaveRetry < 3) {
+      autoSaveRetry += 1;
+      setTimeout(function () { if (autoDirty) queueAutoSave(); }, 2000);
+    }
+  }
 }
 
 async function autoPost(path, body) {
@@ -392,10 +449,12 @@ function initAutomationPanel() {
     autoPost("/api/automation/run-now", { type: "publish_drafts", dry_run: true });
   });
   $("autoRefreshBtn").addEventListener("click", loadAutomation);
-  ["autoWinStart", "autoWinEnd", "autoMinGap", "autoGapRatio", "autoJitter",
-   "autoCatchUp", "autoPauseBusy"].forEach(function (id) {
+  AUTO_PLAN_INPUT_IDS.forEach(function (id) {
     const el = $(id);
-    if (el) el.addEventListener("change", queueAutoSave);
+    if (!el) return;
+    el.addEventListener("input", queueAutoSave);
+    el.addEventListener("change", queueAutoSave);
+    el.addEventListener("blur", function () { setTimeout(flushAutoRender, 700); });
   });
 }
 

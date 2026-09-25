@@ -164,9 +164,65 @@ def test_frontend(port):
                 "refresh": {"status": "idle"}}
             STORIES = {"stories": [{"name": "story_1_20260823.md", "size": 5120}]}
 
+            # 自动化面板：**整块 mock**——真实 plan.json 属于用户数据，
+            # 测试绝不能写它（这也是这条用例必须 mock 而不是打真服务的原因）。
+            AUTO_STATE = {"cap": 3, "posted": []}
+
+            def _auto_task(label, unit, lane, desc, mode=None):
+                t = {"label": label, "unit": unit, "lane": lane, "implemented": True,
+                     "enabled": True, "cap": AUTO_STATE["cap"],
+                     "window": {"start": "08:00", "end": "23:30"},
+                     "min_gap_minutes": 60, "window_minutes": 930, "max_per_day": 16,
+                     "done": 0, "pending": 3, "failed": 0, "skipped": 0, "desc": desc}
+                return t
+
+            def _auto_status():
+                tasks = {}
+                for t in ("publish_drafts", "full_chain"):
+                    tasks[t] = {"enabled": True, "daily_cap": AUTO_STATE["cap"],
+                                "min_gap_minutes": None, "window": None,
+                                "params": ({"mode": "single", "rounds": 1}
+                                           if t == "full_chain" else
+                                           {"order": "oldest_first", "source": "all"})}
+                return {
+                    "now": "2026-09-25T10:00:00", "enabled": False, "paused": False,
+                    "pause_reason": "", "running": None, "progress": None,
+                    "plan": {"enabled": False,
+                             "window": {"start": "08:00", "end": "23:30"},
+                             "jitter_minutes": 8, "min_gap_minutes": 60,
+                             "gap_jitter_ratio": 0.6, "catch_up": "same_day",
+                             "pause_when_user_busy": True, "tasks": tasks},
+                    "summary": {"day": "2026-09-25", "in_window": True,
+                                "window_label": "08:00–23:30", "done_total": 0,
+                                "plan_total": 6, "rescheduled": 0, "next_job": None,
+                                "per_type": {
+                                    "publish_drafts": _auto_task(
+                                        "发布草稿", "篇", 0, "从草稿箱按「从旧到新」逐篇发布"),
+                                    "full_chain": _auto_task(
+                                        "全链路撰写", "篇", 1,
+                                        "选题 → 提取 → 生成 → 校验 → 写入草稿箱")}},
+                    "schedule": [], "counters": {}, "ledger": [], "notices": [],
+                    "fails": {}, "browser_busy": [], "notes": []}
+
             def route(route):
                 u = route.request.url
-                if "/api/dashboard" in u and "refresh" not in u and "status" not in u:
+                # 自动化：plan 保存 / 状态轮询都走 mock（顺序：先 plan 后状态）
+                if "/api/automation/plan" in u:
+                    posted = (json.loads(route.request.post_data or "{}")
+                              .get("plan") or {})
+                    AUTO_STATE["posted"].append(posted)
+                    cap = ((posted.get("tasks") or {}).get("publish_drafts")
+                           or {}).get("daily_cap")
+                    if isinstance(cap, int):
+                        AUTO_STATE["cap"] = cap      # 模拟服务端保存成功
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps({"ok": True, "plan": posted,
+                                                   "status": _auto_status()},
+                                                  ensure_ascii=False))
+                elif "/api/automation" in u:
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps(_auto_status(), ensure_ascii=False))
+                elif "/api/dashboard" in u and "refresh" not in u and "status" not in u:
                     route.fulfill(status=200, content_type="application/json",
                                   body=json.dumps(DASH, ensure_ascii=False))
                 elif "/api/drafts" in u and "delete" not in u and "status" not in u:
@@ -261,8 +317,9 @@ def test_frontend(port):
             # 自动化模块：只验证渲染与接线（不点「开始」，避免测试里真跑任务）
             pg.select_option("#leftModeSel", "automation")
             pg.wait_for_timeout(1200)
+            # 任务类型只有两项（2026-09-24 收窄：打卡/互动取消）
             check("自动化时间轴泳道",
-                  pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-lane').length") == 5)
+                  pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-lane').length") == 2)
             check("自动化刻度与图例",
                   pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-ticks span').length") == 13
                   and pg.evaluate("() => document.querySelectorAll('#autoTimeline .tl-legend span').length") >= 6)
@@ -281,6 +338,22 @@ def test_frontend(port):
                               + " }"))
             check("自动化进度卡",
                   pg.evaluate("() => document.querySelectorAll('#autoProgress .auto-pcard').length") >= 2)
+            # ★ 回归（2026-09-25 用户实测）：改「每日 N 篇」不能被 4 秒轮询冲掉。
+            # 旧实现每 4 秒把配置表单整块重建 → 输入被清空、焦点丢失，而且只有
+            # change（失焦）才保存 → 被清掉的编辑连一次保存都触发不了。
+            _cap_sel = ("#autoTaskConfig .auto-task[data-type=publish_drafts]"
+                        " input[data-role=cap]")
+            pg.click(_cap_sel)
+            pg.keyboard.press("Control+A")
+            pg.keyboard.type("7")            # 真实逐键输入，复现用户操作
+            pg.wait_for_timeout(5200)        # 跨过至少一次轮询 + 防抖保存
+            _cap_now = pg.input_value(_cap_sel)
+            check("配额输入不被轮询冲掉", _cap_now == "7", "输入框现值=%r" % _cap_now)
+            _posted = AUTO_STATE["posted"][-1] if AUTO_STATE["posted"] else {}
+            _posted_cap = (((_posted.get("tasks") or {}).get("publish_drafts")
+                            or {}).get("daily_cap"))
+            check("配额已保存到服务端", _posted_cap == 7,
+                  "服务端收到 daily_cap=%r" % _posted_cap)
 
             pg.select_option("#leftModeSel", "workspace")
             pg.wait_for_timeout(300)
