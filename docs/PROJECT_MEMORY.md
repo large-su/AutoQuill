@@ -207,6 +207,18 @@ v4.6.0（草稿箱修复轮）：草稿箱 qid 正则语法修复 + 适配知乎
     两篇爆款第 3 天只有 674/296 阅读，那时计入会把好题材判死（且会自我强化）
   · 篇幅与命名：story_prompt 的「不少于 4000 字、鼓励 5000-7000、每节不设上限」+
     命名规则从硬性降为建议（改回旧口径就改这两处文案）
+- **浏览器 profile 独占租约（2026-09-26，登录态稳定性事故后补的铁律）**：
+  同一个 user-data-dir 同一时刻**只允许一个** Chromium 实例。实现：
+  `web_drivers/browser_pool` 的 `acquire_profile/release_profile/profile_in_use`
+  —— `ZhihuBrowser.start()` 拿租约（任务 90s、登录引导 120s 有界等待）、`close()` 释放；
+  拿不到就**排队等**（任务/登录引导）或**立刻回报「暂缓」**（只读检查），
+  **绝不并发、绝不去杀别人**。配套三条：① `_kill_stale_profile_processes` 只在
+  `live_browsers()==0`（进程内没有活着的实例）时才清理——否则它会把正在干活的浏览器
+  一起 taskkill，cookie 来不及落盘 = 会话 cookie 丢失 = 知乎判定登出，这正是
+  「隔天/重启就要重登」的真因；② 启动失败路径**必须 stop() Playwright 驱动**，
+  否则该线程留下一个跑着的事件循环，之后所有检查都报「inside the asyncio loop」；
+  ③ 「忙」不等于「未登录」：`verify_zhihu_login` 忙时返回 `None`（未判定）、
+  接口回 `status=busy`，不许据此标失效。回归见 tests/test_profile_lease.py
 - **效果复盘的两个入口（2026-09-23 新增，建议每周跑一次）**：
   · 生成侧（过程）：`python tools/version_feedback_report.py --write` → 每版生成量/合规/重试/废稿；
   · 结果侧（读者买不买账）：`python tools/published_review.py --days 60 --write` → 版本×题型×榜单，
