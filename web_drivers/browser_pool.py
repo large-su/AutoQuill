@@ -82,6 +82,69 @@ def safe_evaluate(page, js, *args, timeout=EVAL_TIMEOUT):
 
 _shared_browser = None
 _browser_lock = threading.Lock()  # 懒启动串行化：并发 get_browser 不再互抢 profile
+
+
+# ── profile 生命周期租约（2026-09-26 修「登录态隔天失效 / 登录窗口打不开」）──
+# 事故链（安装版真机日志实证）：自动化常驻后，同一个 user-data-dir 会被多个
+# Chromium 实例同时使用（共享任务浏览器 + 网页版登录检查 + 知乎登录态检查 +
+# 登录引导 + 看板/草稿箱）——第二个实例必然以 exitCode=21「profile in use」
+# 失败；而失败路径的「清理残留进程」会 taskkill 掉**正在干活**的浏览器，于是
+# 互相残杀：任务中断、cookie 来不及落盘（会话 cookie 丢失 → 知乎判定登出）、
+# 线程里泄漏的 Playwright 驱动还会让之后所有检查都报「inside the asyncio loop」。
+# 现在：谁 start() 谁持有租约，直到 close() 才释放——其它实例要么排队等，
+# 要么立刻返回「忙」，绝不并发、绝不互杀。
+_profile_lease = threading.Lock()
+_live_instances = 0                 # 进程内活着的浏览器实例数（清理残留时据此自保）
+_live_lock = threading.Lock()
+
+
+class ProfileBusy(RuntimeError):
+    """浏览器 profile 正被其它实例独占（拿不到生命周期租约）。"""
+
+
+def acquire_profile(timeout=0.0, purpose=""):
+    """申请 profile 独占租约；timeout 秒内拿不到返回 False（不阻塞调用方）。"""
+    try:
+        got = _profile_lease.acquire(timeout=max(0.0, float(timeout or 0.0)))
+    except Exception:              # noqa: BLE001 参数异常不该炸流程
+        return False
+    if got and purpose:
+        log.debug("profile 租约已获取：%s", purpose)
+    return bool(got)
+
+
+def release_profile():
+    """释放租约（幂等：没持有也安全）。"""
+    try:
+        _profile_lease.release()
+    except RuntimeError:
+        pass
+
+
+def profile_in_use():
+    """profile 是否被某个浏览器实例占着（只读检查，用于"忙就跳过"）。"""
+    try:
+        return _profile_lease.locked()
+    except Exception:              # noqa: BLE001
+        return False
+
+
+def note_browser_opened():
+    global _live_instances
+    with _live_lock:
+        _live_instances += 1
+
+
+def note_browser_closed():
+    global _live_instances
+    with _live_lock:
+        _live_instances = max(0, _live_instances - 1)
+
+
+def live_browsers():
+    """进程内还活着的浏览器实例数（>0 = 绝不能去杀 profile 相关进程）。"""
+    with _live_lock:
+        return _live_instances
 _factory = None
 
 
@@ -127,8 +190,14 @@ def get_browser():
 
 
 def close_shared_browser():
+    """关闭共享浏览器。
+
+    ★ 关闭动作放在 launch 锁**外面**（2026-09-26）：close() 会释放 profile
+    生命周期租约，而 get_browser() 是「先拿 launch 锁、再拿租约」——如果这里
+    在锁内关闭，就形成「锁→租约 / 租约→锁」的反向顺序，两边互等。
+    """
     global _shared_browser
     with _browser_lock:
-        if _shared_browser is not None:
-            _shared_browser.close()
-            _shared_browser = None
+        browser, _shared_browser = _shared_browser, None
+    if browser is not None:
+        browser.close()

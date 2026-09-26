@@ -67,10 +67,14 @@ class ZhihuBrowser(SessionMixin, DomReadMixin, WriteActionsMixin):
     """知乎 DOM 浏览器通道。启动独立 Edge 实例，复用持久化登录态。"""
 
     def __init__(self, user_data_dir=USER_DATA_DIR,
-                 storage_state=STORAGE_STATE_PATH, headless=False):
+                 storage_state=STORAGE_STATE_PATH, headless=False,
+                 lease_timeout=None):
         self.user_data_dir = user_data_dir
         self.storage_state = storage_state
         self.headless = headless
+        if lease_timeout is not None:
+            # profile 生命周期租约的等待上限（登录引导给大值：等任务收尾）
+            self.lease_timeout = float(lease_timeout)
         self.context = None
         self.page = None
 
@@ -152,6 +156,7 @@ class ZhihuBrowser(SessionMixin, DomReadMixin, WriteActionsMixin):
 
 from web_drivers.browser_pool import (
     WorkflowCancelled,
+    ProfileBusy,
     set_cancel_hook,
     _check_cancel,
     _browser_lock,
@@ -160,6 +165,8 @@ from web_drivers.browser_pool import (
     safe_evaluate,
     register_browser_factory,
     create_browser,
+    profile_in_use,       # 2026-09-26：profile 生命周期租约（并发保护）
+    live_browsers,
 )
 
 
@@ -195,6 +202,11 @@ class ZhihuLoginRequired(RuntimeError):
 # 这里由上面的兼容门面 re-export，历史调用方/测试的导入路径不变。
 
 
+# 登录引导等待 profile 空出来的上限（秒）：自动化任务通常 1~3 分钟结束，
+# 等不到就明确报「有任务在跑」，而不是硬闯（硬闯必然 exitCode=21 失败）。
+_LOGIN_WAIT_SECONDS = 240
+
+
 def verify_zhihu_login(headless=True, lock_timeout=8):
     """真实检查知乎登录态：打开知乎首页，看是否被重定向到登录页。
 
@@ -208,10 +220,13 @@ def verify_zhihu_login(headless=True, lock_timeout=8):
       closed」）。这里取 _browser_lock 且有界等待：拿不到就明确回报「被占用」，
       不让请求线程干等（登录引导最长持有 5 分钟）。
     """
-    from web_drivers.browser_pool import _browser_lock
+    if profile_in_use() or live_browsers() > 0:
+        # 有浏览器在跑：**不做真实检测**——那会起第二个实例，必然 exitCode=21
+        # 失败并触发「清理残留」互杀（2026-09-26 事故）。返回 None = 「这次没
+        # 判定」，调用方不得据此把登录态标成失效。
+        return None, "检查暂缓：浏览器正被任务占用，等任务结束（或先点「停止」）再查"
     if not _browser_lock.acquire(timeout=lock_timeout):
-        return False, ("检查失败：浏览器正被其它任务占用（登录引导/任务运行中），"
-                       "请稍后重试")
+        return None, "检查暂缓：浏览器正被其它操作占用，请稍后重试"
     try:
         with ZhihuBrowser(headless=headless) as browser:
             browser.page.goto(_ZHIHU_HOME,
@@ -220,6 +235,8 @@ def verify_zhihu_login(headless=True, lock_timeout=8):
             if page_needs_login(browser.page):
                 return False, "已登出（知乎把会话登出，页面被重定向到登录页）"
             return True, "登录态有效（知乎首页正常打开）"
+    except ProfileBusy as exc:
+        return None, f"检查暂缓：{exc}"
     except Exception as exc:      # noqa: BLE001
         return False, f"检查失败：{exc}"
     finally:
@@ -331,8 +348,19 @@ def login_zhihu_flow(timeout=300):
       期间同样要求「页面已离开登录页」才算成功（否则旧 cookie 会让循环
       第一轮就假成功）。
     """
+    # ★ 2026-09-26：先等 profile 空出来再开窗口（任务/检查用的浏览器关掉后
+    # 租约才释放）。这一步**不能持 _browser_lock**：任务收尾要靠那把锁去
+    # close_shared_browser，互相等会死锁。
+    waited = 0
+    while profile_in_use() and waited < _LOGIN_WAIT_SECONDS:
+        if waited == 0:
+            log.info("登录引导：浏览器正被任务占用，等它结束再开登录窗口"
+                     "（最多等 %d 秒）…", _LOGIN_WAIT_SECONDS)
+        time.sleep(2)
+        waited += 2
     with _browser_lock:
-        with ZhihuBrowser(headless=False) as browser:
+        browser = ZhihuBrowser(headless=False, lease_timeout=120)
+        with browser:
             browser.page.goto(_ZHIHU_HOME, wait_until="domcontentloaded",
                               timeout=_NAV_TIMEOUT)
             time.sleep(2.5)

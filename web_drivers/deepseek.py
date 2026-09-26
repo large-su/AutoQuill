@@ -657,7 +657,16 @@ def web_llm_logged_in():
     Chromium 单例锁禁止同目录并发——串行化后登录引导不再被此
     检查挤掉（线上：Target page, context or browser has been closed）。
     返回 True/False；浏览器无法启动等异常返回 False（不阻塞引导）。"""
-    from web_drivers.browser_pool import _browser_lock, create_browser
+    from web_drivers.browser_pool import (
+        _browser_lock, create_browser, live_browsers, profile_in_use,
+    )
+    if profile_in_use() or live_browsers() > 0:
+        # ★ 2026-09-26：有浏览器在跑（任务/登录引导/抓取）就**不发起检测**。
+        # 第二个实例必然 exitCode=21 失败，而失败路径的「清理残留进程」会
+        # 把正在干活的浏览器杀掉（安装版真机事故）。这里按「已登录」回报：
+        # 把一次检测跳过误报成「未登录」会直接挡住用户的任务。
+        log.debug("网页版登录态检查跳过（浏览器正被占用）")
+        return True
     try:
         with _browser_lock:
             with create_browser(headless=True) as browser:
@@ -700,7 +709,18 @@ def login_deepseek_web_flow(timeout=300):
         复用会触发 Playwright「cannot switch to a different thread」
         （线上：登录线程退出后再次点击登录即报错）
       - 锁内独占持久化 profile，避免与其他浏览器实例并发互杀"""
-    from web_drivers.browser_pool import _browser_lock, create_browser
+    from web_drivers.browser_pool import (
+        _browser_lock, create_browser, profile_in_use,
+    )
+    # ★ 2026-09-26：先等 profile 空出来（任务用的浏览器关掉才释放租约）；
+    # 这一步不持 launch 锁——任务收尾要靠那把锁关共享浏览器，互相等会死锁。
+    waited = 0
+    while profile_in_use() and waited < 240:
+        if waited == 0:
+            log.info("登录引导：浏览器正被任务占用，等它结束再开登录窗口"
+                     "（最多等 240 秒）…")
+        time.sleep(2)
+        waited += 2
     try:
         with _browser_lock:
             with create_browser(headless=False) as browser:

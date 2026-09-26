@@ -58,9 +58,16 @@ def _browser_lock_free():
     等对方放手后下一轮再实测。
     """
     try:
-        from web_drivers.browser_pool import _browser_lock
+        from web_drivers.browser_pool import (
+            _browser_lock, live_browsers, profile_in_use,
+        )
     except Exception:             # noqa: BLE001 理论上不会发生
         return True
+    # ★ 2026-09-26：有浏览器活着（共享任务浏览器 / 登录引导 / 抓取）也算忙——
+    # 这时再起一个实例必然 exitCode=21 失败，旧代码还会触发「清理残留进程」
+    # 把正在干活的浏览器杀掉。忙就只回报缓存值、不发起检测。
+    if profile_in_use() or live_browsers() > 0:
+        return False
     if not _browser_lock.acquire(blocking=False):
         return False
     _browser_lock.release()
@@ -219,8 +226,16 @@ def _start_login_thread(kind, flow_call, log_name):
             if not ok:
                 _login_error = msg
         except Exception as exc:
-            _login_error = str(exc)
-            log.error("首启引导：%s异常：%s", log_name, exc, exc_info=True)
+            # profile 被占（有任务在跑/另一个实例在开）时说人话，别把
+            # Playwright 的英文栈丢给用户（2026-09-26：这是「重新登录打不开
+            # 窗口」最常见的原因）
+            from web_drivers.browser_pool import ProfileBusy
+            if isinstance(exc, ProfileBusy):
+                _login_error = str(exc)
+                log.warning("首启引导：%s未开始（%s）", log_name, exc)
+            else:
+                _login_error = str(exc)
+                log.error("首启引导：%s异常：%s", log_name, exc, exc_info=True)
 
     _login_thread = threading.Thread(target=_run, daemon=True)
     _login_thread.start()
@@ -242,6 +257,11 @@ def api_setup_zhihu_check():
                 "message": "「" + busy[0] + "」任务进行中，请完成后再检查登录状态"}
     from applications.zhihu_story.browser_adapter import verify_zhihu_login
     logged_in, detail = verify_zhihu_login(headless=True)
+    if logged_in is None:
+        # 有任务在跑 → 这次没判定（浏览器被独占，硬查会起第二个实例互相残杀）。
+        # 只回报「暂缓」，**绝不**据此把登录态标成失效（2026-09-26 修）。
+        log.info("知乎登录态检查：暂缓（%s）", detail)
+        return {"ok": False, "status": "busy", "message": detail}
     if logged_in:
         clear_zhihu_login_stale()
     else:

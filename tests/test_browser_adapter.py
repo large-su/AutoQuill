@@ -633,9 +633,9 @@ class TestLoginFlows(unittest.TestCase):
 
     def test_zhihu_login_uses_dedicated_visible_browser(self):
         src = self._src("login_zhihu_flow")
-        self.assertIn("ZhihuBrowser(headless=False)", src)
-        self.assertIn("_browser_lock", src)
-        self.assertNotIn("get_browser(", src)
+        self.assertIn("ZhihuBrowser(headless=False", src)   # 可见实例
+        self.assertIn("_browser_lock", src)                 # 独占 profile
+        self.assertNotIn("get_browser(", src)               # 不碰共享实例
 
 
 class _LoginFakeResponse:

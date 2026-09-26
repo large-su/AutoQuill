@@ -34,8 +34,26 @@ def _kill_stale_profile_processes(user_data_dir):
     \"Target page, context or browser has been closed\" 退出，
     并让 Web 通道预检误报「未登录 DeepSeek」。
     只按命令行里的本 profile 路径匹配，绝不碰用户日常浏览器。
+
+    ★★ 2026-09-26 修「互相残杀」（安装版真机事故）：本函数按命令行匹配，
+    会连**我们自己正在干活的浏览器**一起 taskkill。自动化常驻后浏览器启动
+    频繁（任务 + 网页版登录检查 + 知乎登录态检查 + 登录引导），于是每次新
+    启动都杀一遍正在跑的实例——任务被打断、cookie 来不及落盘（会话 cookie
+    丢失 = 知乎判定登出），还会形成「越杀越起不来」的死循环。
+    现在：进程内还有活着的实例（live_browsers() > 0）就直接返回，
+    只在确认「没有自己人」时才清理真正的残留。
     """
     if not user_data_dir or os.name != "nt":
+        return
+    try:
+        from web_drivers.browser_pool import live_browsers
+        alive = live_browsers()
+        if alive > 0:
+            # 自己人还活着：所谓「残留」就是正在工作的浏览器，绝不强杀
+            log.debug("跳过残留进程清理（进程内有 %d 个活着的浏览器实例）",
+                      alive)
+            return
+    except Exception:              # noqa: BLE001 拿不到计数就不清理（更安全）
         return
     script = (
         "Get-CimInstance Win32_Process | "
@@ -59,10 +77,35 @@ def _kill_stale_profile_processes(user_data_dir):
 
 class SessionMixin:
 
+    # profile 生命周期租约的等待上限（秒）：单个浏览器实例独占 profile，
+    # 拿不到就等——任务默认 90s（够一个任务收尾），登录引导会调大（见 240s）。
+    lease_timeout = 90.0
+
     def start(self):
         """启动持久化上下文，若存在已保存的登录态则自动恢复。
         （持久化 profile 本身也保留 cookie，这里双保险——
-        无状态文件时保持全新会话，供首次手动登录。）"""
+        无状态文件时保持全新会话，供首次手动登录。）
+
+        ★ 2026-09-26：启动前先申请 profile 生命周期租约（close 时释放）。
+        同一 user-data-dir 并发起两个 Chromium 必然第二个 exitCode=21 失败，
+        旧代码还会在失败路径 taskkill 掉正在干活的浏览器——「登录态隔天失效」
+        与「重新登录打不开窗口」都源于此。
+        """
+        from web_drivers.browser_pool import acquire_profile
+        if not acquire_profile(self.lease_timeout, purpose="ZhihuBrowser"):
+            from web_drivers.browser_pool import ProfileBusy
+            raise ProfileBusy(
+                "浏览器正被其它任务占用（同一 profile 只能开一个实例）；"
+                "若正在跑任务或登录引导，请等它结束再试。")
+        self._lease_held = True
+        try:
+            return self._start_locked()
+        except Exception:
+            self._release_lease()
+            raise
+
+    def _start_locked(self):
+        """真正拉起浏览器（调用方已持有 profile 租约）。"""
         from playwright.sync_api import sync_playwright
         t0 = time.time()
         log.info("browser_adapter: 启动浏览器…（Playwright 驱动）")
@@ -107,8 +150,13 @@ class SessionMixin:
                     _kill_stale_profile_processes(self.user_data_dir)
                     time.sleep(2.5)
         else:
-            # 全部失败：丢弃半初始化驱动，避免残留进程占住 profile 锁
-            self._pw = None
+            # 全部失败：★ 必须停掉 Playwright 驱动（2026-09-26 修）——
+            # sync_playwright().start() 会在**当前线程**里跑一个事件循环
+            # （greenlet 泵），不 stop 就泄漏；该线程之后任何 sync_playwright()
+            # 都会报「It looks like you are using Playwright Sync API inside
+            # the asyncio loop」，把 FastAPI 线程池的 worker 一个个毒化——
+            # 线上表现就是「登录态检查」接连报这个莫名其妙的错。
+            self._stop_driver()
             if last_exc and "browser has been closed" in str(last_exc):
                 log.error(
                     "浏览器 3 次启动失败：很可能是有残留 msedge.exe 占用"
@@ -118,27 +166,55 @@ class SessionMixin:
             raise last_exc
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.load_storage_state()
+        from web_drivers.browser_pool import note_browser_opened
+        note_browser_opened()          # 活实例 +1：清理残留进程时据此自保
         log.info("browser_adapter: 浏览器就绪（共 %.1fs）", time.time() - t0)
         return self
 
+    def _stop_driver(self):
+        """停掉 Playwright 驱动（幂等）：失败路径与 close 共用。"""
+        pw, self._pw = getattr(self, "_pw", None), None
+        stop = getattr(pw, "stop", None)
+        if stop:
+            try:
+                stop()
+            except Exception:          # noqa: BLE001
+                pass
+
+    def _release_lease(self):
+        """释放 profile 租约（幂等）。"""
+        if not getattr(self, "_lease_held", False):
+            return
+        self._lease_held = False
+        from web_drivers.browser_pool import (
+            note_browser_closed, release_profile,
+        )
+        release_profile()
+        note_browser_closed()
+
     def close(self):
+        """关闭浏览器：先落登录态、再关上下文与驱动、最后释放 profile 租约。
+
+        ★ 2026-09-26：关之前若仍是登录态，就把 cookie 快照写回
+        browser_state.json——这样即使 profile 里的**会话 cookie**（SESSIONID
+        这类，桌面浏览器被杀时容易丢）真丢了，下次启动也能从快照补回来
+        （load_storage_state 只补缺不覆盖）。这是「登录一次能长期用」的兜底。
+        """
         if self.context:
+            try:
+                if self.is_logged_in():
+                    self.save_storage_state()
+            except Exception:          # noqa: BLE001 存快照失败不影响关闭
+                log.debug("关闭前保存登录态失败（忽略）", exc_info=True)
             try:
                 self.context.close()
             except Exception:
                 pass
             self.context = None
-        _pw = getattr(self, "_pw", None)
-        if _pw is not None:
-            # start() 半途失败时 _pw 可能是未初始化对象（无 stop），
-            # 用 getattr 防护，close 不能再次抛错掩盖原异常
-            stop = getattr(_pw, "stop", None)
-            if stop:
-                try:
-                    stop()
-                except Exception:
-                    pass
-            self._pw = None
+        # start() 半途失败时 _pw 可能是未初始化对象（无 stop），
+        # _stop_driver 用 getattr 防护，close 不能再次抛错掩盖原异常
+        self._stop_driver()
+        self._release_lease()
 
     def __enter__(self):
         return self.start()

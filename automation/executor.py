@@ -42,6 +42,11 @@ def _full_chain(job, should_stop=None, progress=None):
     busy = _browser_busy()
     if busy:
         raise BrowserBusy("浏览器被占用：" + "、".join(busy))
+    from web_drivers.browser_pool import profile_in_use
+    if profile_in_use():
+        # 登录引导/其它实例正独占 profile（2026-09-26）：这次不硬闯，
+        # 记 BrowserBusy 顺延重排（不计失败、不触发熔断）
+        raise BrowserBusy("浏览器正被登录引导或其它实例占用，稍后顺延")
     params = job.get("params") or {}
     mode = params.get("mode") if params.get("mode") in ("single", "clean") else "single"
     rounds = max(1, int(params.get("rounds") or 1))
@@ -99,10 +104,14 @@ def _publish_drafts(job, should_stop=None, progress=None):
     from applications.zhihu_story.browser_adapter import (
         LOGIN_EXPIRED_MSG, ZhihuBrowser, ZhihuLoginRequired,
     )
-    from web_drivers.browser_pool import _browser_lock
+    from web_drivers.browser_pool import (
+        ProfileBusy, _browser_lock, profile_in_use,
+    )
     busy = _browser_busy()
     if busy:
         raise BrowserBusy("浏览器被占用：" + "、".join(busy))
+    if profile_in_use():
+        raise BrowserBusy("浏览器正被登录引导或其它实例占用，稍后顺延")
     with _browser_lock:
         b = ZhihuBrowser(headless=True)
         try:
@@ -120,6 +129,9 @@ def _publish_drafts(job, should_stop=None, progress=None):
 
             r = b.publish_draft(qid=qid, progress=_say,
                                 dry_run=bool(job.get("dry_run")))
+        except ProfileBusy as exc:
+            # 租约被抢（登录引导/并发实例）：不算失败，顺延重排
+            raise BrowserBusy(str(exc))
         except ZhihuLoginRequired as exc:
             raise NeedHuman(str(exc))
         finally:
