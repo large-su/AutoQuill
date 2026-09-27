@@ -9,3 +9,6 @@ pywebview>=6.2
 
 # 测试依赖（tests/ 用）
 httpx>=0.27
+# 静态扫描：tests/test_static_checks.py 用它守「未定义名字」这类一跑就炸的问题
+# （2026-09-27：_reply_comment 漏 import 导致真机连续失败 3 次被熔断）
+pyflakes>=3.2

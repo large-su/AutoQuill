@@ -290,14 +290,21 @@ def _reply_comment(job, should_stop=None, progress=None):
 
     收尾顺序沿用 run_manager 的纪律：先删网页会话（需要页面/登录态还在），
     再关共享浏览器。
+
+    ★ 2026-09-27 事故：这里最初把 `profile_in_use` 漏在了 import 之外，处理器
+    一进来就 NameError——单测全绿、装到真机连续失败 3 次还被熔断自动停用。
+    现在**所有前置检查要用的东西一律先 import 再使用**，并由
+    tests/test_static_checks.py 的 pyflakes 扫描 + 处理器冒烟测试守住。
     """
+    from web_drivers.browser_pool import (
+        close_shared_browser, get_browser, profile_in_use,
+    )
+    from applications.zhihu_story.browser_adapter import LOGIN_EXPIRED_MSG
     busy = _browser_busy()
     if busy:
         raise BrowserBusy("浏览器被占用：" + "、".join(busy))
     if profile_in_use():
         raise BrowserBusy("浏览器正被登录引导或其它实例占用，稍后顺延")
-    from web_drivers.browser_pool import close_shared_browser, get_browser
-    from applications.zhihu_story.browser_adapter import LOGIN_EXPIRED_MSG
     from applications.zhihu_story import reply_task
     params = job.get("params") or {}
     count = max(1, int(params.get("count") or 1))

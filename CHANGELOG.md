@@ -2,6 +2,46 @@
 
 版本号以 core/version.py 为唯一事实来源（发布 tag 为 v<VERSION>）。
 
+## v4.9.8（2026-09-27）
+
+### 修复：回复评论在真机上「一执行就失败」（用户 2026-09-27 安装后实测）
+
+**现象**：安装后打开「回复评论」，每次执行都失败，连试 3 次后被熔断自动停用该类任务。
+
+**真机日志取证**（`%APPDATA%\AutoQuill\logs\autoquill_20260927_134501.log`）：
+
+```
+18:02:09 [ERROR] 自动化作业异常：auto:2026-09-27:reply_comment:single:0
+Traceback (most recent call last):
+  File "automation\scheduler.py", line 321, in _run_job
+  File "automation\executor.py", line 354, in execute
+  File "automation\executor.py", line 297, in _reply_comment
+NameError: name 'profile_in_use' is not defined
+→ 18:32 重试同样报错 → 19:02 第三次 → 「回复评论 连续失败 3 次，已自动停用该类任务」
+```
+
+**根因**：`_reply_comment` 里 `if profile_in_use():` 写在了 import 之前（漏 import）。
+处理器一进来就炸，一次真实的挑评论/写回复都没跑到。单元测试全绿是因为
+**没有任何用例真的调用过这个处理器**（浏览器相关的处理器一直是「靠真机验证」的盲区）。
+
+**修法**：
+- 前置检查要用的 import 全部提到使用之前（并把这段事故写进注释，防止再犯）；
+- 顺带修掉 pyflakes 扫出的另一处同类隐患：`main.py` 批量循环的异常分支调用早已随 OCR
+  模块删除的 `take_screenshot()`——真走到那里会二次抛错、把真实错误盖掉；
+- **新增两道发布前防线**（`tests/test_static_checks.py`）：
+  1. **pyflakes 静态扫描**全仓库的「未定义名字」（`from x import *` 的提示不算）；
+  2. **处理器冒烟**：把每个作业处理器的前置检查段真跑一遍（浏览器/驱动全部 mock 掉），
+     任何 `NameError` / `AttributeError` / `ImportError` 一律判失败；
+  已用带 bug 的版本反向验证过：两条防线都会红（不带防线时是「全绿装机、真机才炸」）；
+- `pyflakes` 加入 `requirements.txt`，CI 也跑这道扫描。
+
+**测试**：全量 **831 例 0 失败**（新增 2 例防线用例）。
+
+### 给已安装用户的说明
+
+熔断已经把「回复评论」任务自动停用了（`plan.json` 里 `enabled=false`）——装上本版后
+需要在自动化面板里**重新打开**该任务的开关。
+
 ## v4.9.7（2026-09-27）
 ### 修复：检查更新「有时能查到、有时弹无法连接更新服务器」（用户 2026-09-27 反馈）
 

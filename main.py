@@ -354,7 +354,6 @@ def main():
                 break
             except Exception as e:
                 log.error(f"本轮失败: {e}")
-                take_screenshot("error")
                 log.warning(f"  ✗ 异常"
                             f"（尝试 {attempts}/{MAX_TOTAL_ATTEMPTS}）")
 

@@ -222,7 +222,7 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
                           % len(cards),
                 'replies': [], 'dropped': dropped}
     driver = None
-    done, skipped, details, records = [], [], [], []
+    done, skipped, details = [], [], []
     try:
         from web_drivers import get_driver
         driver = get_driver()
