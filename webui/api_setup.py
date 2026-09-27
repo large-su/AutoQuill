@@ -7,6 +7,7 @@
 import json
 import logging
 import os
+import re
 import threading
 
 import requests
@@ -293,50 +294,162 @@ def api_setup_web_login():
 
 
 # ============================================================
-# 检查更新（查询 GitHub Releases，60s 缓存）
+# 检查更新（查询 GitHub Releases）
+#
+# 2026-09-27 用户反馈「有时能检查到、有时弹无法连接」——原因是原来的实现
+# 只有一条通道：匿名打 api.github.com（每小时 60 次，共用出口 IP / 代理时很
+# 容易被 403 限流），且拿不到就立刻放弃、把异常类名（HTTPError）直接当消息。
+# 现在改成：
+#   1) 三条通道依次兜底：API（信息最全）→ releases/latest 网页跳转 → releases.atom
+#      订阅源（后两条是普通网页请求，不吃 API 限流）；
+#   2) 瞬时错误（429/5xx）自动重试一次；
+#   3) 报错翻译成人话，并给出「直接打开发布页」的出路；
+#   4) 成功结果缓存 60 秒、失败只缓存 10 秒（用户再点一次能真的重试）。
 # ============================================================
 
 _UPDATE_REPO = "large-su/AutoQuill"
-_UPDATE_TTL = 60.0
-_update_cache = {"ts": 0.0, "data": None}
+_UPDATE_TTL = 60.0            # 成功结果缓存（避免连点把限流额度烧掉）
+_UPDATE_ERR_TTL = 10.0        # 失败结果缓存（短：再点一次要能真重试）
+_UPDATE_TIMEOUT = 6
+_update_cache = {"ts": 0.0, "data": None, "ok": False, "last_ok": None}
+_UA = {"User-Agent": "AutoQuill", "Accept": "application/vnd.github+json"}
+_TRANSIENT_STATUS = (429, 500, 502, 503, 504)
 
 
 def _version_tuple(v):
+    """'4.9.6' → (4, 9, 6)；解析不了返回 None（宁可说『没更新』也不误报）。"""
     try:
-        return tuple(int(x) for x in v.lstrip("vV").split("."))
+        return tuple(int(x) for x in str(v).lstrip("vV").split("."))
     except (AttributeError, ValueError):
         return None
 
 
+def _clean_tag(tag):
+    """'v4.9.6' → '4.9.6'；空/异常返回 None。"""
+    text = str(tag or "").strip().lstrip("vV").strip()
+    return text or None
+
+
+def _latest_via_api(timeout):
+    """通道 1：GitHub API（带 html_url，信息最全）——会被匿名限流。"""
+    r = requests.get(
+        "https://api.github.com/repos/%s/releases/latest" % _UPDATE_REPO,
+        timeout=timeout, headers=_UA)
+    r.raise_for_status()
+    info = r.json() or {}
+    return _clean_tag(info.get("tag_name")), (info.get("html_url") or "")
+
+
+def _latest_via_redirect(timeout):
+    """通道 2：releases/latest 的跳转地址（普通网页请求，不吃 API 限流）。"""
+    url = "https://github.com/%s/releases/latest" % _UPDATE_REPO
+    r = requests.get(url, timeout=timeout, allow_redirects=True, stream=True,
+                     headers={"User-Agent": "AutoQuill"})
+    try:
+        r.raise_for_status()
+        final = r.url or ""
+    finally:
+        try:
+            r.close()
+        except Exception:              # noqa: BLE001
+            pass
+    m = re.search(r"/releases/tag/([^/?#]+)", final)
+    if not m:
+        raise RuntimeError("跳转地址里没有版本号（%s）" % (final or "?"))
+    return _clean_tag(m.group(1)), final
+
+
+def _latest_via_atom(timeout):
+    """通道 3：releases.atom 订阅源（最省流量，几乎不会被限流）。"""
+    r = requests.get("https://github.com/%s/releases.atom" % _UPDATE_REPO,
+                     timeout=timeout, headers={"User-Agent": "AutoQuill"})
+    r.raise_for_status()
+    m = re.search(r"/releases/tag/([^\"'<>\s]+)", r.text or "")
+    if not m:
+        raise RuntimeError("订阅源里没有版本条目")
+    tag = m.group(1)
+    return _clean_tag(tag), "https://github.com/%s/releases/tag/%s" % (_UPDATE_REPO, tag)
+
+
+def _fetch_latest(timeout=_UPDATE_TIMEOUT):
+    """按 API → 跳转 → 订阅源 依次尝试，返回 (版本号, 链接, 通道名)。"""
+    errors = []
+    for name, fetch in (("api", _latest_via_api),
+                        ("redirect", _latest_via_redirect),
+                        ("atom", _latest_via_atom)):
+        for attempt in (1, 2):          # 瞬时错误重试一次
+            try:
+                version, url = fetch(timeout)
+                if version:
+                    return version, url, name
+                errors.append("%s：没取到版本号" % name)
+                break
+            except requests.exceptions.HTTPError as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", 0)
+                errors.append("%s：HTTP %s" % (name, status))
+                if status in _TRANSIENT_STATUS and attempt == 1:
+                    time.sleep(0.8)
+                    continue
+                break
+            except Exception as exc:    # noqa: BLE001
+                errors.append("%s：%s" % (name, exc.__class__.__name__))
+                break
+    raise RuntimeError("；".join(errors) or "未知错误")
+
+
+def _friendly_update_error(raw):
+    """底层报错 → 用户看得懂、且能据此行动的一句话。"""
+    text = str(raw or "")
+    if "HTTP 403" in text or "HTTP 429" in text:
+        return ("更新服务器限流（GitHub 匿名接口每小时 60 次，共用出口 IP 或走代理时"
+                "更容易触发）。已自动试过备用通道，请稍后再试，或直接打开下载页手动查看")
+    if "HTTP 404" in text:
+        return "发布仓库不存在或已改名；请直接打开下载页手动查看"
+    if any(("HTTP %d" % s) in text for s in _TRANSIENT_STATUS[1:]):
+        return "GitHub 服务器暂时不可用（已自动重试）；请稍后再试"
+    if "Timeout" in text or "ConnectionError" in text or "SSLError" in text:
+        return "连接 GitHub 超时或失败（可能是网络/代理问题）；请检查网络后重试"
+    return "连接更新服务器失败（%s）；请稍后重试" % (text[:120] or "未知原因")
+
+
 @router.get("/api/update/check")
 def api_update_check():
-    """检查 GitHub Releases 是否有新版本（60s 缓存；网络失败只报 error 不抛错）。"""
+    """检查 GitHub Releases 是否有新版本。
+
+    永远返回 200：失败时给 error（人话）+ 下载页链接，绝不把异常抛给前端。
+    成功缓存 60s、失败缓存 10s；失败但此前成功过时，附带上次结果供界面显示。
+    """
     from core.version import VERSION
     now = time.time()
-    if _update_cache["data"] is not None and now - _update_cache["ts"] < _UPDATE_TTL:
-        return _update_cache["data"]
+    cached = _update_cache.get("data")
+    if cached is not None:
+        ttl = _UPDATE_TTL if _update_cache.get("ok") else _UPDATE_ERR_TTL
+        if now - float(_update_cache.get("ts") or 0) < ttl:
+            return cached
     data = {
         "current": VERSION,
         "latest": None,
         "has_update": False,
         "url": f"https://github.com/{_UPDATE_REPO}/releases",
         "error": None,
+        "channel": "",
     }
     try:
-        r = requests.get(
-            f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest",
-            timeout=5,
-            headers={"Accept": "application/vnd.github+json",
-                     "User-Agent": "AutoQuill"},
-        )
-        r.raise_for_status()
-        info = r.json()
-        latest = info.get("tag_name", "")
-        data["latest"] = latest.lstrip("vV")
+        latest, url, channel = _fetch_latest()
+        data["latest"] = latest
+        data["channel"] = channel
         cur, new = _version_tuple(VERSION), _version_tuple(latest)
         data["has_update"] = bool(cur and new and new > cur)
-        data["url"] = info.get("html_url") or data["url"]
-    except Exception as exc:
-        data["error"] = f"无法连接更新服务器：{exc.__class__.__name__}"
-    _update_cache.update(ts=now, data=data)
+        if url:
+            data["url"] = url
+        _update_cache.update(ts=now, data=data, ok=True, last_ok=dict(data))
+    except Exception as exc:            # noqa: BLE001
+        data["error"] = _friendly_update_error(exc)
+        last = _update_cache.get("last_ok") or {}
+        if last.get("latest"):
+            # 别让用户两眼一抹黑：上次成功检查到的结果还是有价值的
+            data["last_latest"] = last.get("latest")
+            data["last_has_update"] = bool(last.get("has_update"))
+        _update_cache.update(ts=now, data=data, ok=False)
     return data
+

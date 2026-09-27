@@ -7,6 +7,8 @@ import os
 import tempfile
 import time
 import unittest
+
+import requests
 from pathlib import Path
 from unittest import mock
 
@@ -1131,7 +1133,21 @@ class TestUpdateCheck(unittest.TestCase):
     """检查更新：有新版 / 已最新 / 网络失败。"""
 
     def setUp(self):
-        setup_mod._update_cache["data"] = None
+        setup_mod._update_cache.update(ts=0.0, data=None, ok=False, last_ok=None)
+
+    def _http_error(self, status):
+        resp = mock.Mock()
+        resp.status_code = status
+        exc = requests.exceptions.HTTPError("HTTP %d" % status)
+        exc.response = resp
+        return exc
+
+    def _redirect_resp(self, url):
+        r = mock.Mock()
+        r.status_code = 200
+        r.raise_for_status.return_value = None
+        r.url = url
+        return r
 
     def _fake_resp(self, tag_name):
         r = mock.Mock()
@@ -1162,6 +1178,85 @@ class TestUpdateCheck(unittest.TestCase):
             d = self.client_get()
         self.assertIsNone(d["latest"])
         self.assertIn("error", d)
+
+    def test_api_ok_prefers_api_channel(self):
+        with mock.patch("webui.api_setup.requests.get",
+                        return_value=self._fake_resp("v9.9.9")):
+            d = self.client_get()
+        self.assertEqual(d["channel"], "api")
+        self.assertEqual(d["latest"], "9.9.9")
+
+    def test_api_rate_limited_falls_back_to_redirect(self):
+        """匿名 API 被限流（403）时，走网页跳转通道照样能查到版本。"""
+        def fake_get(url, **kw):
+            if "api.github.com" in url:
+                raise self._http_error(403)
+            return self._redirect_resp(
+                "https://github.com/large-su/AutoQuill/releases/tag/v9.9.9")
+        with mock.patch("webui.api_setup.requests.get", side_effect=fake_get):
+            d = self.client_get()
+        self.assertEqual(d["latest"], "9.9.9")
+        self.assertTrue(d["has_update"])
+        self.assertEqual(d["channel"], "redirect")
+        self.assertIsNone(d["error"])
+
+    def test_redirect_channel_failure_falls_back_to_atom(self):
+        def fake_get(url, **kw):
+            if "api.github.com" in url:
+                raise self._http_error(403)
+            if url.endswith("/releases/latest"):
+                raise self._http_error(404)
+            r = mock.Mock()
+            r.raise_for_status.return_value = None
+            r.text = ("<feed><entry><link href=\"https://github.com/large-su/"
+                      "AutoQuill/releases/tag/v8.8.8\"/></entry></feed>")
+            return r
+        with mock.patch("webui.api_setup.requests.get", side_effect=fake_get):
+            d = self.client_get()
+        self.assertEqual(d["latest"], "8.8.8")
+        self.assertEqual(d["channel"], "atom")
+
+    def test_rate_limit_message_is_human(self):
+        with mock.patch("webui.api_setup.requests.get",
+                        side_effect=self._http_error(403)):
+            d = self.client_get()
+        self.assertIsNone(d["latest"])
+        self.assertIn("限流", d["error"])
+        self.assertIn("/releases", d["url"], "失败也要给出下载页出路")
+
+    def test_transient_5xx_retried_then_friendly(self):
+        calls = []
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            raise self._http_error(503)
+
+        with mock.patch("webui.api_setup.requests.get", side_effect=fake_get), \
+             mock.patch("webui.api_setup.time.sleep", return_value=None):
+            d = self.client_get()
+        api_calls = [c for c in calls if "api.github.com" in c]
+        self.assertEqual(len(api_calls), 2, "瞬时 5xx 应重试一次才换通道")
+        self.assertIn("暂时不可用", d["error"])
+
+    def test_failure_cached_briefly(self):
+        with mock.patch("webui.api_setup.requests.get",
+                        side_effect=Exception("boom")) as m:
+            self.client_get()
+            first = m.call_count
+            self.client_get()          # 10s 内命中失败缓存：不再打网络
+            self.assertEqual(m.call_count, first)
+
+    def test_last_success_is_reported_on_failure(self):
+        """失败时若此前成功过，把上次结果一并带上（别让用户两眼一抹黑）。"""
+        with mock.patch("webui.api_setup.requests.get",
+                        return_value=self._fake_resp("v9.9.9")):
+            self.client_get()
+        setup_mod._update_cache["ts"] = 0.0     # 让成功缓存过期，但不丢 last_ok
+        with mock.patch("webui.api_setup.requests.get",
+                        side_effect=self._http_error(503)):
+            d = self.client_get()
+        self.assertIsNotNone(d["error"])
+        self.assertEqual(d["last_latest"], "9.9.9")
 
     def client_get(self):
         r = self.client.get("/api/update/check")

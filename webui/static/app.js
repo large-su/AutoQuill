@@ -2455,7 +2455,14 @@ async function checkUpdate() {
     const d = await r.json();
     if (d.error) {
       btn.textContent = orig;
-      alert("检查更新失败：" + d.error);
+      // 失败也要给出路：说清原因 + 上次已知结果 + 一键打开发布页
+      let msg = "检查更新失败：" + d.error;
+      if (d.last_latest) {
+        msg += "\n\n上次成功检查到的最新版本：" + d.last_latest
+          + (d.last_has_update ? "（比当前新，可以先手动下载）" : "（当时已是最新）");
+      }
+      msg += "\n\n点「确定」打开发布页，可手动查看/下载最新版。";
+      if (confirm(msg)) window.open(d.url, "_blank");
       return;
     }
     if (d.has_update) {
