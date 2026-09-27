@@ -233,6 +233,11 @@ _ZW_HELPERS = '''
   const ZW = String.fromCharCode(8203,8204,8205,65279);
   const zwRe = new RegExp('[' + ZW + ']', 'g');
   const clean = s => (s || '').replace(zwRe, ' ').replace(/[ ]+/g, ' ').trim();
+  // flat：零宽字符 + 所有空白（含换行）全部去掉——知乎按钮文本常是
+  // 「零宽字符 + 换行 + 回复」，用 clean 比不出「回复」（注释里不要写转义字符，
+  // Python 会把反斜杠转义先解释掉，把 JS 注释截断成代码——真机踩过）
+  const wsRe = new RegExp('[' + String.fromCharCode(9, 10, 13, 32) + ']', 'g');
+  const flat = s => (s || '').split(ZW).join('').replace(wsRe, '');
   const txt = el => clean((el && (el.innerText || el.textContent)) || '');
   const cls = el => (el && typeof el.className === 'string' ? el.className : '');
   const answerItems = () => {
@@ -306,6 +311,48 @@ _CLICK_INTERACT_JS = _js('arg', '''
   const before = txt(btn);
   btn.click();
   return { ok: true, kind: arg.kind, before: before };
+''')
+
+# 评论管理页卡片内的「回复」：按评论正文定位卡片 → 点它的「回复」按钮
+#   —— 2026-09-27：评论就是从管理页挑的，在这里回复最稳（回答页只渲染前 N 条，
+#      评论一多就「找不到这条评论」）。
+_MANAGE_CARD_REPLY_JS = _js('target', '''
+  const want = flat(target);
+  const cards = Array.from(document.querySelectorAll('.CommentManage-CommentCard'));
+  let card = null;
+  for (let i = 0; i < cards.length; i++) {
+    if (flat(txt(cards[i])).indexOf(want) >= 0) { card = cards[i]; break; }
+  }
+  if (!card) return { ok: false, reason: 'no-card', cards: cards.length };
+  const btns = Array.from(card.querySelectorAll('button'));
+  const btn = btns.find(b => flat(txt(b)) === '回复');
+  if (!btn) return { ok: false, reason: 'no-reply-button' };
+  btn.click();
+  return { ok: true, card: txt(card).slice(0, 60) };
+''')
+
+# 回复编辑器状态（管理页与回答页共用同一套 Draft 编辑器 + 「发布」按钮）
+_REPLY_EDITOR_STATE_JS = _js('', '''
+  const eds = Array.from(document.querySelectorAll('div.public-DraftEditor-content,[contenteditable=true],textarea'))
+      .filter(e => e.offsetParent);
+  const active = eds.find(e => document.activeElement === e || e.contains(document.activeElement));
+  const ed = active || eds[eds.length - 1] || null;
+  const pubs = Array.from(document.querySelectorAll('button'))
+      .filter(b => b.offsetParent && flat(txt(b)) === '发布');
+  const pub = pubs[pubs.length - 1] || null;
+  return { has_editor: !!ed, focused: !!active, text: ed ? txt(ed) : '',
+           publish_found: !!pub, publish_disabled: pub ? !!pub.disabled : null };
+''')
+
+# 点「发布」（只在按钮可用时点）
+_CLICK_MANAGE_PUBLISH_JS = _js('', '''
+  const pubs = Array.from(document.querySelectorAll('button'))
+      .filter(b => b.offsetParent && flat(txt(b)) === '发布');
+  const pub = pubs[pubs.length - 1];
+  if (!pub) return { ok: false, reason: 'no-publish-button' };
+  if (pub.disabled) return { ok: false, reason: 'publish-disabled' };
+  pub.click();
+  return { ok: true };
 ''')
 
 # 评论管理页：首屏卡片采集（作者 / 回答 / 正文 / 时间行）
@@ -474,6 +521,93 @@ class InteractMixin:
                     'detail': '点了但状态没变（%s → %s）' % (before_text, after_text)}
             time.sleep(pause)
         return last
+
+    # ---------------- 管理页回复（推荐路径，2026-09-27 新增）----------------
+
+    def _ensure_manage_page(self, wait=6):
+        '''确保当前在评论管理页（回复从这里发起：评论就是从这儿挑的、必然在场）。'''
+        if 'creator/manage/comment' in (self.page.url or ''):
+            return True
+        try:
+            self.page.goto(COMMENT_MANAGE_URL, wait_until='domcontentloaded',
+                           timeout=45000)
+            time.sleep(wait)
+            return True
+        except Exception as exc:            # noqa: BLE001
+            log.warning('打开评论管理页失败：%s', exc)
+            return False
+
+    def open_manage_reply_editor(self, comment_text, pause=2.5, ensure_page=True):
+        '''在管理页找到该评论所在卡片，点它的「回复」并确认编辑器出现。'''
+        if ensure_page and not self._ensure_manage_page():
+            return {'ok': False, 'editor': {}, 'detail': '打不开评论管理页'}
+        r = self._safe_evaluate(_MANAGE_CARD_REPLY_JS, comment_text) or {}
+        if not r.get('ok'):
+            return {'ok': False, 'editor': {},
+                    'detail': r.get('reason') or '找不到该评论的卡片'}
+        time.sleep(pause)
+        state = self._safe_evaluate(_REPLY_EDITOR_STATE_JS) or {}
+        if not state.get('has_editor'):
+            return {'ok': False, 'editor': state, 'detail': '点了回复但没出现编辑器'}
+        return {'ok': True, 'editor': state, 'detail': ''}
+
+    def _type_into_reply_editor(self, text, ready_timeout=10):
+        '''往已打开的编辑器输入正文，等「发布」变为可用（发送就绪判据）。'''
+        time.sleep(0.4)
+        try:
+            self.page.keyboard.type(text)
+        except Exception as exc:            # noqa: BLE001
+            return {'ok': False, 'detail': '输入失败：%s' % exc, 'state': {}}
+        deadline = time.time() + max(2, int(ready_timeout))
+        state = {}
+        while time.time() < deadline:
+            time.sleep(0.8)
+            state = self._safe_evaluate(_REPLY_EDITOR_STATE_JS) or {}
+            if state.get('publish_found') and not state.get('publish_disabled'):
+                return {'ok': True, 'detail': '', 'state': state}
+        return {'ok': False, 'detail': '输入后「发布」按钮仍不可用（页面可能改版）',
+                'state': state}
+
+    def send_reply_from_manage(self, comment_text, reply_text, dry_run=False,
+                               verify_wait=6, ensure_page=True):
+        '''在评论管理页直接回复某条评论（**推荐路径**）。
+
+        为什么推荐：评论就是从管理页挑出来的，卡片必然在场；回答页则按热度只渲染
+        前 N 条（真机实测某回答 76 条评论只渲染 11 条），评论一多就「找不到」。
+        返回 {ok, sent, detail}。dry_run=True 只填不点发布。
+        '''
+        text = str(reply_text or '').strip()
+        if not text:
+            return {'ok': False, 'sent': False, 'detail': '回复内容为空'}
+        opened = self.open_manage_reply_editor(comment_text, ensure_page=ensure_page)
+        if not opened.get('ok'):
+            return {'ok': False, 'sent': False,
+                    'detail': opened.get('detail') or '打不开编辑器'}
+        typed = self._type_into_reply_editor(text)
+        if not typed.get('ok'):
+            self._clear_editor()
+            return {'ok': False, 'sent': False,
+                    'detail': typed.get('detail') or '输入失败'}
+        if dry_run:
+            self._clear_editor()
+            return {'ok': True, 'sent': False,
+                    'detail': '演练：已填入编辑器并确认可发布，未点击发送'}
+        clicked = self._safe_evaluate(_CLICK_MANAGE_PUBLISH_JS) or {}
+        if not clicked.get('ok'):
+            return {'ok': False, 'sent': False,
+                    'detail': clicked.get('reason') or '点发送失败'}
+        time.sleep(max(2, int(verify_wait) * 0.5))
+        # 核实：重新采集管理页，看这条评论下是否已出现我们的回复
+        try:
+            again = self.collect_manage_comments(limit=20)
+            for c in again.get('comments') or []:
+                if text in (c.get('text') or ''):
+                    return {'ok': True, 'sent': True,
+                            'detail': '已发送（管理页已显示回复）'}
+        except Exception as exc:            # noqa: BLE001
+            log.debug('发送后重新采集管理页失败：%s', exc)
+        return {'ok': False, 'sent': True,
+                'detail': '已点发送，未在本页确认到（可用回答页再核实）'}
 
     # ---------------- 评论 ----------------
 

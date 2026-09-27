@@ -13,6 +13,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+# 提前导入浏览器层：API 用例会 patch 它的 ZhihuBrowser 做「禁止开浏览器」护栏；
+# 若等 setUp 里（DATA_ROOT 已指向临时目录）才首次导入，config 会因找不到
+# llm_providers.json 直接报错（2026-09-27 踩过）。
+import applications.zhihu_story.browser_adapter  # noqa: F401
+import web_drivers.browser_pool  # noqa: F401
+
 from core import paths
 from automation import planner, store
 from automation.executor import BrowserBusy, NeedHuman
@@ -88,21 +94,35 @@ class PlannerTest(unittest.TestCase):
         """老 plan.json 里残留的已砍类型必须被安静丢弃（用户无需手工改文件）。
 
         可以确定不会再回来的：thank（感谢赞同/喜欢）、refresh_snapshot（M3 取消）。
+        新增的打卡/回复这里显式关掉，隔离验证「已砍类型被丢弃」这件事本身。
         """
         legacy = {"enabled": True,
                   "tasks": {"thank": {"enabled": True, "daily_cap": 9},
                             "refresh_snapshot": {"enabled": True},
+                            "checkin": {"enabled": False},
+                            "reply_comment": {"enabled": False},
                             "full_chain": {"enabled": True, "daily_cap": 2}}}
         plan = normalize_plan(legacy)
         self.assertEqual(sorted(plan["tasks"]),
                          ["checkin", "full_chain", "publish_drafts",
                           "reply_comment"])
         self.assertEqual(plan["tasks"]["full_chain"]["daily_cap"], 2)
-        self.assertFalse(plan["tasks"]["checkin"]["enabled"],
-                         "老计划里没有 checkin → 默认关闭，不擅自替用户开启")
         day = planner.materialize_day(self.now, plan, {}, {})
         self.assertFalse([j for j in day["schedule"]
                           if j["type"] not in ("full_chain", "publish_drafts")])
+
+    def test_new_tasks_enabled_by_default(self):
+        """用户 2026-09-27 口径：打卡互动与回复评论**默认开启**（新装的计划里没有它们时）。"""
+        plan = normalize_plan({})
+        for t in ("full_chain", "publish_drafts", "checkin", "reply_comment"):
+            self.assertTrue(plan["tasks"][t]["enabled"], "%s 应默认开启" % t)
+
+    def test_explicit_off_is_never_overridden(self):
+        """默认开启**绝不覆盖**已有计划里的显式关闭（例如熔断自动停用后的状态）。"""
+        plan = normalize_plan({"tasks": {"reply_comment": {"enabled": False},
+                                          "checkin": {"enabled": False}}})
+        self.assertFalse(plan["tasks"]["reply_comment"]["enabled"])
+        self.assertFalse(plan["tasks"]["checkin"]["enabled"])
 
     def test_resume_uses_done_counts_from_ledger(self):
         plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
@@ -252,7 +272,11 @@ class PlannerTest(unittest.TestCase):
         """复现线上场景：22:40 才改计划/启动，不能再从早上铺出十几条「已经过去的点」。"""
         plan = normalize_plan({"enabled": True, "tasks": {
             "publish_drafts": {"enabled": True, "daily_cap": 6},
-            "full_chain": {"enabled": True, "daily_cap": 8}}})
+            "full_chain": {"enabled": True, "daily_cap": 8},
+            # 隔离场景：新增的打卡/回复默认开启，这里显式关掉，
+            # 只验证「深夜启动不会把发布/撰写铺出一堆过去的点」
+            "checkin": {"enabled": False},
+            "reply_comment": {"enabled": False}}})
         late = datetime(2026, 9, 19, 22, 40, 0)
         day = planner.materialize_day(late, plan, {}, {})
         planned = [j for j in day["schedule"] if j["status"] == planner.STATUS_PLANNED]
@@ -587,8 +611,24 @@ class AutomationApiTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_api_"))
         self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
         self._p.start()
+        # ★ 硬护栏（2026-09-27）：本类只测 API 边界，绝不允许真的拉起浏览器/起作业。
+        #   起因：默认开关改成「四个任务全开」后，某些用例写的计划没有显式关掉新增任务，
+        #   调度器就真的去跑了一班 → 开了真浏览器、占住 profile 租约没释放 →
+        #   后面的 test_automation_publish 全部 BrowserBusy 报错（连环保育）。
+        self._guards = [
+            mock.patch("web_drivers.browser_pool.get_browser",
+                       side_effect=RuntimeError("测试禁止启动浏览器")),
+            mock.patch("applications.zhihu_story.browser_adapter.ZhihuBrowser",
+                       side_effect=RuntimeError("测试禁止启动浏览器")),
+            mock.patch("webui.run_manager.runner.start",
+                       side_effect=RuntimeError("测试禁止启动作业")),
+        ]
+        for g in self._guards:
+            g.start()
 
     def tearDown(self):
+        for g in self._guards:
+            g.stop()
         self._p.stop()
 
     def test_status_payload_shape(self):
@@ -620,10 +660,11 @@ class AutomationApiTest(unittest.TestCase):
 
     def test_start_stop_toggles_enabled(self):
         # 全部任务关闭 → start 后调度线程起来也不会执行任何作业
+        # 显式关掉全部四类（默认开启的新任务也要关，否则排班会真派活）
         self.client.post("/api/automation/plan", json={"plan": {
             "enabled": False,
-            "tasks": {"full_chain": {"enabled": False, "daily_cap": 0},
-                      "publish_drafts": {"enabled": False, "daily_cap": 0}}}})
+            "tasks": {t: {"enabled": False, "daily_cap": 0}
+                      for t in TASK_TYPES}}})
         d = self.client.post("/api/automation/start").json()
         self.assertTrue(d["status"]["enabled"])
         d2 = self.client.post("/api/automation/stop").json()

@@ -280,22 +280,34 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
                 details.append('演练：%s → %s' % (comment[:16], record['reply']))
                 _say(progress, '演练完成（未发送）：%s' % record['reply'])
                 continue
+            # ★ 主路径：在**评论管理页**直接回复（评论就是从这页挑的，卡片必然在场）。
+            #   回答页按热度只渲染前 N 条，评论一多就「找不到这条评论」——2026-09-27 真机。
+            record['attempted'] = True          # 点过发送即算消耗（防重复打扰）
             try:
-                browser.read_answer_comments()        # 展开该回答的评论区
-                already = browser.comment_replied(
-                    comment, our_texts=[r.get('reply') for r in checkin.load_replies()
-                                        if r.get('reply')])
-                if already:
-                    details.append('这条评论下已有我们的回复，跳过')
-                    replied.add(record['key'])
-                    checkin.append_reply(dict(record, skipped='already-replied'))
-                    continue
-                record['attempted'] = True      # 点过发送即算消耗（防重复打扰）
-                sent = browser.send_reply(comment, record['reply'])
+                sent = browser.send_reply_from_manage(comment, record['reply'])
             except Exception as exc:             # noqa: BLE001
-                log.warning('发送回复异常：%s', exc)
-                record['attempted'] = True
+                log.warning('管理页发送回复异常：%s', exc)
                 sent = {'ok': False, 'sent': False, 'detail': str(exc)}
+            if not sent.get('sent') and '已点发送' not in (sent.get('detail') or ''):
+                # 还没走到「点发布」就失败了（卡片不在首屏等）→ 回退回答页路径再试一次。
+                # ★ 只要点过发布就绝不换路径重试：宁可漏确认，也不重复打扰读者。
+                _say(progress, '管理页回复未成（%s），改用回答页路径'
+                     % (sent.get('detail') or ''))
+                try:
+                    browser.read_answer_comments()
+                    already = browser.comment_replied(
+                        comment,
+                        our_texts=[r.get('reply') for r in checkin.load_replies()
+                                   if r.get('reply')])
+                    if already:
+                        details.append('这条评论下已有我们的回复，跳过')
+                        replied.add(record['key'])
+                        checkin.append_reply(dict(record, skipped='already-replied'))
+                        continue
+                    sent = browser.send_reply(comment, record['reply'])
+                except Exception as exc:         # noqa: BLE001
+                    log.warning('回答页发送回复异常：%s', exc)
+                    sent = {'ok': False, 'sent': False, 'detail': str(exc)}
             record['sent'] = bool(sent.get('sent'))
             record['send_detail'] = sent.get('detail') or ''
             checkin.append_reply(record)

@@ -7,11 +7,16 @@
   - 同类任务最小间隔 ≥60 分钟且**随机化**，当日完成即可（不固定时间点）；
   - 随时可停；再次开始时先看「今天已发布多少 / 已写多少」，在此基础上续做。
 
-**任务类型只保留两个（用户 2026-09-24 口径）**：发布草稿 + 全链路撰写。
-打卡挑战（网页端不好操作）与互动类（感谢/赞同/回复评论，看着太乱）都不做——
-「把写故事、发布故事这两件事做准、做稳」比铺功能重要。
-契约层刻意不再登记任何「预留/未实现」类型：清单里有的就是能跑的，
+**当前四个任务类型**（2026-09-27 更新）：
+  · 发布草稿 / 全链路撰写——「要做 N 次」的重复任务，画在 24 小时时间轴上；
+  · 打卡互动 / 回复评论——「一天一次」的单次任务（job_mode=single），
+    画在「单次任务轴」上，另有阶段闸门保证「先回复、后检查」。
+历史：2026-09-24 曾砍到只剩发布+撰写；2026-09-27 用户要求把打卡与评论回复做回来
+（真机探针证明可行且成本低），于是重新登记这两个类型。
+契约层不登记任何「预留/未实现」类型：清单里有的就是能跑的，
 免得 UI 与排班里出现永远不执行的空泳道。
+默认开关：DEFAULT_ENABLED 里的四个任务在新装（计划里没有该键）时默认开启；
+已有计划里的显式开关（含熔断自动停用）永不被覆盖。
 """
 
 import copy
@@ -85,6 +90,10 @@ TASK_PRIORITY = {"publish_drafts": 0, "full_chain": 1, "reply_comment": 2,
 # 全局去碰撞：任意两个作业至少隔开的分钟数（避免同一分钟挤成一堆）
 DECOLLISION_MINUTES = 15
 
+# 首次启用时默认打开的任务类型（用户 2026-09-27 口径：打卡互动与回复评论也默认开启）。
+# 注意：**只在计划里没有这个键时生效**——用户已有的显式开关（含熔断自动停用）不会被覆盖。
+DEFAULT_ENABLED = ("full_chain", "publish_drafts", "checkin", "reply_comment")
+
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
@@ -128,7 +137,7 @@ def _norm_task(task_type, raw):
     params = copy.deepcopy(meta["params"])
     if isinstance(raw.get("params"), dict):
         params.update(raw["params"])
-    enabled = bool(raw.get("enabled", task_type in ("full_chain", "publish_drafts")))
+    enabled = bool(raw.get("enabled", task_type in DEFAULT_ENABLED))
     return {
         "enabled": enabled,
         "daily_cap": cap,
