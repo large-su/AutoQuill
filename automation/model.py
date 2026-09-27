@@ -23,6 +23,38 @@ from datetime import time as _time
 # ------------------------------------------------------------
 # lane：时间轴泳道（越小越靠上）——同一类任务画在同一行，避免视觉打架
 TASK_TYPES = {
+    "checkin": {
+        "label": "打卡互动",
+        "unit": "项",
+        "lane": 2,
+        "implemented": True,          # 2026-09-27：打卡巡检 + 写草稿顺带互动
+        "default_cap": 1,
+        # 一天只排一次班（一次把该做的都做完，不分散在多个时间点）
+        "job_mode": "single",
+        # 单次任务轴：谁在轴上、以及先后次序（阶段小的先跑）
+        "axis": "single",
+        "single_stage": 2,            # 阶段 2：必须等回复评论（阶段 1）结束才允许派发
+        # 默认落在晚上：它同时是「今天打卡成没成」的兜底与数据源。
+        # 20:30–22:30 留出重试余量：补做失败会自动补位（最晚 22:30）。
+        "default_window": {"start": "20:30", "end": "22:30"},
+        "desc": "读当期打卡页；关注/赞同还没达成时补做（含取关再关注兜底）",
+        "params": {},
+    },
+    "reply_comment": {
+        "label": "回复评论",
+        "unit": "条",
+        "lane": 3,
+        "implemented": True,          # 2026-09-27：挑最友善的读者评论回复
+        "default_cap": 3,
+        "job_mode": "single",         # 一天一班，一次把该回的都回完
+        "axis": "single",
+        "single_stage": 1,            # 阶段 1：回复必须先做完，打卡检查才动手
+        # 窗口收在 20:00 前：保证「回复 → 检查」这条链在当天留出余量
+        "default_window": {"start": "10:00", "end": "20:00"},
+        "desc": "挑最友善的读者评论回复（默认演练：只生成不发送）",
+        # dry_run 默认 True：用户要求先演练两天，语气确认后再切自动
+        "params": {"dry_run": True},
+    },
     "publish_drafts": {
         "label": "发布草稿",
         "unit": "篇",
@@ -43,8 +75,12 @@ TASK_TYPES = {
     },
 }
 
-# 执行顺序上的偏好：同一分钟到点时，先发布（对外可见的动作尽量落在白天）
-TASK_PRIORITY = {"publish_drafts": 0, "full_chain": 1}
+# 执行顺序上的偏好（同一分钟到点时按此排序）：
+#   先发布（对外可见的动作尽量落在白天）→ 再写草稿 → 然后回复评论 → 最后打卡检查。
+# ★ 打卡检查排在最后不是"顺手"，是语义：它要确认的是"今天该做的都做完了没"。
+#   真正的保障是 planner 的「阶段闸门」（single_stage），这里只是同刻排序的兜底。
+TASK_PRIORITY = {"publish_drafts": 0, "full_chain": 1, "reply_comment": 2,
+                 "checkin": 3}
 
 # 全局去碰撞：任意两个作业至少隔开的分钟数（避免同一分钟挤成一堆）
 DECOLLISION_MINUTES = 15
@@ -97,7 +133,8 @@ def _norm_task(task_type, raw):
         "enabled": enabled,
         "daily_cap": cap,
         "min_gap_minutes": raw.get("min_gap_minutes"),   # None = 用计划全局值
-        "window": raw.get("window"),                     # None = 用计划全局值
+        # None = 用计划全局值；任务类型自带默认时段时用它的（如打卡巡检在晚上）
+        "window": raw.get("window") or meta.get("default_window"),
         "params": params,
     }
 

@@ -51,6 +51,24 @@ const AUTO_STATUS_COLOR = {
   failed: "#f87171", skipped: "#3b4762", needs_human: "#fbbf24",
 };
 
+// ── 单次任务轴（一天做一次的任务：回复评论 / 打卡互动）────────────────
+// 视觉分工（用户 2026-09-27 口径）：**颜色只表达状态**，任务身份用形状 +
+// 编号 + 中文标签表达。形状按「动作性质」归类，新增单次任务按性质挑形状即可：
+//   菱形 = 回复 / 对话类 · 圆形 = 检查 / 巡检类 · 方形 = 生成 / 写入类 · 三角 = 对外发布类
+const SA_SHAPE = { reply_comment: "diamond", checkin: "circle" };
+const SA_ROLE = [
+  ["diamond", "回复 / 对话类"],
+  ["circle", "检查 / 巡检类"],
+  ["square", "生成 / 写入类"],
+  ["triangle", "对外发布类"],
+];
+const SA_STAGE_CHAR = { 1: "\u2460", 2: "\u2461", 3: "\u2462", 4: "\u2463" };
+const SA_STAGE_TEXT = { reply_comment: "先回复", checkin: "后检查" };
+
+function saShapeOf(t) { return SA_SHAPE[t] || "circle"; }
+function saColorOf(s) { return AUTO_STATUS_COLOR[s] || "#818cf8"; }
+function saStatusText(s) { return AUTO_STATUS_TEXT[s] || s || "-"; }
+
 function autoPad(n) { return (n < 10 ? "0" : "") + n; }
 
 function autoClock(iso) {
@@ -90,6 +108,8 @@ async function loadAutomation() {
   renderAutoState();
   renderAutoProgress();
   renderAutoTimeline();
+  renderAutoSingleAxis();
+  renderAutoSingleCards();
   renderAutoTaskConfig();
   renderAutoNotices();
   renderAutoHistory();
@@ -143,12 +163,24 @@ function renderAutoProgress() {
     const m = per[t];
     if (!m.implemented || !m.enabled) return;
     const pct = m.cap ? Math.min(100, Math.round(m.done * 100 / m.cap)) : 0;
+    const single = m.job_mode === "single";
+    // 单次任务（打卡互动）的「每日数量」是班次不是条数：显示成「0/1 项」
+    // 会让人以为还差一项配额。这里按语义显示：一天一班 + 当前状态。
+    const value = (single && m.cap <= 1)
+      ? "<span class=\"sub\">一天一班</span>"
+      : m.done + "<span class=\"sub\"> / " + m.cap + " " + esc(m.unit) + "</span>";
+    const jobs = (st.schedule || []).filter(function (j) { return j.type === t; });
+    const jstatus = jobs.length ? (AUTO_STATUS_TEXT[jobs[0].status] || jobs[0].status) : "未排班";
+    const when = (jobs.length && jobs[0].planned_at) ? autoClock(jobs[0].planned_at) : "-";
+    const desc = single
+      ? ("窗口 " + esc((m.window || {}).start || "-") + "–" + esc((m.window || {}).end || "-")
+         + " · " + jstatus + " " + when)
+      : ("窗口 " + esc((m.window || {}).start || "-") + "–" + esc((m.window || {}).end || "-")
+         + " · 间隔 ≥ " + m.min_gap_minutes + " 分钟");
     html += "<div class=\"auto-pcard\">"
       + "<div class=\"l\">" + esc(m.label) + "</div>"
-      + "<div class=\"v\">" + m.done + "<span class=\"sub\"> / " + m.cap
-      + " " + esc(m.unit) + "</span></div>"
-      + "<div class=\"d\">窗口 " + esc((m.window || {}).start || "-") + "–"
-      + esc((m.window || {}).end || "-") + " · 间隔 ≥ " + m.min_gap_minutes + " 分钟</div>"
+      + "<div class=\"v\">" + value + "</div>"
+      + "<div class=\"d\">" + desc + "</div>"
       + "<div class=\"bar\"><i style=\"width:" + pct + "%\"></i></div>"
       + "</div>";
   });
@@ -181,7 +213,10 @@ function renderAutoTimeline() {
     html += "<span style=\"left:" + (h / 24 * 100) + "%\">" + autoPad(h) + ":00</span>";
   }
   html += "</div></div>";
-  const order = Object.keys(per).sort(function (a, b) { return per[a].lane - per[b].lane; });
+  // 单次任务（axis=single）不画在这里：它们有自己的「单次任务轴」
+  const order = Object.keys(per).filter(function (t) {
+    return (per[t].axis || "") !== "single";
+  }).sort(function (a, b) { return per[a].lane - per[b].lane; });
   order.forEach(function (t) {
     const m = per[t];
     const jobs = (st.schedule || []).filter(function (j) { return j.type === t; });
@@ -221,6 +256,161 @@ function renderAutoTimeline() {
   });
 }
 
+// 单次任务轴：与主时间轴共用刻度 / 泳道行 / 时段底 / 现在线，
+// 只是把「长条块」换成「药丸标记」（形状=任务身份，底色=状态）。
+function saCapText(j) {
+  const parts = [];
+  if (j.dry_run) parts.push("演练");
+  parts.push(saStatusText(j.status));
+  return parts.join(" · ");
+}
+
+function renderAutoSingleAxis() {
+  const box = $("autoSingleAxis");
+  if (!box) return;
+  const st = autoData || {};
+  const single = st.single || {};
+  const axis = single.axis || [];
+  const nowMin = autoMinutes(st.now);
+  const head = '<div class="sa-head"><span class="sa-title">◎ 单次任务轴</span>'
+    + '<span class="sa-hint">一天一次 · 按 ①→② 顺序执行（前面没结束，后面的不动手）</span></div>';
+  if (!axis.length) {
+    box.innerHTML = head + '<div class="empty-note">今天没有单次任务：在下方「任务与配额」里打开「打卡互动」或「回复评论」</div>';
+    return;
+  }
+  let html = head + '<div class="tl">';
+  html += '<div class="tl-ruler"><div></div><div class="tl-ticks">';
+  for (let h = 0; h <= 24; h += 2) {
+    html += '<span style="left:' + (h / 24 * 100) + '%">' + autoPad(h) + ':00</span>';
+  }
+  html += '</div></div>';
+  axis.forEach(function (j, i) {
+    const w = j.window || {};
+    const wStart = autoHHMMToMin(w.start), wEnd = autoHHMMToMin(w.end);
+    const hasWin = wStart >= 0 && wEnd > wStart;
+    const mMin = autoMinutes(j.planned_at);
+    const left = mMin >= 0 ? Math.max(1.5, Math.min(98.5, mMin / 1440 * 100)) : 50;
+    const when = mMin >= 0 ? autoClock(j.planned_at) : "未排班";
+    const stage = SA_STAGE_CHAR[j.stage] || (i + 1);
+    const title = j.label + " · " + saStatusText(j.status) + " · " + when
+      + (j.note ? " · " + j.note : "");
+    html += '<div class="tl-lane"><div class="tl-lane-label">' + esc(j.label)
+      + '<span class="cap">' + esc(saCapText(j)) + '</span></div>'
+      + '<div class="tl-track">';
+    if (hasWin) {
+      html += '<div class="tl-window" style="left:' + (wStart / 1440 * 100)
+        + '%;width:' + ((wEnd - wStart) / 1440 * 100) + '%"></div>';
+    }
+    html += '<div class="sa-pill ' + esc(j.status) + '" style="left:' + left
+      + '%;--c:' + saColorOf(j.status) + '" data-key="' + esc(j.key || "")
+      + '" title="' + esc(title) + '">'
+      + '<i class="sa-shape sa-shape-' + saShapeOf(j.type) + '"></i>'
+      + '<span class="sa-stage">' + stage + '</span>'
+      + '<span class="sa-time">' + when + '</span></div>';
+    if (nowMin >= 0) {
+      html += '<div class="tl-now" style="left:' + (nowMin / 1440 * 100) + '%"></div>';
+    }
+    html += '</div></div>';
+  });
+  html += '<div class="tl-legend">';
+  SA_ROLE.forEach(function (r) {
+    html += '<span><i class="sa-shape sa-shape-' + r[0] + '" style="--c:#34d399"></i>'
+      + r[1] + '</span>';
+  });
+  html += '<span style="margin-left:auto">底色 = 状态（同主时间轴）· 竖线 = 现在 · 淡紫底 = 该任务允许执行的时段</span>';
+  html += '</div></div>';
+  box.innerHTML = html;
+  box.querySelectorAll(".sa-pill").forEach(function (el) {
+    el.addEventListener("click", function () { showAutoJob(el.dataset.key); });
+  });
+}
+
+function saDropLabel(k) {
+  const m = { hostile: "戾气", spam: "引流", replied: "已回过",
+              "no-content": "无内容", "no-answer-url": "无回答链接" };
+  return m[k] || k;
+}
+
+function renderAutoSingleCards() {
+  const box = $("autoSingleCards");
+  if (!box) return;
+  const st = autoData || {};
+  const single = st.single || {};
+  const ck = single.checkin || {};
+  const rp = single.replies || {};
+  const axis = single.axis || [];
+  const today = rp.today || [];
+  if (!axis.length && !today.length && !ck.line) { box.innerHTML = ""; return; }
+  let html = "";
+
+  // ── 打卡互动卡 ──
+  const ckJob = axis.filter(function (j) { return j.type === "checkin"; })[0] || {};
+  const tasks = ck.tasks || {};
+  const localDone = ck.done || {};
+  const noteAt = {};
+  (ck.notes || []).forEach(function (n) {
+    if (n && n.kind) noteAt[n.kind] = String(n.at || "").slice(11, 16);
+  });
+  const pending = ck.pending || [];
+  html += '<div class="sa-card"><div class="sa-card-head"><b>打卡互动</b>'
+    + '<span class="sa-chip ' + (pending.length ? "warn" : "ok") + '">'
+    + (pending.length ? "还差 " + pending.length + " 项" : "今日已达标") + '</span>'
+    + (ckJob.planned_at ? '<span class="sa-sub">检查/补做 · ' + autoClock(ckJob.planned_at) + '</span>' : '')
+    + '</div><div class="sa-card-body">';
+  if (ck.campaign) {
+    html += '<div class="sa-line">' + esc(ck.campaign)
+      + (ck.checked_at ? ' · 读取于 ' + esc(String(ck.checked_at).slice(11, 16)) : '') + '</div>';
+  }
+  html += '<div class="sa-line sa-strong">' + esc(ck.line || "（还没读过打卡页，晚上那一班会读）") + '</div>';
+  [["follow", "关注 1 位知友"], ["vote", "送出 1 个赞同"],
+   ["comment", "发布 1 条评论"]].forEach(function (r) {
+    const t = tasks[r[0]];
+    if (!t) return;
+    let how = t.action || "待完成";
+    if (t.done && localDone[r[0]]) how = "自动化" + (noteAt[r[0]] ? " " + noteAt[r[0]] : "");
+    else if (t.done) how = "已完成";
+    html += '<div class="sa-item"><span class="' + (t.done ? "ok" : "no") + '">'
+      + (t.done ? "√" : "×") + '</span><span class="sa-item-name">' + esc(r[1])
+      + '</span><span class="sa-item-how">' + esc(how) + '</span></div>';
+  });
+  const tried = ck.tried || [];
+  if (tried.length) {
+    html += '<div class="sa-line sa-dim">试过但跳过：' + tried.map(function (x) {
+      return esc((x.author || "?") + "（" + (x.reason || "") + "）");
+    }).join("、") + '</div>';
+  }
+  html += '</div></div>';
+
+  // ── 回复评论卡 ──
+  const rpJob = axis.filter(function (j) { return j.type === "reply_comment"; })[0] || {};
+  const run = rp.last_run || {};
+  const dry = rpJob.dry_run;
+  html += '<div class="sa-card"><div class="sa-card-head"><b>回复评论</b>'
+    + '<span class="sa-chip ' + (dry ? "dry" : "auto") + '">'
+    + (dry ? "演练（不发送）" : "自动发送") + '</span>'
+    + (rpJob.planned_at ? '<span class="sa-sub">今天 ' + autoClock(rpJob.planned_at) + '</span>' : '')
+    + '</div><div class="sa-card-body">';
+  if (run.collected != null) {
+    const d = run.dropped || {};
+    const dropText = Object.keys(d).map(function (k) { return saDropLabel(k) + " " + d[k]; }).join(" · ");
+    html += '<div class="sa-line">抓取 <b>' + run.collected + '</b> 条 → 候选 <b>'
+      + (run.candidates || 0) + '</b> 条' + (dropText ? '（过滤：' + esc(dropText) + '）' : '') + '</div>';
+  } else {
+    html += '<div class="sa-line sa-dim">今天还没跑过（每天一班，到点自动执行）</div>';
+  }
+  today.slice(0, 3).forEach(function (r) {
+    const state = r.failed ? "生成不合格" : (r.sent ? "已发送" : (r.dry_run ? "演练" : "未发送"));
+    html += '<div class="sa-reply"><div class="sa-cmt">' + esc(String(r.comment || "").slice(0, 60)) + '</div>'
+      + '<div class="sa-ans">→ ' + esc(String(r.reply || "").slice(0, 90)) + '</div>'
+      + '<div class="sa-meta">' + esc(r.author || "") + " · " + state
+      + (r.at ? " · " + esc(String(r.at).slice(11, 16)) : "") + '</div></div>';
+  });
+  if (today.length > 3) {
+    html += '<div class="sa-line sa-dim">另有 ' + (today.length - 3) + ' 条（见下方台账）</div>';
+  }
+  html += '</div></div>';
+  box.innerHTML = html;
+}
 function showAutoJob(key) {
   const box = $("autoDetail");
   if (!box) return;
@@ -333,6 +523,14 @@ function renderAutoTaskConfig() {
     if (t === "publish_drafts") {
       html += "<div class=\"auto-task-ctl\">顺序：从旧到新（按草稿更新时间）</div>";
     }
+    if (t === "reply_comment") {
+      // 演练/自动开关：默认演练（只生成不发送），语气确认后再切自动
+      const dry = ((cfg.params || {}).dry_run !== false);
+      html += "<div class=\"auto-task-ctl\">模式 <select data-role=\"dryrun\">"
+        + "<option value=\"1\"" + (dry ? " selected" : "") + ">演练（只生成不发送）</option>"
+        + "<option value=\"0\"" + (!dry ? " selected" : "") + ">自动发送</option></select>"
+        + "　一天一班，一次把该回的都回完</div>";
+    }
     html += "</div>";
   });
   box.innerHTML = html;
@@ -375,6 +573,7 @@ function collectAutoPlan() {
     const cap = el.querySelector("[data-role=cap]");
     const gap = el.querySelector("[data-role=gap]");
     const mode = el.querySelector("[data-role=mode]");
+    const dryrun = el.querySelector("[data-role=dryrun]");
     if (en) cfg.enabled = en.checked;
     // 空/非法一律**保留原值**：边打边存时用户可能正处在「清空重打」的中间态，
     // 用 `|| 0` 会把配额瞬间写成 0（任务直接不排班），也是「改几遍都变回去」的帮凶
@@ -387,6 +586,7 @@ function collectAutoPlan() {
       cfg.min_gap_minutes = isNaN(v) ? (parseInt(cfg.min_gap_minutes, 10) || 60) : v;
     }
     if (mode) { cfg.params = cfg.params || {}; cfg.params.mode = mode.value; }
+    if (dryrun) { cfg.params = cfg.params || {}; cfg.params.dry_run = dryrun.value === "1"; }
     plan.tasks[t] = cfg;
   });
   return plan;
@@ -411,6 +611,7 @@ async function saveAutoPlan() {
       autoDirty = false;           // 服务端已确认 → 解除保护
       autoSaveRetry = 0;
       renderAutoState(); renderAutoProgress(); renderAutoTimeline();
+      renderAutoSingleAxis(); renderAutoSingleCards();
       setTimeout(flushAutoRender, 0);
     }
   } catch (e) {
@@ -431,7 +632,8 @@ async function autoPost(path, body) {
     });
     const d = await r.json();
     if (d && d.status) autoData = d.status;
-    renderAutoState(); renderAutoProgress(); renderAutoTimeline(); renderAutoTaskConfig();
+    renderAutoState(); renderAutoProgress(); renderAutoTimeline();
+    renderAutoSingleAxis(); renderAutoSingleCards(); renderAutoTaskConfig();
   } catch (e) { /* 忽略 */ }
 }
 

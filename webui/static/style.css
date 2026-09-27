@@ -594,6 +594,88 @@
   .tl-block.needs_human { background: #fbbf24; }
   .tl-block.sel { outline: 2px solid #fff; outline-offset: 1px; }
   @keyframes tlPulse { 0%,100% { opacity: 1 } 50% { opacity: .5 } }
+  /* ── 单次任务轴（一天一次的任务：回复评论 / 打卡互动）─────────────────
+     视觉分工：颜色只表达**状态**（与主时间轴同一套语义），
+     任务身份用**形状 + 编号 + 中文标签**表达（用户 2026-09-27 口径）。 */
+  /* 单次任务轴：**复用主时间轴的组件**（同一套刻度 / 泳道行 / 时段底 / 现在线），
+     单次任务只是把「长条块」换成「药丸标记」——两块区域看起来才是一家人。
+     视觉分工：颜色只表达状态；任务身份用形状（◆回复 ●检查 ■生成 ▲发布）+ 编号。 */
+  .single-axis { margin-top: 14px; }
+  .single-axis .sa-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .single-axis .sa-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .single-axis .sa-hint { font-size: 11px; color: var(--muted); }
+  .sa-pill {
+    position: absolute; top: 50%; transform: translate(-50%, -50%); z-index: 2;
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+    padding: 2px 10px; border-radius: 999px; font-size: 11px; line-height: 1.6;
+    background: var(--panel-2); border: 1px solid var(--c, #818cf8);
+    color: var(--text); cursor: pointer;
+  }
+  .sa-pill:hover { filter: brightness(1.18); }
+  .sa-pill .sa-stage { font-size: 10px; color: var(--muted); }
+  .sa-pill .sa-time { font-variant-numeric: tabular-nums; }
+  .sa-pill .sa-shape { display: inline-block; width: 9px; height: 9px; flex: none;
+                        background: var(--c, #818cf8); }
+  .sa-shape-circle { border-radius: 50%; }
+  .sa-shape-diamond { border-radius: 1px; transform: rotate(45deg); }
+  .sa-shape-square { border-radius: 2px; }
+  .sa-shape-triangle { clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }
+  /* 状态 → 底色：与主时间轴的 .tl-block 同语义（淡紫=未到点 / 紫闪=执行中 / 绿=完成 /
+     灰=跳过 / 红=失败 / 黄=需要人工），只是把「块」换成「药丸」。 */
+  .sa-pill.planned { background: rgba(99,102,241,.30); }
+  .sa-pill.running { background: rgba(167,139,250,.36); animation: tlPulse 1.6s infinite; }
+  .sa-pill.done { background: rgba(52,211,153,.26); }
+  .sa-pill.skipped { background: rgba(59,71,98,.55); }
+  .sa-pill.failed { background: rgba(248,113,113,.28); }
+  .sa-pill.needs_human { background: rgba(251,191,36,.28); }
+  .single-axis .tl-legend .sa-shape {
+    display: inline-block; width: 9px; height: 9px; margin-right: 4px; vertical-align: -1px;
+  }
+  /* 卡片里的状态标签：普通流内标签，绝不能和轴上的绝对定位药丸共用 class */
+  .sa-chip {
+    display: inline-block; font-size: 10.5px; border-radius: 999px;
+    padding: 1px 9px; border: 1px solid var(--border); color: var(--muted);
+  }
+  .sa-chip.ok { color: #6ee7b7; border-color: #24503f; background: rgba(52,211,153,.10); }
+  .sa-chip.warn { color: #fbbf24; border-color: #5b4718; background: rgba(251,191,36,.10); }
+  .sa-chip.dry { color: #a5b4fc; border-color: #383f66; background: rgba(129,140,248,.12); }
+  .sa-chip.auto { color: #6ee7b7; border-color: #24503f; background: rgba(52,211,153,.12); }
+  .single-cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 10px; margin-top: 10px;
+  }
+  .sa-card {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
+    padding: 9px 12px; font-size: 12px; line-height: 1.7;
+  }
+  .sa-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .sa-card-head b { font-size: 12.5px; }
+  .sa-card-head .sa-sub { font-size: 11px; color: var(--muted); margin-left: auto; }
+  .sa-pill {
+    font-size: 10.5px; border-radius: 999px; padding: 1px 9px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .sa-pill.ok { color: #6ee7b7; border-color: #24503f; }
+  .sa-pill.warn { color: #fbbf24; border-color: #5b4718; }
+  .sa-pill.dry { color: #a5b4fc; border-color: #383f66; }
+  .sa-pill.auto { color: #6ee7b7; border-color: #24503f; }
+  .sa-card-body { margin-top: 5px; }
+  .sa-line { color: var(--muted); }
+  .sa-line.sa-strong { color: var(--text); font-weight: 600; }
+  .sa-line.sa-dim { opacity: .8; font-size: 11px; }
+  .sa-item { display: flex; align-items: center; gap: 7px; font-size: 11.5px; }
+  .sa-item .ok { color: #34d399; }
+  .sa-item .no { color: #f87171; }
+  .sa-item-name { color: var(--text); }
+  .sa-item-how { color: var(--muted); margin-left: auto; font-size: 11px; }
+  .sa-reply {
+    margin-top: 6px; padding: 6px 8px; border-radius: 8px;
+    background: rgba(148,163,184,.06); border: 1px solid var(--border);
+  }
+  .sa-reply .sa-cmt { color: var(--muted); font-size: 11.5px; }
+  .sa-reply .sa-ans { color: var(--text); font-size: 12px; }
+  .sa-reply .sa-meta { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
+
   .tl-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: 10.5px; color: var(--muted); }
   .tl-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 4px; }
   .auto-detail {

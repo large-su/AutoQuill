@@ -67,6 +67,29 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         """批量收集素材，返回 [{title, answer, url, index}, ...]"""
         raise NotImplementedError
 
+    def maybe_checkin_interact(self, question_url):
+        """写草稿顺带完成打卡互动（关注 1 位知友 / 送出 1 个赞同）。
+
+        上下文由自动化的 full_chain 作业写入（core.checkin.set_context）：
+        没有上下文时**零开销、零行为变化**——手动跑完整链路不碰账号互动。
+        失败只告警，绝不影响故事撰写与发布。
+        """
+        try:
+            from core import checkin as checkin_core
+            ctx = checkin_core.get_context()
+            if not ctx:
+                return None
+            if not (ctx.get("follow") in ("do", "toggle")
+                    or ctx.get("vote") in ("do", "toggle")):
+                return None
+            from applications.zhihu_story.checkin_task import run_interaction
+            result = run_interaction(self._browser(), question_url, ctx=ctx)
+            log.info("打卡互动：%s", (result or {}).get("detail") or "完成")
+            return result
+        except Exception as exc:
+            log.warning("打卡互动失败（不影响撰写）：%s", exc)
+            return None
+
     def _ai_screen_questions(self, materials, target):
         """大模型问题池筛选：排除不适合写故事/小说的候选，取最适合的。
 
@@ -144,6 +167,9 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                 on_extracted(title, answer, _footer, url)
             except Exception:
                 log.warning("on_extracted 回调失败", exc_info=True)
+        # 打卡互动：提取成功后、生成开始前（此刻参考回答页就在眼前，
+        # 关注/赞同按钮零额外导航即可点到；无上下文时是空操作）
+        self.maybe_checkin_interact(url)
 
         # ★ 生成带反馈重试：无输出/过短/格式不合规都自动重试，最多
         # STORY_GENERATE_MAX_ATTEMPTS 次；重试时把上一版的失败原因
@@ -207,6 +233,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                 on_extracted(title, answer, _footer, url)
             except Exception:
                 log.warning("on_extracted 回调失败", exc_info=True)
+        self.maybe_checkin_interact(url)
 
         story, audit = self.generate_clean_with_retry(title, answer)
 

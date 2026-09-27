@@ -52,6 +52,13 @@ a = Analysis(
         'clr',
         'bottle',
         'proxy_tools',
+        # 打卡 / 评论回复（2026-09-27 新增）：这几处都是在函数体内 import，
+        # 静态分析虽能抓到，但显式登记更稳（漏了就是安装版运行到那一步才炸）
+        'applications.zhihu_story.browser_interact',
+        'applications.zhihu_story.checkin_task',
+        'applications.zhihu_story.reply_prompts',
+        'applications.zhihu_story.reply_task',
+        'core.checkin',
     ],
     hookspath=[],
     hooksconfig={},

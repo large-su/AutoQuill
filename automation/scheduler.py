@@ -176,7 +176,8 @@ class AutomationScheduler:
                 return
         day = now.strftime("%Y-%m-%d")
         day_data = store.load_day(day)
-        due = [j for j in planner.due_jobs(now, day_data) if j.get("manual")]
+        due = [j for j in planner.due_jobs(now, day_data, plan)
+               if j.get("manual")]
         if not due:
             return
         if plan.get("pause_when_user_busy"):
@@ -211,13 +212,13 @@ class AutomationScheduler:
             _, win_end = planner.window_bounds(day, plan)
             if now > win_end:
                 self._close_out_day(now, plan, day, day_data)
-            due_manual = [j for j in planner.due_jobs(now, day_data)
+            due_manual = [j for j in planner.due_jobs(now, day_data, plan)
                           if j.get("manual")]
             if not due_manual:
                 return
             due = due_manual
         else:
-            due = planner.due_jobs(now, day_data)
+            due = planner.due_jobs(now, day_data, plan)
             if not due:
                 return
         if plan.get("pause_when_user_busy"):
@@ -496,7 +497,95 @@ class AutomationScheduler:
             "fails": fails,
             "browser_busy": busy,
             "notes": day_data.get("notes") or [],
+            # 单次任务轴 + 两张详情卡的数据（UI 用；缺数据时返回空结构不报错）
+            "single": _single_axis_payload(day, day_data, plan),
         }
+
+
+def _single_axis_payload(day, day_data, plan=None):
+    """「单次任务轴」+ 详情卡的数据（UI 只做渲染，不再自己拼业务）。
+
+    组成：
+      axis   —— 当天所有单次任务（axis=single）的作业：阶段号、计划时间、状态、说明；
+      checkin—— 打卡卡：当期活动、最近一次读取时间、各项达成情况、补做记录；
+      replies—— 回复卡：当天挑选/回复明细、过滤统计、是否演练。
+    """
+    from automation.model import TASK_TYPES
+    plan = plan or store.load_plan()
+    axis = []
+    for job in day_data.get("schedule") or []:
+        meta = TASK_TYPES.get(job.get("type")) or {}
+        if meta.get("axis") != "single":
+            continue
+        cfg = (plan.get("tasks") or {}).get(job.get("type")) or {}
+        axis.append({
+            # 该任务的运行时段（单次任务轴要画和主时间轴一样的「时段底」）
+            "window": cfg.get("window") or meta.get("default_window") or {},
+            "type": job.get("type"),
+            "label": meta.get("label") or job.get("type"),
+            "unit": meta.get("unit") or "",
+            "stage": meta.get("single_stage") or 0,
+            "planned_at": job.get("planned_at") or "",
+            "status": job.get("status") or "",
+            "units": int(job.get("units") or 0),
+            "note": job.get("note") or "",
+            "dry_run": bool(job.get("dry_run")),
+            "manual": bool(job.get("manual")),
+        })
+    axis.sort(key=lambda x: (x["stage"], x["planned_at"] or "~"))
+    return {"axis": axis,
+            "checkin": _checkin_detail(),
+            "replies": _reply_detail(day)}
+
+
+def _checkin_detail():
+    """打卡详情（读 core.checkin 的当日快照；读不到就返回空壳）。"""
+    try:
+        from core import checkin
+        state = checkin.load_state()
+        return {
+            "date": state.get("date") or "",
+            "campaign": state.get("campaign_title") or "",
+            "campaign_url": state.get("campaign_url") or "",
+            "checked_at": state.get("checked_at") or "",
+            "tasks": state.get("tasks") or {},
+            "done": state.get("done") or {},
+            "notes": (state.get("notes") or [])[-10:],
+            "tried": (state.get("tried") or [])[-10:],
+            "result": state.get("result") or {},
+            "line": (checkin.summary(state) or {}).get("line") or "",
+            "pending": checkin.pending_kinds(state),
+        }
+    except Exception as exc:                # noqa: BLE001
+        log.debug("打卡详情组装失败：%s", exc)
+        return {"tasks": {}, "done": {}, "pending": [], "line": ""}
+
+
+def _reply_detail(day):
+    """回复详情（当天台账 + 最近一次运行的抓取/过滤统计）。"""
+    try:
+        from core import checkin
+        rows = [r for r in checkin.load_replies()
+                if str(r.get("at") or "").startswith(day)]
+        runs = checkin.load_reply_runs(day)
+        return {
+            "today": [{
+                "author": r.get("author") or "",
+                "comment": r.get("comment") or "",
+                "reply": r.get("reply") or "",
+                "question": r.get("question") or "",
+                "answer_url": r.get("answer_url") or "",
+                "sent": bool(r.get("sent")),
+                "dry_run": bool(r.get("dry_run")),
+                "failed": bool(r.get("failed")),
+                "issues": r.get("issues") or [],
+                "at": r.get("at") or "",
+            } for r in rows[-20:]],
+            "last_run": runs[-1] if runs else {},
+        }
+    except Exception as exc:                # noqa: BLE001
+        log.debug("回复详情组装失败：%s", exc)
+        return {"today": [], "last_run": {}}
 
 
 _scheduler = None

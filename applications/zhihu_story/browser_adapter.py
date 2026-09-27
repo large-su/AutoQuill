@@ -60,10 +60,12 @@ from .browser_utils import (   # noqa: F401
     story_markdown_to_html,
 )
 from .browser_dom import DomReadMixin
+from .browser_interact import InteractMixin, ReplyActionsMixin
 from .browser_session import SessionMixin
 from .browser_write import WriteActionsMixin
 
-class ZhihuBrowser(SessionMixin, DomReadMixin, WriteActionsMixin):
+class ZhihuBrowser(SessionMixin, DomReadMixin, WriteActionsMixin, InteractMixin,
+                   ReplyActionsMixin):
     """知乎 DOM 浏览器通道。启动独立 Edge 实例，复用持久化登录态。"""
 
     def __init__(self, user_data_dir=USER_DATA_DIR,

@@ -208,6 +208,28 @@ def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
         if not_before is not None and not_before > eff_start:
             eff_start = not_before          # 只在「现在之后」铺（见函数 docstring）
         window_minutes = (win_end - eff_start).total_seconds() / 60.0
+        # ---- 一天只排一次班的类型（job_mode=single）----
+        # 用户口径（2026-09-27）：这类任务「时段内随机取一个时间点，一次把
+        # 该做的都做完，不分散在多个时间点」。所以：
+        #   · 当天已经排过（不论完成与否）就不再排第二次——部分完成也不追加，
+        #     避免「回复 2 条 → 又排一班 → 又回复」把动作摊成好几波；
+        #   · 一个作业扛全部配额：units = 剩余数量，params.count 带上数量。
+        if meta.get("job_mode") == "single":
+            if any(j.get("type") == task_type for j in schedule):
+                continue
+            times = spread_times(eff_start, win_end, 1, min_gap, rng,
+                                 jitter_minutes=jitter, spread=spread)
+            when = times[0] if times else eff_start
+            jobs.append({
+                "key": job_key(task_type, day, "single", 0),
+                "type": task_type,
+                "planned_at": when.replace(microsecond=0).isoformat(),
+                "status": STATUS_PLANNED,
+                "units": remaining,
+                "params": dict(cfg.get("params") or {}, count=remaining),
+                "note": "一次跑完（最多 %d %s）" % (remaining, meta["unit"]),
+            })
+            continue
         # ★ 数量上限是算出来的：(N-1) * G ≤ W → N ≤ floor(W/G) + 1
         limit = feasible_count(window_minutes, min_gap)
         if remaining > limit:
@@ -233,6 +255,22 @@ def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
                 "params": cfg.get("params") or {},
                 "note": "",
             })
+    # 当天最后一个「写草稿」作业打标记：打卡互动的「翻转兜底」
+    # （取关再关注 / 取消赞同再赞同）只在这一班做——用户口径 2026-09-27。
+    # ★ 只在打卡任务确实启用时才打标：否则会给作业挂一条「打卡可翻转」的说明，
+    #   而打卡根本没开——老用户（不开打卡）看到的就是纯噪音。
+    checkin_on = bool(((plan.get("tasks") or {}).get("checkin") or {}).get("enabled"))
+    last_chain = [j for j in jobs
+                  if checkin_on
+                  and j.get("type") == "full_chain"
+                  and j.get("status") == STATUS_PLANNED
+                  and j.get("planned_at")]
+    if last_chain:
+        last_chain.sort(key=lambda j: j["planned_at"])
+        params = dict(last_chain[-1].get("params") or {})
+        params["is_last_of_day"] = True
+        last_chain[-1]["params"] = params
+        last_chain[-1]["note"] = (last_chain[-1].get("note") or "") + "（当天最后一班：打卡可翻转）"
     _, plan_win_end = _window_bounds(day, plan, {})
     return _deconflict(jobs, win_end=plan_win_end)
 
@@ -424,16 +462,77 @@ def plan_retry(now, plan, day_data, failed_job, delay_minutes=20):
     return True
 
 
-def due_jobs(now, day_data):
-    """该执行的作业：已到点且未执行（按任务优先级与计划时间排序）。"""
+def single_stage_of(task_type):
+    """单次任务在「单次任务轴」上的阶段序号（非单次任务返回 None）。
+
+    阶段小的先跑：回复评论（1）→ 打卡检查（2）。用户 2026-09-27 口径：
+    「回复肯定要提前完成，打卡最终在晚上检查是否完成，只有提前回复好了，
+    检查时才能确保全部完成」。
+    """
+    return TASK_TYPES.get(task_type, {}).get("single_stage")
+
+
+def _stage_blocked(job, schedule, plan=None, now=None):
+    """阶段闸门：前面阶段的单次作业还没结束 → 本作业不许派发。
+
+    判据刻意宽松（只要「已结束」，不要求「成功」）：回复失败/跳过也照样放行，
+    否则回复一挂、检查也跟着废掉——那是最糟的组合（既没回复、也没人发现问题）。
+
+    安全阀：前一阶段的作业还挂着 planned，但它的运行时段已经过去（今天不可能
+    再跑了）→ 视为结束，不把后一阶段卡死一整天。
+    """
+    stage = single_stage_of(job.get("type"))
+    if stage is None:
+        return False
+    for other in schedule or []:
+        if other is job:
+            continue
+        other_stage = single_stage_of(other.get("type"))
+        if other_stage is None or other_stage >= stage:
+            continue
+        status = other.get("status")
+        if status not in (STATUS_PLANNED, STATUS_RUNNING):
+            continue                      # 已完成/跳过/失败 → 放行
+        if status == STATUS_PLANNED and plan is not None and now is not None:
+            cfg = (plan.get("tasks") or {}).get(other.get("type")) or {}
+            try:
+                _start, win_end = _window_bounds(day_data_date(schedule), plan, cfg)
+            except Exception:             # noqa: BLE001
+                win_end = None
+            if win_end is not None and now > win_end:
+                continue                  # 前序作业的时段已过 → 不阻塞
+        return True
+    return False
+
+
+def day_data_date(schedule, fallback=""):
+    """从排班里取日期（阶段闸门算窗口用）；取不到回落今天。"""
+    for j in schedule or []:
+        ts = j.get("planned_at") or ""
+        if len(ts) >= 10:
+            return ts[:10]
+    return fallback or datetime.now().strftime("%Y-%m-%d")
+
+
+def due_jobs(now, day_data, plan=None):
+    """该执行的作业：已到点、未执行、且通过阶段闸门（按优先级与计划时间排序）。
+
+    plan 传入时才做「前序作业时段已过」的安全阀判断；不传则只看作业状态，
+    行为对既有调用方（与单测）保持兼容。
+    """
+    schedule = day_data.get("schedule", [])
     out = []
-    for job in day_data.get("schedule", []):
+    for job in schedule:
         if job.get("status") != STATUS_PLANNED or not job.get("planned_at"):
             continue
-        if datetime.fromisoformat(job["planned_at"]) <= now:
-            out.append(job)
+        if datetime.fromisoformat(job["planned_at"]) > now:
+            continue
+        if _stage_blocked(job, schedule, plan=plan, now=now):
+            continue
+        out.append(job)
     out.sort(key=lambda j: (TASK_PRIORITY.get(j["type"], 99), j["planned_at"]))
     return out
+
 
 
 def next_job(now, day_data):
@@ -484,16 +583,28 @@ def summarize(now, plan, day_data):
             "max_per_day": feasible_count(win_minutes, min_gap),
             "done": done, "pending": pending, "failed": failed, "skipped": skipped,
             "desc": meta["desc"],
+            # 单次任务（axis=single）不画在主时间轴上，改画「单次任务轴」
+            "axis": meta.get("axis") or "",
+            "single_stage": meta.get("single_stage") or 0,
+            "job_mode": meta.get("job_mode") or "",
         }
+    # 倒计时/进度只算主时间轴上的任务（单次任务有自己的轴，混在一起会误导）
     nxt = next_job(now, day_data)
-    active_types = [v for v in per_type.values() if v["enabled"] and v["implemented"]]
+    if nxt and (TASK_TYPES.get(nxt.get("type"), {}).get("axis") == "single"):
+        main_pending = [j for j in schedule
+                        if j.get("status") == STATUS_PLANNED and j.get("planned_at")
+                        and TASK_TYPES.get(j.get("type"), {}).get("axis") != "single"]
+        nxt = min(main_pending, key=lambda j: j["planned_at"]) if main_pending else None
+    active_types = [v for v in per_type.values()
+                    if v["enabled"] and v["implemented"] and v.get("axis") != "single"]
     return {
         "day": day_data.get("date"),
         "in_window": window_open(now, plan),
         "next_job": nxt,
         "rescheduled": int(day_data.get("rescheduled") or 0),
         "per_type": per_type,
-        "done_total": sum(v["done"] for v in per_type.values()),
+        "done_total": sum(v["done"] for v in per_type.values()
+                          if v.get("axis") != "single"),
         "plan_total": sum(v["cap"] for v in active_types),
         "window_label": "%s-%s" % ((plan.get("window") or {}).get("start", ""),
                                    (plan.get("window") or {}).get("end", "")),

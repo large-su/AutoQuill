@@ -118,6 +118,11 @@ def append_ledger(entry: dict):
         log.warning("自动化台账写入失败（不影响执行）：%s", exc)
 
 
+
+# 评论回复的运行统计不放这里：那份数据属于「评论回复」这个业务，
+# 由 core.checkin 自己管（automation 只编排，不反向提供业务存储）。
+
+
 def load_ledger(day: str = "", limit: int = 0) -> list:
     """读台账；给了 day 只返回该日期的记录。limit>0 时只取最后 N 条。"""
     path = ledger_file()

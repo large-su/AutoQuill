@@ -69,24 +69,37 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual([j.get("planned_at") for j in a["schedule"]],
                          [j.get("planned_at") for j in b["schedule"]])
 
-    def test_only_two_task_types_exist(self):
-        """任务类型只有「写故事 + 发布草稿」（用户 2026-09-24 口径）。
+    def test_task_types_are_all_runnable(self):
+        """契约层不登记「预留类型」：清单里有的就是能跑的。
 
-        打卡挑战（网页端不好操作）与互动类（感谢/回复评论，看着太乱）都不做；
-        契约层不再登记任何「预留类型」，清单里有的就是能跑的。
+        2026-09-24 曾砍到只剩「写故事 + 发布草稿」；2026-09-27 用户重新
+        要求做打卡挑战（真机探针确认可行），于是加回 checkin（打卡互动
+        巡检 + 写草稿顺带关注/赞同）。评论回复（reply_comment）等它落地
+        再登记——这里只放已经在 executor 里有处理器的类型。
         """
-        self.assertEqual(sorted(TASK_TYPES), ["full_chain", "publish_drafts"])
+        self.assertEqual(sorted(TASK_TYPES),
+                         ["checkin", "full_chain", "publish_drafts",
+                          "reply_comment"])
+        from automation.executor import _HANDLERS
+        self.assertEqual(sorted(_HANDLERS), sorted(TASK_TYPES),
+                         "登记的每个类型都必须有执行器处理器")
 
     def test_removed_types_in_old_plan_are_ignored(self):
-        """老 plan.json 里残留的打卡/互动配置必须被安静丢弃（用户无需手工改文件）。"""
+        """老 plan.json 里残留的已砍类型必须被安静丢弃（用户无需手工改文件）。
+
+        可以确定不会再回来的：thank（感谢赞同/喜欢）、refresh_snapshot（M3 取消）。
+        """
         legacy = {"enabled": True,
-                  "tasks": {"checkin": {"enabled": True, "daily_cap": 5},
-                            "thank": {"enabled": True, "daily_cap": 9},
-                            "reply_comment": {"enabled": True},
+                  "tasks": {"thank": {"enabled": True, "daily_cap": 9},
+                            "refresh_snapshot": {"enabled": True},
                             "full_chain": {"enabled": True, "daily_cap": 2}}}
         plan = normalize_plan(legacy)
-        self.assertEqual(sorted(plan["tasks"]), ["full_chain", "publish_drafts"])
+        self.assertEqual(sorted(plan["tasks"]),
+                         ["checkin", "full_chain", "publish_drafts",
+                          "reply_comment"])
         self.assertEqual(plan["tasks"]["full_chain"]["daily_cap"], 2)
+        self.assertFalse(plan["tasks"]["checkin"]["enabled"],
+                         "老计划里没有 checkin → 默认关闭，不擅自替用户开启")
         day = planner.materialize_day(self.now, plan, {}, {})
         self.assertFalse([j for j in day["schedule"]
                           if j["type"] not in ("full_chain", "publish_drafts")])
@@ -585,10 +598,11 @@ class AutomationApiTest(unittest.TestCase):
         self.assertIn("per_type", d["summary"])
 
     def test_types_catalog_lists_only_real_tasks(self):
-        """目录里只有两个能跑的任务（UI 泳道/配置表据此渲染，不留空泳道）。"""
+        """目录里只有能跑的任务（UI 泳道/配置表据此渲染，不留空泳道）。"""
         d = self.client.get("/api/automation/types").json()
         ids = sorted(t["id"] for t in d["types"])
-        self.assertEqual(ids, ["full_chain", "publish_drafts"])
+        self.assertEqual(ids, ["checkin", "full_chain", "publish_drafts",
+                               "reply_comment"])
         self.assertTrue(all(t["implemented"] for t in d["types"]))
 
     def test_plan_saved_and_normalized(self):
@@ -600,7 +614,9 @@ class AutomationApiTest(unittest.TestCase):
         plan = r.json()["plan"]
         self.assertEqual(plan["window"]["start"], "09:00")
         self.assertEqual(plan["tasks"]["full_chain"]["daily_cap"], 5)
-        self.assertEqual(sorted(plan["tasks"]), ["full_chain", "publish_drafts"])
+        self.assertEqual(sorted(plan["tasks"]),
+                         ["checkin", "full_chain", "publish_drafts",
+                          "reply_comment"])
 
     def test_start_stop_toggles_enabled(self):
         # 全部任务关闭 → start 后调度线程起来也不会执行任何作业
@@ -624,6 +640,317 @@ class AutomationApiTest(unittest.TestCase):
     def test_unknown_type_rejected(self):
         r = self.client.post("/api/automation/run-now", json={"type": "nope"})
         self.assertEqual(r.status_code, 400)
+
+
+class CheckinScheduleTest(unittest.TestCase):
+    """打卡任务（2026-09-27 新增）的排班与上下文契约。
+
+    用户口径：打卡互动/巡检这类任务「时段内随机取一个时间点，一次把该做的
+    都做完，不分散在多个时间点」；而「翻转兜底」只允许发生在当天最后一班
+    写草稿上。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_ck_"))
+        self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._p.start()
+        self.now = datetime(2026, 9, 27, 8, 0, 0)
+
+    def tearDown(self):
+        self._p.stop()
+
+    def test_checkin_is_single_job_per_day(self):
+        plan = _plan(checkin={"enabled": True, "daily_cap": 3})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        jobs = [j for j in day["schedule"] if j["type"] == "checkin"]
+        self.assertEqual(len(jobs), 1, "一天只排一次班，绝不摊成好几波")
+        self.assertEqual(jobs[0]["units"], 3, "一个作业扛全部配额")
+        self.assertEqual(jobs[0]["params"]["count"], 3)
+
+    def test_checkin_lands_in_its_own_evening_window(self):
+        plan = _plan(checkin={"enabled": True, "daily_cap": 1})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        job = [j for j in day["schedule"] if j["type"] == "checkin"][0]
+        when = datetime.fromisoformat(job["planned_at"])
+        self.assertGreaterEqual(when.hour * 60 + when.minute, 20 * 60 + 30)
+        self.assertLessEqual(when.hour * 60 + when.minute, 22 * 60 + 30)
+
+    def test_single_mode_not_rescheduled_after_done(self):
+        plan = _plan(checkin={"enabled": True, "daily_cap": 3})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        # 第一个作业只完成了 1 项（配额 3）——按口径也不该再排第二班
+        for j in day["schedule"]:
+            if j["type"] == "checkin":
+                j["status"] = planner.STATUS_DONE
+                j["units"] = 1
+        again = planner.materialize_day(self.now, plan, day, {"checkin": 1})
+        jobs = [j for j in again["schedule"] if j["type"] == "checkin"]
+        self.assertEqual(len(jobs), 1)
+
+    def test_last_full_chain_job_is_stamped(self):
+        # 打卡启用时才打「当天最后一班」标记（翻转兜底只在那一班做）
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 3},
+                     checkin={"enabled": True, "daily_cap": 1})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        chains = [j for j in day["schedule"] if j["type"] == "full_chain"]
+        stamped = [j for j in chains if (j.get("params") or {}).get("is_last_of_day")]
+        self.assertEqual(len(stamped), 1, "翻转兜底只能有一个落点")
+        latest = max(chains, key=lambda j: j["planned_at"])
+        self.assertIs(stamped[0], latest, "必须是当天最后一班")
+        self.assertIn("打卡可翻转", stamped[0]["note"])
+
+
+    def test_reply_comment_single_job_and_dry_run_default(self):
+        """评论回复：一天一班、一个作业扛全部配额；默认演练（不发出去）。"""
+        plan = _plan(reply_comment={"enabled": True, "daily_cap": 2})
+        self.assertTrue(plan["tasks"]["reply_comment"]["params"]["dry_run"],
+                        "默认必须是演练：用户要求先看两天语气")
+        day = planner.materialize_day(self.now, plan, {}, {})
+        jobs = [j for j in day["schedule"] if j["type"] == "reply_comment"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["units"], 2)
+        self.assertEqual(jobs[0]["params"]["count"], 2)
+        when = datetime.fromisoformat(jobs[0]["planned_at"])
+        self.assertGreaterEqual(when.hour, 10, "默认落在白天 10:00–22:00")
+        self.assertLessEqual(when.hour, 22)
+
+
+    def test_default_windows_keep_reply_before_check(self):
+        """默认时段必须保证「先回复、后检查」——这是给用户看的顺序承诺。"""
+        plan = _plan(reply_comment={"enabled": True, "daily_cap": 3},
+                     checkin={"enabled": True, "daily_cap": 1})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        rep = [j for j in day["schedule"] if j["type"] == "reply_comment"][0]
+        chk = [j for j in day["schedule"] if j["type"] == "checkin"][0]
+        self.assertLess(rep["planned_at"], chk["planned_at"],
+                        "回复评论的落点必须早于打卡检查")
+        self.assertLessEqual(rep["planned_at"][11:16], "20:00")
+        self.assertGreaterEqual(chk["planned_at"][11:16], "20:30")
+
+    def test_reply_comment_auto_mode_kept_when_user_turns_it_off(self):
+        plan = _plan(reply_comment={"enabled": True, "daily_cap": 1,
+                                    "params": {"dry_run": False}})
+        self.assertFalse(plan["tasks"]["reply_comment"]["params"]["dry_run"])
+
+
+    def test_last_of_day_stamp_only_when_checkin_enabled(self):
+        """打卡没启用时，写草稿的作业上不该出现「打卡可翻转」这种噪音说明。"""
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 3})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        chains = [j for j in day["schedule"] if j["type"] == "full_chain"]
+        self.assertFalse([j for j in chains
+                          if (j.get("params") or {}).get("is_last_of_day")])
+        self.assertFalse([j for j in chains if "打卡可翻转" in (j.get("note") or "")])
+
+    def test_last_of_day_stamp_added_when_checkin_enabled(self):
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 3},
+                     checkin={"enabled": True, "daily_cap": 1})
+        day = planner.materialize_day(self.now, plan, {}, {})
+        stamped = [j for j in day["schedule"]
+                   if (j.get("params") or {}).get("is_last_of_day")]
+        self.assertEqual(len(stamped), 1)
+        self.assertEqual(stamped[0]["type"], "full_chain")
+
+    def test_context_empty_when_checkin_disabled(self):
+        from automation.executor import _checkin_context
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 1})
+        store.save_plan(plan)
+        ctx = _checkin_context({"params": {"is_last_of_day": True}})
+        self.assertEqual(ctx, {}, "没启用打卡 → 写草稿完全不碰账号互动")
+
+    def test_context_when_enabled_and_pending(self):
+        from automation.executor import _checkin_context
+        plan = _plan(full_chain={"enabled": True, "daily_cap": 1},
+                     checkin={"enabled": True, "daily_cap": 1})
+        store.save_plan(plan)
+        from core import checkin as ck
+        state = ck.load_state()
+        ck.update_tasks(state, {"follow": {"title": "关注 1 位知友", "done": False},
+                                "vote": {"title": "送出 1 个赞同", "done": True}})
+        ck.save_state(state)
+        ctx = _checkin_context({"params": {"is_last_of_day": False}})
+        self.assertEqual(ctx["follow"], "do")
+        self.assertEqual(ctx["vote"], "done", "打卡页已完成 → 不再重复点赞")
+        self.assertFalse(ctx["is_last"])
+        ctx_last = _checkin_context({"params": {"is_last_of_day": True}})
+        self.assertEqual(ctx_last["follow"], "toggle", "最后一班允许翻转兜底")
+
+
+class SingleStageGateTest(unittest.TestCase):
+    """单次任务的「阶段闸门」：回复评论（阶段 1）没结束，打卡检查（阶段 2）不许跑。
+
+    用户 2026-09-27 口径：「回复肯定要提前完成，打卡最终在晚上检查是否完成，
+    只有提前回复好了，检查时才能确保全部完成」。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_gate_"))
+        self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._p.start()
+        self.now = datetime(2026, 9, 27, 21, 0, 0)
+        self.plan = _plan(reply_comment={"enabled": True, "daily_cap": 1},
+                          checkin={"enabled": True, "daily_cap": 1})
+
+    def tearDown(self):
+        self._p.stop()
+
+    def _job(self, task_type, status, when):
+        return {"key": "%s-%s" % (task_type, status), "type": task_type,
+                "planned_at": when, "status": status, "units": 1, "params": {}}
+
+    def _day(self, reply_status):
+        sched = [self._job("reply_comment", reply_status, "2026-09-27T14:00:00"),
+                 self._job("checkin", planner.STATUS_PLANNED, "2026-09-27T20:30:00")]
+        return {"date": "2026-09-27", "schedule": sched}
+
+    def _overlapping_plan(self):
+        """把检查时段提前到与回复时段重叠（18:00 起），用于隔离验证闸门本身。"""
+        return _plan(reply_comment={"enabled": True, "daily_cap": 1},
+                     checkin={"enabled": True, "daily_cap": 1,
+                              "window": {"start": "18:00", "end": "23:00"}})
+
+    def test_stage_metadata_declared(self):
+        self.assertEqual(planner.single_stage_of("reply_comment"), 1)
+        self.assertEqual(planner.single_stage_of("checkin"), 2)
+        self.assertIsNone(planner.single_stage_of("full_chain"))
+
+    def test_pending_reply_blocks_check(self):
+        # 回复还挂在时段内（10:00–20:00）没跑，检查到点了也不许抢跑
+        plan = self._overlapping_plan()
+        now = datetime(2026, 9, 27, 19, 30, 0)
+        day = {"date": "2026-09-27", "schedule": [
+            self._job("reply_comment", planner.STATUS_PLANNED, "2026-09-27T18:00:00"),
+            self._job("checkin", planner.STATUS_PLANNED, "2026-09-27T19:00:00")]}
+        due = planner.due_jobs(now, day, plan)
+        self.assertEqual([j["type"] for j in due], ["reply_comment"],
+                         "检查必须等回复先结束，绝不抢跑")
+
+    def test_terminal_reply_opens_gate(self):
+        for status in (planner.STATUS_DONE, planner.STATUS_SKIPPED,
+                       planner.STATUS_FAILED):
+            due = planner.due_jobs(self.now, self._day(status), self.plan)
+            self.assertIn("checkin", [j["type"] for j in due],
+                          "回复%s → 检查照跑（依赖的是「已结束」，不是「成功」）" % status)
+
+    def test_running_reply_blocks_check(self):
+        due = planner.due_jobs(self.now, self._day(planner.STATUS_RUNNING),
+                               self.plan)
+        self.assertEqual([j["type"] for j in due], [])
+
+    def test_window_passed_opens_gate(self):
+        # 安全阀：回复还挂着 planned，但它的时段（默认 10:00–20:00）已经过去，
+        # 今天它不可能再跑了 → 不能把检查一路卡死（否则当天没人确认打卡）
+        self.assertGreater(self.now.hour, 20)
+        due = planner.due_jobs(self.now, self._day(planner.STATUS_PLANNED),
+                               self.plan)
+        self.assertIn("checkin", [j["type"] for j in due])
+
+    def test_non_single_tasks_never_blocked(self):
+        day = {"date": "2026-09-27", "schedule": [
+            self._job("full_chain", planner.STATUS_PLANNED, "2026-09-27T14:00:00"),
+            self._job("checkin", planner.STATUS_PLANNED, "2026-09-27T20:30:00")]}
+        due = planner.due_jobs(self.now, day, self.plan)
+        self.assertEqual(sorted(j["type"] for j in due),
+                         ["checkin", "full_chain"])
+
+    def test_due_jobs_without_plan_keeps_old_behaviour(self):
+        # 不传 plan 时只按作业状态判断（老调用方/老单测不受影响）
+        due = planner.due_jobs(self.now, self._day(planner.STATUS_PLANNED))
+        self.assertEqual([j["type"] for j in due], ["reply_comment"])
+
+
+class SingleAxisPayloadTest(unittest.TestCase):
+    """单次任务轴 + 两张详情卡的数据组装（UI 只渲染，不再拼业务）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_axis_"))
+        self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._p.start()
+
+    def tearDown(self):
+        self._p.stop()
+
+    def test_axis_sorted_by_stage_and_has_details(self):
+        from automation.scheduler import _single_axis_payload
+        day = {"date": "2026-09-27", "schedule": [
+            {"key": "c", "type": "checkin", "status": "planned",
+             "planned_at": "2026-09-27T20:40:00", "units": 1},
+            {"key": "r", "type": "reply_comment", "status": "done",
+             "planned_at": "2026-09-27T14:00:00", "units": 2,
+             "dry_run": True},
+            {"key": "f", "type": "full_chain", "status": "planned",
+             "planned_at": "2026-09-27T15:00:00", "units": 1}]}
+        payload = _single_axis_payload("2026-09-27", day)
+        self.assertEqual([x["type"] for x in payload["axis"]],
+                         ["reply_comment", "checkin"],
+                         "轴上只有单次任务，且按阶段排序（先回复后检查）")
+        first = payload["axis"][0]
+        self.assertEqual(first["stage"], 1)
+        self.assertEqual(first["label"], "回复评论")
+        self.assertTrue(first["dry_run"])
+        self.assertIn("checkin", payload)
+        self.assertIn("replies", payload)
+        self.assertEqual(payload["checkin"]["pending"], ["follow", "vote", "comment"])
+
+    def test_reply_runs_roundtrip(self):
+        """回复运行统计归 core.checkin 管（automation 只编排，不做业务存储）。"""
+        from core import checkin as _ck
+        _ck.append_reply_run({"collected": 20, "candidates": 10,
+                             "dropped": {"hostile": 3, "replied": 2},
+                             "units": 1, "dry_run": True})
+        rows = _ck.load_reply_runs()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["collected"], 20)
+        self.assertEqual(rows[0]["dropped"]["hostile"], 3)
+        from datetime import date as _date
+        self.assertEqual(len(_ck.load_reply_runs(_date.today().isoformat())), 1)
+        self.assertEqual(len(_ck.load_reply_runs("1999-01-01")), 0)
+
+
+class CheckinInteractWiringTest(unittest.TestCase):
+    """互动落地模块的纯逻辑（不碰浏览器）：目标挑选与翻转动作编排。"""
+
+    def test_pick_target_prefers_reference_answer(self):
+        from applications.zhihu_story.checkin_task import pick_target
+        items = [{"index": 0, "author": "甲", "has_follow": False, "has_vote": False},
+                 {"index": 1, "author": "乙", "has_follow": True, "has_vote": True}]
+        self.assertEqual(pick_target(items)["author"], "乙")
+        items[0]["has_follow"] = True
+        self.assertEqual(pick_target(items)["author"], "甲", "优先参考回答（第一条）")
+        self.assertIsNone(pick_target([]))
+
+    def test_apply_action_toggle_does_cancel_then_redo(self):
+        from applications.zhihu_story.checkin_task import apply_action
+        calls = []
+
+        class FakeBrowser:
+            def set_follow(self, want, index, **kw):
+                calls.append(("follow", want, index))
+                return {"ok": True, "detail": "ok"}
+
+            def set_vote(self, want, index, **kw):
+                calls.append(("vote", want, index))
+                return {"ok": True, "detail": "ok"}
+
+        r = apply_action(FakeBrowser(), "follow", 0, "toggle", pause=0)
+        self.assertTrue(r["ok"])
+        self.assertEqual(calls, [("follow", False, 0), ("follow", True, 0)])
+        calls.clear()
+        apply_action(FakeBrowser(), "vote", 2, "do", pause=0)
+        self.assertEqual(calls, [("vote", True, 2)])
+
+    def test_apply_action_toggle_aborts_when_cancel_fails(self):
+        from applications.zhihu_story.checkin_task import apply_action
+        calls = []
+
+        class FakeBrowser:
+            def set_follow(self, want, index, **kw):
+                calls.append(want)
+                return {"ok": False, "detail": "点了但状态没变"}
+
+        r = apply_action(FakeBrowser(), "follow", 0, "toggle", pause=0)
+        self.assertFalse(r["ok"])
+        self.assertEqual(calls, [False], "取消没成功就不该硬点第二次")
 
 
 if __name__ == "__main__":

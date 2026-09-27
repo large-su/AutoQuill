@@ -50,34 +50,54 @@ def _full_chain(job, should_stop=None, progress=None):
     params = job.get("params") or {}
     mode = params.get("mode") if params.get("mode") in ("single", "clean") else "single"
     rounds = max(1, int(params.get("rounds") or 1))
+    # 打卡互动上下文：写草稿时顺带关注/赞同（打卡任务没启用 → 空上下文，
+    # 工作流那侧零行为变化）。翻转兜底只在当天最后一班（is_last_of_day）。
+    checkin_ctx = _checkin_context(job)
+    _set_checkin_context(checkin_ctx)
+    # ★ 上下文必须只活在「自动化派出的这一班」里：整段用 try/finally 包死，
+    #   任何异常路径（启动失败/超时/人工介入）都清理干净。手动跑完整链路
+    #   从不写这个上下文，所以永远不会触发关注/赞同（用户 2026-09-27 要求）。
     try:
-        runner.start(_RunSpec(mode=mode, rounds=rounds))
-    except Exception as exc:      # noqa: BLE001  （HTTPException 409 = 已有任务在跑）
-        raise BrowserBusy("启动失败（可能已有任务在运行）：%s" % exc)
-    st = {}
-    while True:
-        st = runner.status()
-        state = st.get("state")
-        if progress:
-            try:
-                progress(st)
-            except Exception:      # noqa: BLE001
-                pass
-        if state in ("done", "error", "stopped", "timeout", "idle"):
-            break
-        if should_stop and should_stop():
-            runner.stop()          # 用户停止：通知工作流在检查点中断
-            log.info("自动化：收到停止请求，已请求中断当前撰写任务")
-        time.sleep(2)
-    if st.get("guide_needed"):
-        raise NeedHuman("运行前检测未通过：%s" % st["guide_needed"])
+        try:
+            runner.start(_RunSpec(mode=mode, rounds=rounds))
+        except Exception as exc:  # noqa: BLE001  （HTTPException 409 = 已有任务在跑）
+            raise BrowserBusy("启动失败（可能已有任务在运行）：%s" % exc)
+        st = {}
+        while True:
+            st = runner.status()
+            state = st.get("state")
+            if progress:
+                try:
+                    progress(st)
+                except Exception:  # noqa: BLE001
+                    pass
+            if state in ("done", "error", "stopped", "timeout", "idle"):
+                break
+            if should_stop and should_stop():
+                runner.stop()      # 用户停止：通知工作流在检查点中断
+                log.info("自动化：收到停止请求，已请求中断当前撰写任务")
+            time.sleep(2)
+        if st.get("guide_needed"):
+            raise NeedHuman("运行前检测未通过：%s" % st["guide_needed"])
+    finally:
+        _set_checkin_context(None)     # 作业结束（含异常路径）立即清理
     ok = state == "done"
     story = st.get("story") or {}
+    message = st.get("message") or ("完成" if ok else "失败")
+    if checkin_ctx:
+        # 把「顺带完成的打卡互动」写进作业说明，时间轴/通知里一眼能看到
+        try:
+            from core import checkin as _ck
+            line = (_ck.summary(_ck.load_state()) or {}).get("line") or ""
+            if line:
+                message = "%s；%s" % (message, line)
+        except Exception:          # noqa: BLE001
+            pass
     return {
         "ok": ok,
         "units": 1 if ok else 0,
         "status": STATUS_DONE if ok else STATUS_FAILED,
-        "message": st.get("message") or ("完成" if ok else "失败"),
+        "message": message,
         "artifacts": [story.get("md_path")] if story.get("md_path") else [],
     }
 
@@ -168,9 +188,160 @@ def _publish_drafts(job, should_stop=None, progress=None):
         }
 
 
+def _set_checkin_context(ctx):
+    """写/清打卡互动上下文（core.checkin 的进程内单例）。"""
+    try:
+        from core import checkin as _ck
+        if ctx:
+            _ck.set_context(ctx)
+        else:
+            _ck.clear_context()
+    except Exception:              # noqa: BLE001
+        pass
+
+
+def _checkin_context(job):
+    """当天这一班写草稿要不要顺带做打卡互动（关注 / 赞同）。
+
+    打卡任务没启用时返回 {} → 工作流那侧完全不走互动逻辑。
+    返回 {follow: do|toggle|done|skip, vote: 同, is_last: bool}。
+    """
+    try:
+        from automation.store import load_plan
+        from automation.model import TASK_TYPES
+        cfg = (load_plan().get("tasks") or {}).get("checkin") or {}
+        if not (cfg.get("enabled") and TASK_TYPES["checkin"]["implemented"]):
+            return {}
+        from core import checkin as _ck
+        state = _ck.load_state()
+        is_last = bool((job.get("params") or {}).get("is_last_of_day"))
+        return {
+            "is_last": is_last,
+            "follow": _ck.decide(state, "follow", is_last=is_last),
+            "vote": _ck.decide(state, "vote", is_last=is_last),
+        }
+    except Exception as exc:       # noqa: BLE001
+        log.debug("打卡上下文构建失败（不影响撰写）：%s", exc)
+        return {}
+
+
+def _checkin(job, should_stop=None, progress=None):
+    """打卡巡检（晚间兜底）：读当期打卡页，没达成时自己找目标补做。
+
+    「写草稿顺带互动」是主路径，这一班是保险：当天草稿全失败 / 最后一班
+    被跳过时，还有一次机会把关注、赞同补上（含取关再关注的翻转兜底）。
+    另外它每次都会刷新当日打卡快照，界面据此显示今天打卡成没成。
+    """
+    from web_drivers.browser_pool import (
+        ProfileBusy, _browser_lock, profile_in_use,
+    )
+    busy = _browser_busy()
+    if busy:
+        raise BrowserBusy("浏览器被占用：" + "、".join(busy))
+    if profile_in_use():
+        raise BrowserBusy("浏览器正被登录引导或其它实例占用，稍后顺延")
+    from applications.zhihu_story.browser_adapter import (
+        LOGIN_EXPIRED_MSG, ZhihuBrowser,
+    )
+    from applications.zhihu_story import checkin_task
+    with _browser_lock:
+        b = ZhihuBrowser(headless=True)
+        try:
+            b.start()
+            if not b.is_logged_in():
+                raise NeedHuman(LOGIN_EXPIRED_MSG)
+
+            def _say(text):
+                if progress:
+                    try:
+                        progress({"message": text})
+                    except Exception:      # noqa: BLE001
+                        pass
+
+            r = checkin_task.run_checkin_job(b, progress=_say)
+        except ProfileBusy as exc:
+            raise BrowserBusy(str(exc))
+        finally:
+            try:
+                b.close()
+            except Exception:          # noqa: BLE001
+                pass
+    ok = bool(r.get("ok"))
+    # 失败记 FAILED（触发当日补位重试，最晚仍在自己的时段内）；
+    # 「今天不需要补做」是成功（ok=True, units=0），不是失败。
+    return {
+        "ok": ok,
+        "units": max(0, int(r.get("units") or 0)),
+        "status": STATUS_DONE if ok else STATUS_FAILED,
+        "message": r.get("detail") or ("完成" if ok else "未完成"),
+        "artifacts": [],
+    }
+
+
+
+
+def _reply_comment(job, should_stop=None, progress=None):
+    """回复读者评论（每天 N 条，一次跑完；默认演练：只生成不发送）。
+
+    与 publish_drafts / checkin 不同，本任务**同时要用共享浏览器和网页版大模型**
+    （挑评论、写回复都走网页版），所以必须用共享实例 get_browser()——网页版
+    驱动的页面就挂在同一个 context 上（独立 page，互不干扰）；另起独占实例会
+    撞同一个 profile 锁（exitCode=21）。
+
+    收尾顺序沿用 run_manager 的纪律：先删网页会话（需要页面/登录态还在），
+    再关共享浏览器。
+    """
+    busy = _browser_busy()
+    if busy:
+        raise BrowserBusy("浏览器被占用：" + "、".join(busy))
+    if profile_in_use():
+        raise BrowserBusy("浏览器正被登录引导或其它实例占用，稍后顺延")
+    from web_drivers.browser_pool import close_shared_browser, get_browser
+    from applications.zhihu_story.browser_adapter import LOGIN_EXPIRED_MSG
+    from applications.zhihu_story import reply_task
+    params = job.get("params") or {}
+    count = max(1, int(params.get("count") or 1))
+    dry_run = bool(params.get("dry_run", True))
+
+    def _say(text):
+        if progress:
+            try:
+                progress({"message": text})
+            except Exception:      # noqa: BLE001
+                pass
+
+    r = {}
+    b = get_browser()          # 共享实例（懒启动，内部自己拿锁）
+    try:
+        if not b.is_logged_in():
+            raise NeedHuman(LOGIN_EXPIRED_MSG)
+        r = reply_task.run_reply_job(b, count=count, dry_run=dry_run,
+                                     progress=_say) or {}
+    finally:
+        try:
+            from web_drivers import reset_driver
+            reset_driver(delete_session=True)   # 会话纪律：用完即删
+        except Exception:          # noqa: BLE001
+            pass
+        try:
+            close_shared_browser()
+        except Exception:          # noqa: BLE001
+            pass
+    ok = bool(r.get("ok"))
+    return {
+        "ok": ok,
+        "units": max(0, int(r.get("units") or 0)),
+        "status": STATUS_DONE if ok else STATUS_FAILED,
+        "message": r.get("detail") or ("完成" if ok else "未完成"),
+        "artifacts": [],
+    }
+
+
 _HANDLERS = {
     "full_chain": _full_chain,
     "publish_drafts": _publish_drafts,
+    "checkin": _checkin,
+    "reply_comment": _reply_comment,
 }
 
 

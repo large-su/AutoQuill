@@ -1,0 +1,197 @@
+# -*- coding: utf-8 -*-
+# ============================================================
+# applications/zhihu_story/checkin_task.py
+# 打卡互动落地：把 core/checkin 的决策变成页面上真实的关注 / 赞同
+#
+# 两条入口：
+#   run_interaction(browser, question_url, ctx)  写草稿顺带做（主路径）
+#   run_checkin_job(browser, progress)           晚间兜底巡检（独立任务）
+#
+# 实测行为（2026-09-27 真机，见 docs/CHECKIN-REPLY-PLAN.md 11.1）：
+#   - 关注 / 取关 / 赞同 / 取消赞同 都是一次点击直接生效，没有确认弹窗；
+#   - 所以「翻转」就是两次点击：先取消，再重新做一次；
+#   - 关注按钮文案：关注 / 已关注 / 互相关注；赞同按钮：赞同 N / 已赞同 N。
+#
+# 本模块只做「DOM + 决策落地」，不排班、不管配额（那是 automation/）。
+# ============================================================
+
+import logging
+import time
+
+from core import checkin
+
+log = logging.getLogger(__name__)
+
+KIND_LABEL = {'follow': '关注', 'vote': '赞同'}
+
+
+def _say(progress, text):
+    log.info('打卡互动：%s', text)
+    if progress:
+        try:
+            progress(text)
+        except Exception:                # noqa: BLE001
+            pass
+
+
+def pick_target(items, prefer_index=0):
+    '''从回答条目里挑可操作的目标：优先参考回答（第一条），否则第一条带按钮的。
+
+    items 来自 browser.list_interact_targets() 的 items 字段。
+    '''
+    items = list(items or [])
+    for it in items:
+        if it.get('index') == prefer_index and (it.get('has_follow') or it.get('has_vote')):
+            return it
+    for it in items:
+        if it.get('has_follow') or it.get('has_vote'):
+            return it
+    return None
+
+
+def apply_action(browser, kind, index, action, pause=2.0):
+    '''在指定回答条目上执行 do / toggle，返回 {ok, detail}。
+
+    toggle = 先取消再重做（取关→关注 / 取消赞同→赞同）——只在当天最后
+    一个写草稿、且打卡仍未达成时才会走到这里。
+    '''
+    if action == 'do':
+        r = (browser.set_follow(True, index) if kind == 'follow'
+             else browser.set_vote(True, index))
+        return {'ok': bool(r.get('ok')), 'detail': r.get('detail') or '',
+                'result': r}
+    if action == 'toggle':
+        back = (browser.set_follow(False, index) if kind == 'follow'
+                else browser.set_vote(False, index))
+        if not back.get('ok'):
+            return {'ok': False, 'detail': '取消失败：' + (back.get('detail') or ''),
+                    'result': back}
+        time.sleep(pause)
+        again = (browser.set_follow(True, index) if kind == 'follow'
+                 else browser.set_vote(True, index))
+        return {'ok': bool(again.get('ok')),
+                'detail': '翻转：' + (again.get('detail') or ''), 'result': again}
+    return {'ok': False, 'detail': '未知动作：%s' % action}
+
+
+def run_interaction(browser, question_url, ctx=None, state=None, now=None,
+                    progress=None):
+    '''写草稿提取成功后调用：按上下文完成打卡互动。
+
+    ctx: {'follow': 'do'|'toggle'|'done'|'skip', 'vote': 同上, 'is_last': bool}
+    返回 {ok, handled, skipped, detail}；ctx 为空时立刻返回，零开销。
+    '''
+    ctx = dict(ctx or {})
+    kinds = [k for k in ('follow', 'vote') if ctx.get(k) in ('do', 'toggle')]
+    if not kinds:
+        return {'ok': True, 'handled': [], 'skipped': [], 'detail': '无需互动'}
+    is_last = bool(ctx.get('is_last'))
+    state = state if state is not None else checkin.load_state(now=now)
+    _say(progress, '本次要完成：%s%s'
+         % ('、'.join(KIND_LABEL[k] for k in kinds),
+            '（当天最后一班，允许翻转）' if is_last else ''))
+    if question_url:
+        try:
+            browser.open_question(question_url)          # 幂等：同页不重载
+        except Exception as exc:                         # noqa: BLE001
+            log.warning('打卡互动：打开问题页失败：%s', exc)
+    info = browser.list_interact_targets() or {}
+    target = pick_target(info.get('items') or [])
+    if target is None:
+        detail = '页面上没有可操作的回答条目（没有关注/赞同按钮）'
+        _say(progress, detail)
+        return {'ok': False, 'handled': [], 'skipped': kinds, 'detail': detail}
+    index = target.get('index') or 0
+    _say(progress, '目标：%s（第 %s 条回答）'
+         % (target.get('author') or '未知作者', index))
+    handled, skipped, details = [], [], []
+    for kind in kinds:
+        action = checkin.target_action(kind, target, is_last=is_last)
+        if action == 'skip':
+            reason = '已是目标状态' if not is_last else '状态不可操作'
+            checkin.mark_tried(state, kind, author=target.get('author'),
+                               reason=reason)
+            skipped.append(kind)
+            details.append('%s：跳过（%s）' % (KIND_LABEL[kind], reason))
+            continue
+        r = apply_action(browser, kind, index, action)
+        if r.get('ok'):
+            checkin.mark_done(state, kind, detail='%s %s'
+                              % (KIND_LABEL[kind], target.get('author') or ''))
+            handled.append(kind)
+            details.append('%s：%s'
+                           % (KIND_LABEL[kind],
+                              '完成' if action == 'do' else '翻转完成'))
+        else:
+            checkin.mark_tried(state, kind, author=target.get('author'),
+                               reason=r.get('detail') or '失败')
+            skipped.append(kind)
+            details.append('%s：失败（%s）' % (KIND_LABEL[kind], r.get('detail') or ''))
+        _say(progress, details[-1])
+    checkin.save_state(state)
+    return {'ok': bool(handled) or not skipped, 'handled': handled,
+            'skipped': skipped, 'detail': '；'.join(details) or '完成'}
+
+
+def _first_recommend_question(browser, max_cards=6):
+    '''兜底巡检用：从推荐问题页取一个可写的问题 URL（取不到返回空串）。'''
+    try:
+        browser.open_recommend_page()
+        qs = browser.get_recommend_questions(max_cards=max_cards) or []
+        for q in qs:
+            if q.get('href'):
+                return q['href']
+    except Exception as exc:                             # noqa: BLE001
+        log.warning('打卡巡检：取推荐问题失败：%s', exc)
+    return ''
+
+
+def run_checkin_job(browser, url='', progress=None, now=None, is_last=True,
+                    question_url=''):
+    '''晚间兜底巡检：刷新打卡状态；仍未达成时自己找个目标补做。
+
+    is_last=True：巡检发生在当天最后一班之后，允许翻转。
+    返回 {ok, units, detail, summary}。
+    '''
+    state = checkin.load_state(now=now)
+    campaign = url or state.get('campaign_url') or ''
+    if not campaign:
+        _say(progress, '不知道当期打卡页，去创作中心首页找「去打卡」…')
+        found = browser.discover_campaign_url()
+        if not found.get('ok'):
+            return {'ok': False, 'units': 0,
+                    'detail': found.get('detail') or '找不到当期打卡页',
+                    'summary': checkin.summary(state)}
+        campaign = found['url']
+        checkin.set_campaign(state, campaign, found.get('text') or '')
+    _say(progress, '读取打卡页：%s' % campaign)
+    info = browser.read_checkin_tasks(campaign)
+    tasks = info.get('tasks') or {}
+    if not tasks:
+        return {'ok': False, 'units': 0,
+                'detail': '打卡页没解析到今日任务（可能改版或未登录）',
+                'summary': checkin.summary(state)}
+    checkin.update_tasks(state, tasks, now=now)
+    if info.get('title'):
+        state['campaign_title'] = info['title']
+    need = [k for k in ('follow', 'vote') if checkin.needs(state, k)]
+    summary = checkin.summary(state)
+    _say(progress, summary['line'])
+    if not need:
+        checkin.set_result(state, summary['ok'], summary['line'])
+        checkin.save_state(state)
+        return {'ok': True, 'units': 0, 'detail': summary['line'],
+                'summary': summary}
+    ctx = {k: checkin.decide(state, k, is_last=is_last) for k in ('follow', 'vote')}
+    q = question_url or _first_recommend_question(browser)
+    if not q:
+        return {'ok': False, 'units': 0,
+                'detail': '没有可用的问题页，无法补做互动',
+                'summary': summary}
+    r = run_interaction(browser, q, ctx=ctx, state=state, now=now,
+                        progress=progress)
+    summary = checkin.summary(state)
+    checkin.set_result(state, summary['ok'], summary['line'])
+    checkin.save_state(state)
+    return {'ok': bool(r.get('ok')), 'units': len(r.get('handled') or []),
+            'detail': r.get('detail') or '', 'summary': summary}
