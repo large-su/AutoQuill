@@ -328,6 +328,28 @@ _MANAGE_COMMENTS_JS = _js('limit', '''
   return { ok: true, count: cards.length, cards: out };
 ''')
 
+# 评论区的「加载更多」：滚动评论容器 + 点「更多/全部/展开」控件（最多几轮）
+#   —— 2026-09-27 真机发现：回答页只加载前 N 条评论，目标评论若不在首批里，
+#      回复链路就会「找不到这条评论」。这里把加载做足（有界，不做无限滚动）。
+_LOAD_MORE_COMMENTS_JS = _js('', '''
+  const scope = document.querySelector('.Comments-container, .CommentList, [class*=Comments-container], [class*=CommentList]') || document;
+  let clicked = '';
+  const all = scope.querySelectorAll('div,span,a,button');
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    if (!el.offsetParent) continue;
+    const t = txt(el);
+    if (!t || t.length > 20) continue;
+    if (t.indexOf('更多') >= 0 || t.indexOf('全部') >= 0 || t.indexOf('展开') >= 0) {
+      el.click(); clicked = t; break;
+    }
+  }
+  const box = document.querySelector('.Comments-container, .CommentList, [class*=Comments-container], [class*=CommentList]');
+  if (box) box.scrollTop = box.scrollHeight;
+  window.scrollBy(0, 900);
+  return clicked;
+''')
+
 # 回答页评论区：每条评论正文 + 它下面有没有嵌套回复（防重复回复的真相来源）
 # ★ 嵌套回复的 DOM 尚未用真实回复校准过（见 docs/CHECKIN-REPLY-PLAN.md 11.4），
 #   这里只做「有嵌套就报出来」的保守判断，拿到第一条真实回复后立刻校准。
@@ -469,8 +491,12 @@ class InteractMixin:
         return {'ok': bool(cards), 'count': (raw or {}).get('count') or 0,
                 'comments': cards}
 
-    def read_answer_comments(self):
-        '''当前回答页的评论列表（含「这条评论下面有没有嵌套回复」的保守判断）。'''
+    def read_answer_comments(self, newest_first=True):
+        '''当前回答页的评论列表（含「这条评论下面有没有嵌套回复」的保守判断）。
+
+        newest_first：展开后把排序切到「最新」（回答页默认按热度只渲染前 N 条，
+        我们要回复的评论常常不在里面）。
+        '''
         # 评论默认折叠：先点开「N 条评论」，再读
         self._safe_evaluate('''() => {
           const ZW = String.fromCharCode(8203,8204,8205,65279);
@@ -494,10 +520,21 @@ class InteractMixin:
           return '';
         }''')
         time.sleep(4)
-        for _ in range(3):
-            self._safe_evaluate('() => { window.scrollBy(0, 900); return true; }')
-            time.sleep(1.2)
-        return self._safe_evaluate(_ANSWER_COMMENTS_JS) or {'ok': False, 'comments': []}
+        if newest_first:
+            self._click_comment_sort('最新')
+        # 有界加载：滚动评论容器 / 点「更多·全部·展开」，直到条数不再增长
+        # （2026-09-27：只滚 3 屏时，较老的评论根本没加载出来）
+        info = {}
+        seen = -1
+        for _round in range(8):
+            info = self._safe_evaluate(_ANSWER_COMMENTS_JS) or {}
+            n = len(info.get('comments') or [])
+            if n <= seen:
+                break
+            seen = n
+            self._safe_evaluate(_LOAD_MORE_COMMENTS_JS)
+            time.sleep(1.4)
+        return info or {'ok': False, 'comments': []}
 
 
 # ------------------------------------------------------------
@@ -607,6 +644,53 @@ _THREAD_JS = _js('target', '''
 class ReplyActionsMixin:
     '''评论回复的页面动作：开编辑器 / 填入 / 发送 / 核实是否已回复。'''
 
+    def _click_comment_sort(self, label='最新'):
+        '''把评论区排序切到「最新」。
+
+        回答页默认按热度只渲染前 N 条评论（真机实测：某回答 76 条评论只渲染 11 条），
+        而我们要回复的评论往往就在「最新」那一批里——不切排序就会「找不到这条评论」。
+        '''
+        try:
+            loc = self.page.get_by_text(label, exact=True)
+            if loc.count() == 0:
+                return False
+            loc.first.click(timeout=5000)
+            time.sleep(2.5)
+            return True
+        except Exception as exc:            # noqa: BLE001
+            log.debug('切换评论排序到「%s」失败：%s', label, exc)
+            return False
+
+    def verify_reply_landed(self, comment_text, reply_text, reload_wait=6,
+                            max_rounds=2):
+        '''发送后核实：重新加载页面 → 展开评论区（切最新）→ 找回复正文。
+
+        2026-09-27 真机教训：点完「发布」立刻读当前 DOM 读不到（知乎要重新渲染
+        嵌套结构），于是**明明发出去了却报「未确认到回复落地」**——假警报。
+        现在改成重新加载后再找，判据是「评论区文本里出现我们的回复正文」。
+        '''
+        text = (reply_text or '').strip()
+        if not text:
+            return False
+        for _round in range(max(1, int(max_rounds))):
+            try:
+                time.sleep(reload_wait)
+                self.page.reload(wait_until='domcontentloaded', timeout=45000)
+                time.sleep(reload_wait)
+            except Exception as exc:        # noqa: BLE001
+                log.debug('发送后重新加载失败：%s', exc)
+            body = ''
+            try:
+                self.read_answer_comments()
+                body = self.page.inner_text('body') or ''
+            except Exception as exc:        # noqa: BLE001
+                log.debug('发送后读评论区失败：%s', exc)
+            if text in body:
+                return True
+        return False
+
+
+
     def open_reply_editor(self, comment_text, pause=2.5):
         '''按评论正文定位并点开「回复」编辑器。返回 {ok, editor, detail}。'''
         r = self._safe_evaluate(_OPEN_REPLY_JS, comment_text) or {}
@@ -648,6 +732,14 @@ class ReplyActionsMixin:
                 for w in wanted:
                     if w and (w in n or n in w):
                         return True
+            # 兜底（真机补）：嵌套结构读不到时，直接看页面正文里有没有我们的回复
+            try:
+                body = self.page.inner_text('body') or ''
+            except Exception:               # noqa: BLE001
+                body = ''
+            for w in wanted:
+                if w and w in body:
+                    return True
             return False
         return True
 
@@ -689,6 +781,7 @@ class ReplyActionsMixin:
             return {'ok': False, 'sent': False,
                     'detail': clicked.get('reason') or '点发送失败'}
         time.sleep(max(2, int(verify_wait) * 0.5))
+        # 快路径：当前 DOM 里嵌套回复数增加 / 正文出现我们的文本
         thread = self.read_comment_thread(comment_text)
         nested_after = int((thread or {}).get('nested') or 0)
         nested_before = int(opened.get('nested_before') or 0)
@@ -697,8 +790,12 @@ class ReplyActionsMixin:
         body = ' '.join((thread or {}).get('contents') or [])
         if text[:8] and text[:8] in body:
             return {'ok': True, 'sent': True, 'detail': '已发送（在评论区读到回复内容）'}
+        # ★ 慢路径（2026-09-27 真机补）：立刻读当前 DOM 会漏——知乎要重新渲染
+        #   嵌套结构，于是出现过「明明发出去了却报未确认」的假警报。重新加载再找。
+        if self.verify_reply_landed(comment_text, text):
+            return {'ok': True, 'sent': True, 'detail': '已发送并确认（重新加载后读到）'}
         return {'ok': False, 'sent': True,
-                'detail': '已点发送，但没确认到回复落地（请人工核对）'}
+                'detail': '已点发送，但没确认到回复落地（请人工核对回答页评论区）'}
 
     def _clear_editor(self):
         '''清空编辑器（演练收尾/失败回滚用），不按 Enter、不发任何内容。'''
