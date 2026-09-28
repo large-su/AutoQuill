@@ -11,6 +11,7 @@ tools/archive/probes/probe_draft_publish.py。
   - 登录失效不是发布失败 → NeedHuman（暂停全部自动化，不反复重试）；
   - 手动任务优先 → BrowserBusy（顺延，不计失败）。
 """
+import json
 import tempfile
 import unittest
 from datetime import datetime
@@ -38,10 +39,20 @@ class _FakePage:
         self.url = ""
         self.gotos = []
         self.redirect = redirect
+        self.listeners = []          # 发布回执监听器（真实页面是 page.on 挂的）
 
     def goto(self, url, **kw):
         self.url = self.redirect or url
         self.gotos.append(url)
+
+    def on(self, event, fn):
+        self.listeners.append((event, fn))
+
+    def remove_listener(self, event, fn, **kw):
+        # Playwright 的 page.remove_listener(event, fn, boolean=False)：
+        # 假件必须接受这个多余参数，否则真代码里的调用会抛 TypeError 被
+        # 「摘监听失败也不影响发布」的兜底吞掉（测试就测不出泄漏）。
+        self.listeners = [x for x in self.listeners if x != (event, fn)]
 
 
 class _FakeWriteBrowser(WriteActionsMixin):
@@ -55,8 +66,32 @@ class _FakeWriteBrowser(WriteActionsMixin):
         self.page = _FakePage(redirect)
         self.cards = cards
         self.has_button = has_button
-        self.clicked = 0
+        self.clicked = 0            # JS 点击兜底次数
+        self.native = 0             # 真实鼠标点击次数（优先走这条）
         self.probed = 0
+
+    def native_click(self):
+        """模拟一次成功的「真实鼠标点击」并计数。"""
+        self.native += 1
+        return {"ok": True, "how": "native"}
+
+    def emits(self, body, status=200):
+        """模拟服务端回执：喂给真实监听器（走生产的 _publish_receipt 解析）。"""
+        for event, fn in list(self.page.listeners):
+            if event == "response":
+                fn(_FakeResponse("https://www.zhihu.com/api/v4/content/publish",
+                                 status, body))
+        return self
+
+    def _click_publish_native(self):
+        """按生产代码的真实优先级点发布：真实鼠标点击优先，失败才退回 JS 点击。
+
+        2026-09-28 真机对照：JS 的 hit.click() 那次发布请求根本没发出去，
+        必须用 Playwright 真实点击（假页面没有 get_by_role，这里直接模拟成功）。
+        """
+        if not self.has_button:
+            return {"ok": False, "how": "", "reason": "no-button"}
+        return self.native_click()
 
     def _safe_evaluate(self, js, *args, **kw):
         if js is WriteActionsMixin._DRAFT_CARDS_JS:
@@ -65,11 +100,13 @@ class _FakeWriteBrowser(WriteActionsMixin):
             self.probed += 1
             click = bool(args and args[0])
             if not self.has_button:
-                return False
+                return None
             if click:
                 self.clicked += 1
-                self.page.url = ANSWER_URL      # 点发布后跳到回答页
-            return True
+            # 命中返回按钮信息（2026-09-28 起契约由 bool 改为 dict，
+            # 供日志记录命中的 class/disabled 状态）
+            return {"text": "发布回答", "cls": "Button Button--primary",
+                    "disabled": False}
         if js is WriteActionsMixin._PUBLISH_CONFIRM_JS:
             return ""
         return True                              # 滚动/编辑器就绪等
@@ -101,9 +138,10 @@ class DraftPublishTest(unittest.TestCase):
         r = b.publish_draft()
         self.assertTrue(r["ok"])
         self.assertEqual(r["qid"], "333")
-        self.assertEqual(r["url"], ANSWER_URL)
         self.assertEqual(b.page.gotos[-1],
                          "https://www.zhihu.com/question/333#write")
+        # 点了「发布回答」：优先真实鼠标点击（Playwright 不可用时退回 JS 点击，
+        # 假页面没有 get_by_role → 计数落在 JS 兜底那一次上）
         self.assertEqual(b.clicked, 1)
 
     def test_explicit_qid_targets_that_card(self):
@@ -169,6 +207,161 @@ class DraftPublishTest(unittest.TestCase):
         self.assertIn("登录", r["detail"])
         self.assertEqual(b.clicked, 0)            # 绝不点发布
         self.assertNotEqual(r.get("reason"), "empty")
+
+
+class PublishReceiptTest(unittest.TestCase):
+    """发布回执解析：服务端用 HTTP 200 + body.code 表达业务失败。
+
+    2026-09-28 真机定位：草稿「点了发布 90s 未确认」的真因是服务端
+    `POST /api/v4/content/publish` 回了
+    `{"code":403,"message":"当前问题不支持开启送礼物"}` ——
+    只看 HTTP 状态码会把「被拒绝」当成「已提交」，于是干等到超时。
+    """
+
+    def _b(self, body, status=200):
+        b = WriteActionsMixin()
+        b._publish_receipt = WriteActionsMixin._publish_receipt.__get__(b)
+        return b
+
+    def test_code_403_is_a_definite_failure(self):
+        b = self._b(None)
+        watch = {"_events": [{"status": 200, "body": json.dumps(
+            {"code": 403, "message": "当前问题不支持开启送礼物",
+             "toast_message": "当前问题不支持开启送礼物"})}]}
+        r = b._publish_receipt(watch)
+        self.assertIs(r["ok"], False)
+        self.assertIn("送礼物", r["detail"])
+
+    def test_code_0_is_success(self):
+        b = self._b(None)
+        r = b._publish_receipt({"_events": [{"status": 200,
+                                             "body": '{"code":0}'}]})
+        self.assertIs(r["ok"], True)
+
+    def test_no_receipt_yet_is_unknown(self):
+        b = self._b(None)
+        self.assertIsNone(b._publish_receipt({"_events": []})["ok"])
+        self.assertIsNone(b._publish_receipt(None)["ok"])
+
+    def test_http_500_without_json_is_failure(self):
+        b = self._b(None)
+        r = b._publish_receipt({"_events": [{"status": 500, "body": "oops"}]})
+        self.assertIs(r["ok"], False)
+
+
+class _FakeResponse:
+    """Playwright Response 的最小替身（监听器只读 url/status/text）。"""
+
+    def __init__(self, url, status, body):
+        self.url = url
+        self.status = status
+        self._body = body
+
+    def text(self):
+        return self._body
+
+
+class PublishGiftRetryTest(unittest.TestCase):
+    """服务端因「送礼物」拒绝时：关掉送礼物后自动重试一次（真机错误码 403）。
+
+    真机证据（2026-09-28）：
+      POST /api/v4/content/publish ->
+      {"code":403,"message":"当前问题不支持开启送礼物"}
+    """
+
+    GIFT_REJECT = json.dumps({
+        "code": 403, "message": "当前问题不支持开启送礼物",
+        "toast_message": "当前问题不支持开启送礼物"})
+
+    def setUp(self):
+        self._sleep = mock.patch("time.sleep")
+        self._sleep.start()
+        self.addCleanup(self._sleep.stop)
+        self._dump = mock.patch.object(WriteActionsMixin, "_dump_page_state",
+                                       lambda *a, **k: "")
+        self._dump.start()
+        self.addCleanup(self._dump.stop)
+
+    def _browser(self, draft_content="x" * 999, receipt="GIFT_REJECT"):
+        """假浏览器：草稿还在（否则立刻走「草稿已清空 = 成功」那一支）。
+
+        receipt="GIFT_REJECT" → 每次点发布都回一次「送礼物被拒」；
+        传 None 表示点击不发任何回执（模拟 JS 点击那种「服务端根本没收到」）。
+        """
+        b = _FakeWriteBrowser([_card(0, 111)])
+        b.get_draft_content = lambda question_id=None: draft_content
+        b._open_publish_settings = lambda: True
+        b._turn_gift_off = lambda: True
+        if receipt == "GIFT_REJECT":
+            def _click():
+                b.emits(self.GIFT_REJECT)
+                return b.native_click()
+            b._click_publish_native = _click
+        elif receipt is None:
+            b._click_publish_native = lambda: b.native_click()
+        return b
+
+    def test_gift_rejection_triggers_one_retry_then_success(self):
+        b = self._browser()
+        calls = {"n": 0}
+
+        def _click():
+            calls["n"] += 1
+            # 第一次：被「送礼物」拒绝；第二次（关掉之后）：成功
+            b.emits(self.GIFT_REJECT if calls["n"] == 1 else '{"code":0}')
+            return b.native_click()
+
+        b._click_publish_native = _click
+        r = b.publish_draft()
+        self.assertEqual(b.native, 2)          # 关掉后重试了一次
+        self.assertTrue(r["ok"])
+
+    def test_gift_rejection_is_only_retried_once(self):
+        """关掉送礼物后仍被同样理由拒绝 → 如实上报，不再无脑重试。"""
+        b = self._browser()
+        r = b.publish_draft()
+        self.assertFalse(r["ok"])
+        self.assertIn("送礼物", r["detail"])
+        self.assertEqual(b.native, 2)          # 总共两次，不是无限重试
+
+    def test_unknown_rejection_is_reported_verbatim(self):
+        b = self._browser(receipt=None)
+
+        def _click():
+            b.emits(json.dumps({"code": 403, "message": "内容涉嫌违规"}))
+            return b.native_click()
+
+        b._click_publish_native = _click
+        r = b.publish_draft()
+        self.assertFalse(r["ok"])
+        self.assertIn("内容涉嫌违规", r["detail"])
+        self.assertEqual(b.native, 1)          # 非送礼物问题不重试
+
+    def test_no_receipt_at_all_is_reported_as_request_never_sent(self):
+        """点了但服务端没收到请求（JS 点击不被受理）→ 报告要能区分出来。
+
+        真机对照（2026-09-28）：JS 的 hit.click() 那次发布**没有任何网络请求**，
+        页面只是把按钮变灰；Playwright 真实鼠标点击才会发出
+        POST /api/v4/content/publish。所以「一条回执都没有」必须单独说清楚，
+        否则用户只会看到「90s 未确认」这种没法排查的提示。
+        """
+        b = self._browser(receipt=None)
+        r = b.publish_draft(verify_timeout=0)
+        self.assertFalse(r["ok"])
+        self.assertIn("没有收到", r["detail"])
+
+    def test_watch_is_disarmed_even_when_click_explodes(self):
+        """点击抛异常时也要摘掉回执监听（长驻进程里监听器不能越积越多）。"""
+        b = self._browser()
+
+        def _boom():
+            raise RuntimeError("Target page, context or browser has been closed")
+
+        b._click_publish_native = _boom
+        with self.assertRaises(RuntimeError):
+            b.publish_draft()
+        self.assertEqual(b.page.listeners, [])
+
 
 
 class _ExecFakeBrowser:

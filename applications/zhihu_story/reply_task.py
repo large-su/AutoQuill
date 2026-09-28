@@ -172,13 +172,30 @@ def read_original(browser, answer_url, wait=6, timeout=45000):
 
 
 def compose_reply(driver, comment, question, answer, author='', progress=None,
-                  max_retry=2):
-    '''写回复 + 本地硬校验 + 带原因重写。返回 {ok, reply, issues}。'''
+                  max_retry=2, empty_retry=1):
+    '''写回复 + 本地硬校验 + 带原因重写。返回 {ok, reply, issues}。
+
+    ★ 2026-09-28 真机补：网页版驱动偶发「读回空内容」（日志里
+    「判定完成（15s，1 字符）」= 只读到思考态/占位符），此时回复必然是空，
+    带原因重写也没用（模型没收到反馈、会话里还挂着那次空应答）——直接**另起
+    一轮提问**重试，避免白白浪费掉这次回复机会。
+    '''
     prompt = rp.build_reply_prompt(comment, question, answer)
     reply, issues = '', []
-    for attempt in range(max(1, int(max_retry) + 1)):
-        raw = ask_llm(prompt, driver=driver, reuse_session=(attempt > 0))
+    first = True                                   # 第一次提问一定是新会话
+    # 总预算 = 重写次数 + 空内容重试次数（空内容也占一次预算，不会无限重试）
+    budget = max(1, int(max_retry) + 1) + max(0, int(empty_retry))
+    for attempt in range(budget):
+        raw = ask_llm(prompt, driver=driver, reuse_session=not first)
+        first = False
         reply = rp.strip_wrapping(raw)
+        if not reply and attempt + 1 < budget:
+            # 驱动没读到内容：不算「这版不达标」，换一轮新提问重来
+            # （绝不复用那次空会话，否则会把空上下文一起带进去）
+            _say(progress, '第 %d 次没读回内容（网页版驱动偶发），重新提问'
+                 % (attempt + 1))
+            first = True
+            continue
         issues = rp.check_reply(reply, comment, author=author)
         if not issues:
             return {'ok': True, 'reply': reply, 'issues': []}
@@ -284,7 +301,8 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
             #   回答页按热度只渲染前 N 条，评论一多就「找不到这条评论」——2026-09-27 真机。
             record['attempted'] = True          # 点过发送即算消耗（防重复打扰）
             try:
-                sent = browser.send_reply_from_manage(comment, record['reply'])
+                sent = browser.send_reply_from_manage(
+                    comment, record['reply'], answer_url=record['answer_url'])
             except Exception as exc:             # noqa: BLE001
                 log.warning('管理页发送回复异常：%s', exc)
                 sent = {'ok': False, 'sent': False, 'detail': str(exc)}
@@ -315,9 +333,19 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
             if sent.get('ok'):
                 done.append(record)
                 details.append('已回复：%s → %s' % (comment[:16], record['reply']))
+            elif sent.get('sent'):
+                # ★ 2026-09-28：评论**已经发出去了**，只是没能就地确认到。
+                #   这种「已发送未确认」绝不能记成任务失败——它已经消耗掉这条评论，
+                #   重发就是二次打扰读者；记失败还会三连败触发熔断，把整个「回复评论」
+                #   任务自动停用（用户侧表现：任务莫名消失、再也不回复了）。
+                #   按「完成（待人工核对）」处理：占配额、不补位、不熔断，通知里说明白。
+                done.append(record)
+                details.append('已发送（未确认）：%s' % (sent.get('detail') or ''))
+                _say(progress, '已发送但未确认到落地，按完成处理（不重发）：%s'
+                     % comment[:16])
             else:
                 skipped.append(record)
-                details.append('发送未确认：%s' % (sent.get('detail') or ''))
+                details.append('发送失败：%s' % (sent.get('detail') or ''))
         # 顺带刷新打卡状态：评论任务在打卡页上算不算达成，一次页面就读得到
         _refresh_checkin_after_reply(browser, state, progress)
     finally:
@@ -331,9 +359,16 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
                 drop_counts=drop_counts, picked=len(done) + len(skipped),
                 units=units, dry_run=dry_run, details=details)
     prefix = '演练' if dry_run else '回复'
-    detail = ('%s %d 条' % (prefix, units)) if units else (details[-1] if details else '没有可回复的评论')
-    if details:
-        detail = detail + '：' + '；'.join(details[-3:])
+    # ★ 2026-09-28：本轮**一条都没回**时，只报本轮的最后一条原因。
+    #   旧写法会把前几轮的失败原因一起带上，通知里就会出现
+    #   「大模型判定这批没有适合友善回应的评论：发送未确认：…（上一轮的旧账）」，
+    #   让人以为这轮又发失败了——台账/通知必须只说这一轮发生了什么。
+    if units:
+        detail = '%s %d 条' % (prefix, units)
+        if details:
+            detail += '：' + '；'.join(details[-3:])
+    else:
+        detail = details[-1] if details else '没有可回复的评论'
     return {'ok': not skipped or bool(done), 'units': units, 'detail': detail,
             'replies': [r.get('reply') for r in done],
             'records': done + skipped, 'dropped': dropped}

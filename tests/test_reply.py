@@ -121,6 +121,54 @@ class TestStripWrapping(unittest.TestCase):
                          '谢谢您，「好看」我记下了。')
 
 
+class TestComposeReplyEmptyDriverOutput(unittest.TestCase):
+    '''网页版驱动偶发读回空内容：要另起一轮重试，而不是白扔一次回复机会。
+
+    2026-09-28 真机日志：「文本稳定 2 轮，判定完成（15.0s，1 字符）」——
+    只读到思考态占位符，reply 为空。带原因重写没用（模型没收到反馈），
+    必须重新提问。
+    '''
+
+    COMMENT = '写得真好，蹲后续'
+
+    def _compose(self, outputs):
+        calls = []
+
+        def _ask(prompt, driver=None, reuse_session=True):
+            calls.append({'prompt': prompt, 'reuse': reuse_session})
+            return outputs[min(len(calls) - 1, len(outputs) - 1)]
+
+        orig = rt.ask_llm
+        rt.ask_llm = _ask
+        try:
+            r = rt.compose_reply(None, self.COMMENT, '题', '答')
+        finally:
+            rt.ask_llm = orig
+        return r, calls
+
+    def test_empty_first_answer_is_retried(self):
+        r, calls = self._compose(['', '行，我尽量把这条线写清。'])
+        self.assertTrue(r['ok'])
+        self.assertEqual(len(calls), 2)          # 空答案触发了一次重试
+        self.assertFalse(calls[0]['reuse'])      # 第一次是新会话
+        self.assertFalse(calls[1]['reuse'])      # 重试也另起一轮（不复用空会话）
+
+    def test_empty_twice_gives_up_without_crashing(self):
+        r, calls = self._compose(['', ''])
+        self.assertFalse(r['ok'])
+        # 空内容也占重试预算：最多 (max_retry+1)+empty_retry = 4 次，绝不无限重试
+        self.assertEqual(len(calls), 4)
+        self.assertIn('空', '；'.join(r['issues']))
+        self.assertTrue(all(not c['reuse'] for c in calls))   # 每轮都另起会话
+
+    def test_short_but_nonempty_goes_down_the_rewrite_path(self):
+        """有内容但不达标 → 走「带原因重写」（复用会话），不是空内容重试。"""
+        r, calls = self._compose(['太短', '行，我尽量把这条线写清。'])
+        self.assertTrue(r['ok'])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[1]['reuse'])       # 重写复用同一会话
+
+
 class TestPrefilter(unittest.TestCase):
     '''规则预筛（用户口径：引流、戾气、纯表情、已回过的直接踢掉）。'''
 

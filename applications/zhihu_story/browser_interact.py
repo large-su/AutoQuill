@@ -45,6 +45,17 @@ def normalize_button_text(text):
     return _ZW_RE.sub('', str(text or '')).strip()
 
 
+_WS_RE = re.compile(r'\s+')
+
+
+def flat_text(text):
+    '''零宽字符 + 所有空白全部去掉（与页面里 JS 的 flat() 同一口径）。
+
+    评论卡片正文里换行/空格数量两边常常不一致（DOM 重排后更明显），
+    用「去空白后包含」比「原样包含」稳得多。'''
+    return _WS_RE.sub('', _ZW_RE.sub('', str(text or '')))
+
+
 def follow_state(text):
     '''按钮文案 → followed / none / unknown。'''
     t = normalize_button_text(text)
@@ -355,6 +366,26 @@ _CLICK_MANAGE_PUBLISH_JS = _js('', '''
   return { ok: true };
 ''')
 
+# 页面上的报错/风控文案：发布被服务端拒绝时唯一能读到的证据
+#   —— 2026-09-28：回复「点了发布但没落地」时必须能区分
+#      「服务端拒绝了（可以换路径重试）」与「其实已经发出去了（绝不能重发）」。
+_REPLY_ERROR_JS = _js('', '''
+  const vis = e => e.offsetParent !== null;
+  const hits = [];
+  const nodes = Array.from(document.querySelectorAll('div,span,p,li'));
+  for (let i = 0; i < nodes.length; i++) {
+    const e = nodes[i];
+    if (!vis(e)) continue;
+    const t = clean(e.innerText);
+    if (!t || t.length > 100) continue;
+    if (/发送失败|发布失败|操作失败|操作频繁|系统繁忙|请稍后再试|内容违规|涉嫌违规|无法发布|不能发布|回复失败|账号异常/.test(t)) {
+      hits.push(t);
+      if (hits.length >= 3) break;
+    }
+  }
+  return hits;
+''')
+
 # 评论管理页：首屏卡片采集（作者 / 回答 / 正文 / 时间行）
 _MANAGE_COMMENTS_JS = _js('limit', '''
   const cards = Array.from(document.querySelectorAll('.CommentManage-CommentCard'));
@@ -568,13 +599,53 @@ class InteractMixin:
         return {'ok': False, 'detail': '输入后「发布」按钮仍不可用（页面可能改版）',
                 'state': state}
 
+    def manage_reply_visible(self, reply_text):
+        '''当前页面（管理页）里有没有我们的回复正文（**只读当前 DOM，不导航**）。'''
+        want = flat_text(reply_text or '')[:60]
+        if not want:
+            return False
+        body = flat_text(self._page_body_text() or '')
+        return want in body
+
+    def wait_manage_reply_visible(self, reply_text, timeout=25, interval=2.0):
+        '''等「我们的回复」出现在当前页面上（不导航、不重载）。
+
+        发送后的**唯一**安全核实方式：点完「发布」到服务端回执之间有几秒，
+        这段时间里任何 goto/reload 都会掐死请求（2026-09-28 真机定位）。
+        '''
+        deadline = time.time() + max(3, int(timeout))
+        while time.time() < deadline:
+            if self.manage_reply_visible(reply_text):
+                return True
+            time.sleep(max(0.5, float(interval)))
+        return False
+
+    def _reply_error_text(self):
+        '''当前页面上的报错文案（发布被拒时唯一可读的证据）。'''
+        try:
+            hits = self._safe_evaluate(_REPLY_ERROR_JS) or []
+        except Exception as exc:            # noqa: BLE001
+            log.debug('读取页面报错文案失败：%s', exc)
+            return ''
+        return ' / '.join([str(h) for h in hits[:2] if h])
+
     def send_reply_from_manage(self, comment_text, reply_text, dry_run=False,
-                               verify_wait=6, ensure_page=True):
+                               verify_wait=6, ensure_page=True, answer_url='',
+                               verify_timeout=25):
         '''在评论管理页直接回复某条评论（**推荐路径**）。
 
         为什么推荐：评论就是从管理页挑出来的，卡片必然在场；回答页则按热度只渲染
         前 N 条（真机实测某回答 76 条评论只渲染 11 条），评论一多就「找不到」。
         返回 {ok, sent, detail}。dry_run=True 只填不点发布。
+
+        ★ 发送后的核实纪律（2026-09-28 修「明明发出去了却报未确认」）：
+          1. 点完「发布」**先原地等**（等回执 + 等嵌套渲染），**绝不立刻换页**——
+             旧实现紧接着 collect_manage_comments() 会 goto 同一 URL 整页重载，
+             把还在飞的发布请求掐死，于是每个回复都变成「已点发送，未确认到」；
+          2. 原地读不到、且给了 answer_url 时，才跳到回答页做二次核实
+             （verify_reply_landed 自带重载 + 展开「最新」）；
+          3. 仍然读不到时按「已发送但未确认」返回（sent=True）——调用方据此
+             **不重复发、也不算任务失败**（否则三连败就熔断停用整类任务）。
         '''
         text = str(reply_text or '').strip()
         if not text:
@@ -596,26 +667,50 @@ class InteractMixin:
         if not clicked.get('ok'):
             return {'ok': False, 'sent': False,
                     'detail': clicked.get('reason') or '点发送失败'}
-        time.sleep(max(2, int(verify_wait) * 0.5))
-        # 核实：重新采集管理页，看这条评论下是否已出现我们的回复
-        try:
-            again = self.collect_manage_comments(limit=20)
-            for c in again.get('comments') or []:
-                if text in (c.get('text') or ''):
+        # ① 原地等回执 + 等我们的回复渲染出来
+        if self.wait_manage_reply_visible(text, timeout=verify_timeout):
+            return {'ok': True, 'sent': True,
+                    'detail': '已发送（管理页已显示回复）'}
+        # ② 原地读不到：先把页面上的报错文案读出来（发布被拒时就是它）
+        err = self._reply_error_text()
+        if err:
+            # 明确被服务端拒绝：此时**没发出去**，允许换路径重试/如实报失败
+            return {'ok': False, 'sent': False,
+                    'detail': '发送被拒：%s' % err}
+        # ③ 二次核实：回答页（列表渲染慢/管理页不显示嵌套时）
+        if answer_url:
+            try:
+                if self.verify_reply_landed(comment_text, text,
+                                            answer_url=answer_url):
                     return {'ok': True, 'sent': True,
-                            'detail': '已发送（管理页已显示回复）'}
-        except Exception as exc:            # noqa: BLE001
-            log.debug('发送后重新采集管理页失败：%s', exc)
+                            'detail': '已发送并确认（回答页评论区读到）'}
+            except Exception as exc:        # noqa: BLE001
+                log.debug('回答页二次核实失败：%s', exc)
         return {'ok': False, 'sent': True,
-                'detail': '已点发送，未在本页确认到（可用回答页再核实）'}
+                'detail': '已点发送，但未确认到落地（已在回答页二次核实，未重复发送）'}
+
+    def _page_body_text(self):
+        '''当前页面正文（读不到返回空串，绝不抛）。'''
+        try:
+            return self.page.inner_text('body') or ''
+        except Exception as exc:            # noqa: BLE001
+            log.debug('读取页面正文失败：%s', exc)
+            return ''
 
     # ---------------- 评论 ----------------
 
-    def collect_manage_comments(self, limit=20, scrolls=4, wait=6):
-        '''评论管理页 → 首屏 N 条评论（归一化后的 dict 列表）。'''
-        self.page.goto(COMMENT_MANAGE_URL, wait_until='domcontentloaded',
-                       timeout=45000)
-        time.sleep(wait)
+    def collect_manage_comments(self, limit=20, scrolls=4, wait=6, go=True):
+        '''评论管理页 → 首屏 N 条评论（归一化后的 dict 列表）。
+
+        go=False：**不导航**，直接读当前页面（发送回复后的核实必须用这个：
+        点完「发布」立刻 goto 同一 URL 会整页重载，把还在飞的发布请求一起
+        掐死——2026-09-28 真机：回复明明发出去了/或干脆没发出去，全都变成
+        「已点发送，未在本页确认到」）。
+        '''
+        if go:
+            self.page.goto(COMMENT_MANAGE_URL, wait_until='domcontentloaded',
+                           timeout=45000)
+            time.sleep(wait)
         for _ in range(max(0, int(scrolls))):
             self._safe_evaluate(
                 '() => { window.scrollTo(0, document.body.scrollHeight); return true; }')
@@ -796,27 +891,34 @@ class ReplyActionsMixin:
             return False
 
     def verify_reply_landed(self, comment_text, reply_text, reload_wait=6,
-                            max_rounds=2):
+                            max_rounds=2, answer_url=''):
         '''发送后核实：重新加载页面 → 展开评论区（切最新）→ 找回复正文。
 
         2026-09-27 真机教训：点完「发布」立刻读当前 DOM 读不到（知乎要重新渲染
         嵌套结构），于是**明明发出去了却报「未确认到回复落地」**——假警报。
         现在改成重新加载后再找，判据是「评论区文本里出现我们的回复正文」。
+
+        answer_url 非空时：**先导航到该回答页**再核实（从管理页发起的回复，
+        回答页才是嵌套结构渲染最完整的地方）。注意本方法内部会 reload，
+        只能用于「已经确认点过发布、且已等过回执」之后。
         '''
-        text = (reply_text or '').strip()
+        text = flat_text(reply_text or '')[:60]
         if not text:
             return False
-        for _round in range(max(1, int(max_rounds))):
+        for rnd in range(max(1, int(max_rounds))):
             try:
-                time.sleep(reload_wait)
-                self.page.reload(wait_until='domcontentloaded', timeout=45000)
+                if answer_url and rnd == 0:
+                    self.page.goto(answer_url, wait_until='domcontentloaded',
+                                   timeout=45000)
+                else:
+                    self.page.reload(wait_until='domcontentloaded', timeout=45000)
                 time.sleep(reload_wait)
             except Exception as exc:        # noqa: BLE001
                 log.debug('发送后重新加载失败：%s', exc)
             body = ''
             try:
                 self.read_answer_comments()
-                body = self.page.inner_text('body') or ''
+                body = flat_text(self._page_body_text() or '')
             except Exception as exc:        # noqa: BLE001
                 log.debug('发送后读评论区失败：%s', exc)
             if text in body:
