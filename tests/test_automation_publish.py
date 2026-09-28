@@ -22,7 +22,7 @@ from core import paths
 from automation import planner
 from automation.executor import BrowserBusy, NeedHuman, execute
 from automation.model import normalize_plan
-from applications.zhihu_story.browser_write import WriteActionsMixin
+from applications.zhihu_story.browser_write import WriteActionsMixin, _publish_verdict
 
 ANSWER_URL = "https://www.zhihu.com/question/100/answer/999"
 SIGNIN_URL = "https://www.zhihu.com/signin?next=%2Fcreator%2Fmanage%2Fcreation%2Fdraft"
@@ -62,17 +62,25 @@ class _FakeWriteBrowser(WriteActionsMixin):
     而不是测试里另写一遍逻辑。
     """
 
-    def __init__(self, cards, has_button=True, redirect=""):
+    def __init__(self, cards, has_button=True, redirect="",
+                 draft_content="x" * 999, published_after_click=True):
         self.page = _FakePage(redirect)
         self.cards = cards
         self.has_button = has_button
         self.clicked = 0            # JS 点击兜底次数
         self.native = 0             # 真实鼠标点击次数（优先走这条）
         self.probed = 0
+        self.draft_content = draft_content
+        # 点过发布之后草稿就该没了（真实链路：URL 跳回答页 或 服务端草稿清空）。
+        # 需要模拟「点了但没发出去」的用例把它设成 False。
+        self.published_after_click = published_after_click
+        self._published = False
 
     def native_click(self):
         """模拟一次成功的「真实鼠标点击」并计数。"""
         self.native += 1
+        if self.published_after_click:
+            self._published = True
         return {"ok": True, "how": "native"}
 
     def emits(self, body, status=200):
@@ -82,6 +90,16 @@ class _FakeWriteBrowser(WriteActionsMixin):
                 fn(_FakeResponse("https://www.zhihu.com/api/v4/content/publish",
                                  status, body))
         return self
+
+    def _publish_already_done(self, trust_draft=True):
+        """页面/服务端是否已能证明发布完成（生产代码用它判定「其实成功了」）。
+
+        trust_draft=False 时（还没点过发布）不认「草稿读取为空」——与生产同口径，
+        避免「草稿接口首帧未加载」被当成「已发布」。
+        """
+        if self._published:
+            return True, ANSWER_URL, "页面已跳到回答页"
+        return False, self.page.url or "", ""
 
     def _click_publish_native(self):
         """按生产代码的真实优先级点发布：真实鼠标点击优先，失败才退回 JS 点击。
@@ -103,6 +121,8 @@ class _FakeWriteBrowser(WriteActionsMixin):
                 return None
             if click:
                 self.clicked += 1
+                if self.published_after_click:
+                    self._published = True
             # 命中返回按钮信息（2026-09-28 起契约由 bool 改为 dict，
             # 供日志记录命中的 class/disabled 状态）
             return {"text": "发布回答", "cls": "Button Button--primary",
@@ -112,7 +132,10 @@ class _FakeWriteBrowser(WriteActionsMixin):
         return True                              # 滚动/编辑器就绪等
 
     def get_draft_content(self, question_id=None):
-        return ""
+        """服务端草稿：发布成功后就该是空的（与真实链路一致）。"""
+        if self._published:
+            return ""
+        return self.draft_content
 
 
 def _card(i, qid):
@@ -140,9 +163,8 @@ class DraftPublishTest(unittest.TestCase):
         self.assertEqual(r["qid"], "333")
         self.assertEqual(b.page.gotos[-1],
                          "https://www.zhihu.com/question/333#write")
-        # 点了「发布回答」：优先真实鼠标点击（Playwright 不可用时退回 JS 点击，
-        # 假页面没有 get_by_role → 计数落在 JS 兜底那一次上）
-        self.assertEqual(b.clicked, 1)
+        # 点了「发布回答」：真实鼠标点击一次（JS 只作为兜底，不再是主路径）
+        self.assertEqual(b.native, 1)
 
     def test_explicit_qid_targets_that_card(self):
         b = _FakeWriteBrowser([_card(0, 111), _card(1, 222), _card(2, 333)])
@@ -158,15 +180,15 @@ class DraftPublishTest(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["reason"], "empty")   # 空箱≠失败，调度器据此记跳过
         self.assertIn("没有可发布的草稿", r["detail"])
-        self.assertEqual(b.clicked, 0)           # 没草稿就不该点任何发布按钮
+        self.assertEqual(b.native, 0)            # 没草稿就不该点任何发布按钮
 
     def test_missing_publish_button_is_reported_not_raised(self):
+        """按钮确实找不到、草稿也还在 → 如实报失败，不抛异常。"""
         b = _FakeWriteBrowser([_card(0, 111)], has_button=False)
         r = b.publish_draft()
         self.assertFalse(r["ok"])
         self.assertIn("发布回答", r["detail"])
-        self.assertEqual(b.page.url,
-                         "https://www.zhihu.com/question/111#write")
+        self.assertIn("草稿仍在草稿箱", r["detail"])   # 核对过：确实没发出去
 
     def test_dry_run_probes_button_without_clicking(self):
         """演练：定位到「发布回答」就停手——发布不可逆，演练绝不能点。"""
@@ -361,6 +383,103 @@ class PublishGiftRetryTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             b.publish_draft()
         self.assertEqual(b.page.listeners, [])
+
+
+class PublishConsistencyTest(unittest.TestCase):
+    """界面结论必须与账号事实一致（2026-09-28 线上事故的护栏）。
+
+    事故经过（真机日志 + 回答 API 双向确认）：
+      21:32:59 那篇草稿**真的发布成功**（回答 id 2088018397955094230，
+      作者=本人，发布时间与运行时刻一致），但界面报
+      「点击「发布回答」失败：no-button」，台账记 failed——
+      原因是「预检点击」把发布发了出去，随后真实点击因按钮已变灰而超时。
+    """
+
+    def setUp(self):
+        self._sleep = mock.patch("time.sleep")
+        self._sleep.start()
+        self.addCleanup(self._sleep.stop)
+        self._dump = mock.patch.object(WriteActionsMixin, "_dump_page_state",
+                                       lambda *a, **k: "")
+        self._dump.start()
+        self.addCleanup(self._dump.stop)
+
+    def test_dry_run_never_clicks(self):
+        """演练只探测按钮，绝不点击（发布不可逆）。"""
+        b = _FakeWriteBrowser([_card(0, 111)])
+        b._click_publish_native = lambda: {"ok": True, "how": "native"}
+        r = b.publish_draft(dry_run=True)
+        self.assertEqual(r.get("reason"), "dry_run")
+        self.assertTrue(r.get("rehearsed"))
+        self.assertEqual(b.native, 0)
+        self.assertEqual(b.clicked, 0)
+        self.assertEqual(b.page.listeners, [])   # 演练也要摘掉监听
+
+
+class PublishVerdictTest(unittest.TestCase):
+    """「这次到底发出去没有」的判定（纯函数，2026-09-28 事故的护栏）。
+
+    事故经过（真机日志 + 回答 API 双向确认）：
+      21:32:59 那篇草稿**真的发布成功**（回答 id 2088018397955094230，
+      作者=本人，发布时间与运行时刻一致），但界面报
+      「点击「发布回答」失败：no-button」，台账记 failed——
+      原因是「预检点击」把发布发了出去，随后真实点击因按钮已变灰而超时。
+
+    判定原则：**成功优先于失败**，且「确定没发出去」才允许补发。
+    """
+
+    def test_click_timeout_but_url_moved_is_success(self):
+        """点击报超时、但页面已经跳到回答页 → 成功（事故的直接复现）。"""
+        v = _publish_verdict(clicked_ok=False, click_reason="Timeout 6000ms",
+                             url=ANSWER_URL)
+        self.assertTrue(v["ok"])
+        self.assertIn("回答页", v["detail"])
+
+    def test_draft_gone_is_success_even_if_click_failed(self):
+        """点击失败、但草稿箱里已经没这篇 → 成功（它确实发出去了）。"""
+        v = _publish_verdict(clicked_ok=False, click_reason="no-button",
+                             draft_pending=False)
+        self.assertTrue(v["ok"])
+        self.assertIn("其实已成功", v["detail"])
+
+    def test_click_failed_and_draft_still_there_is_certain_failure(self):
+        """点击失败 + 草稿确实还在 → 确定没发出去（可以安全补发）。"""
+        v = _publish_verdict(clicked_ok=False, click_reason="no-button",
+                             draft_pending=True)
+        self.assertFalse(v["ok"])
+        self.assertTrue(v["certain"])
+        self.assertIn("草稿仍在草稿箱", v["detail"])
+
+    def test_click_failed_draft_unknown_is_uncertain(self):
+        """点击失败 + 读不到草稿箱 → 不确定：绝不能当成「确定失败」去重发。"""
+        v = _publish_verdict(clicked_ok=False, click_reason="no-button",
+                             draft_pending=None)
+        self.assertFalse(v["ok"])
+        self.assertFalse(v["certain"])
+
+    def test_receipt_code0_is_success(self):
+        v = _publish_verdict(clicked_ok=True, click_reason="", receipt_ok=True)
+        self.assertTrue(v["ok"])
+        self.assertIn("code=0", v["detail"])
+
+    def test_receipt_rejection_is_certain_failure_with_server_words(self):
+        v = _publish_verdict(clicked_ok=True, click_reason="", receipt_ok=False,
+                             receipt_detail="当前问题不支持开启送礼物")
+        self.assertFalse(v["ok"])
+        self.assertTrue(v["certain"])
+        self.assertIn("当前问题不支持开启送礼物", v["detail"])
+
+    def test_clicked_but_nothing_confirms_is_uncertain(self):
+        """点了、没回执、草稿也没变化 → 不确定（可能在审核/接口滞后）。"""
+        v = _publish_verdict(clicked_ok=True, click_reason="", draft_pending=True)
+        self.assertFalse(v["ok"])
+        self.assertFalse(v["certain"])
+
+    def test_success_takes_priority_over_failure_signals(self):
+        """同时有「成功证据」和「失败症状」时，一律以成功证据为准。"""
+        v = _publish_verdict(clicked_ok=False, click_reason="no-button",
+                             url=ANSWER_URL, draft_pending=True)
+        self.assertTrue(v["ok"])
 
 
 

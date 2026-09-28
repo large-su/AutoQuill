@@ -24,6 +24,50 @@ from .browser_utils import (
 )
 
 
+def _publish_verdict(*, clicked_ok, click_reason, url="", draft_pending=None,
+                     receipt_ok=None, receipt_detail="", errors=()):
+    """把「发布到底成没成」的判定收成一个**纯函数**（可单测，不碰页面）。
+
+    ★ 2026-09-28 线上事故（界面报失败、账号里却真有新回答）就是判定散落在
+    各处、且「点击失败」被当成了「发布失败」造成的。现在所有事实都摆在这里，
+    结论只有三种，且**成功优先于失败**：
+
+      ok=True  → 发布确实出去了（哪怕点击那一步报错）
+      ok=False + certain=True  → 确实没发出去（可以安全重试/补发）
+      ok=False + certain=False → 没确认到，但**也没证据说它没发出去**（不许重发）
+
+    事实来源与可信度（高→低）：
+      1. URL 已是 /answer/<aid>：铁证，成功；
+      2. 服务端草稿已不在草稿箱（draft_pending is False）：铁证，成功；
+      3. 发布接口回执 code=0：服务端已受理，成功；
+      4. 回执 code!=0：服务端明确拒绝，失败且确定；
+      5. 点击失败 + 草稿仍在：失败但**不确定**（可能请求在路上）；
+      6. 什么都没有：不确定。
+    """
+    if re.search(r"/answer/(\d+)", url or ""):
+        return {"ok": True, "certain": True, "detail": "页面已跳到回答页"}
+    if draft_pending is False:
+        return {"ok": True, "certain": True,
+                "detail": "草稿已不在草稿箱（核对后确认：本次发布其实已成功）"}
+    if receipt_ok is True:
+        return {"ok": True, "certain": True,
+                "detail": "发布请求已被服务端受理（code=0，草稿尚未刷新）"}
+    if receipt_ok is False:
+        why = receipt_detail or "服务端拒绝了发布"
+        return {"ok": False, "certain": True, "detail": "服务端拒绝发布：%s" % why}
+    if clicked_ok:
+        # 点击成功但迟迟没有结果：不确定（可能在审核/接口滞后）
+        return {"ok": False, "certain": False,
+                "detail": "已点发布，但没确认到结果"}
+    # 点击失败：只有「草稿确实还在」才能说「确定没发出去」
+    if draft_pending is True:
+        return {"ok": False, "certain": True,
+                "detail": "点击「发布回答」失败：%s（草稿仍在草稿箱）"
+                          % (click_reason or "未知原因")}
+    return {"ok": False, "certain": False,
+            "detail": "点击「发布回答」没能确认：%s" % (click_reason or "未知原因")}
+
+
 class WriteActionsMixin:
 
     def get_draft_content(self, question_id=None):
@@ -163,6 +207,56 @@ class WriteActionsMixin:
                     "detail": msg or ("服务端 HTTP %s" % ev.get("status"))}
         return {"ok": True, "detail": msg}
 
+    def _publish_already_done(self, trust_draft=True):
+        """发布是不是其实已经完成了。
+
+        ★ 2026-09-28 线上事故（界面报失败、账号里却真有新回答）：
+          真实鼠标点击发起了发布，但按钮在点中之后立刻**重新渲染/变灰**，
+          Playwright 的 actionability 检查于是超时抛错，代码把它当成「没点中」
+          报了 no-button——而服务端那边已经发布成功了。
+          所以**任何「点失败」的结论都必须先过这一关**。
+
+        trust_draft：是否把「服务端草稿已清空」当作发布完成的证据。
+          · 点过发布之后 → True：草稿清空就是发出去了的铁证（历史成功路径都靠它）；
+          · 还没点过之前 → False：草稿接口首帧未加载/抖动也会读回空，
+            那时把它当成功会**把没发的当成发了**——这个方向更危险。
+        返回 (bool, url, detail)。
+        """
+        try:
+            url = self.page.url or ""
+        except Exception:                       # noqa: BLE001
+            url = ""
+        if re.search(r"/answer/(\d+)", url):
+            return True, url, "页面已跳到回答页"
+        if trust_draft:
+            try:
+                if not self.get_draft_content():
+                    return True, url, "服务端草稿已清空（已发布）"
+            except Exception as exc:            # noqa: BLE001
+                log.debug("browser_adapter: 发布后状态确认失败：%s", exc)
+        return False, url, ""
+
+    def _recheck_after_click_gap(self, watch, gap=16):
+        """等一小会儿再看：点击引发的发布是不是已经在路上/已完成。
+
+        用途：真实点击「报错」时先别急着判失败——请求可能已经发出去了。
+        命中以下任一即算成功：页面跳到 /answer/、服务端草稿已清空、
+        发布接口回了 code=0。
+        """
+        deadline = time.time() + max(3, int(gap))
+        while time.time() < deadline:
+            done, url, why = self._publish_already_done()
+            if done:
+                return True, url, why
+            rc = self._publish_receipt(watch)
+            if rc.get("ok") is True:
+                return True, url, "服务端已受理发布（code=0）"
+            if rc.get("ok") is False:
+                return False, url, rc.get("detail") or "服务端拒绝了发布"
+            time.sleep(2)
+        done, url, why = self._publish_already_done()
+        return done, url, why
+
     def _reset_publish_watch(self, watch):
         """把回执窗口推到「现在」：之后只看新回执（重试点击前调一次）。"""
         try:
@@ -179,8 +273,10 @@ class WriteActionsMixin:
         POST /api/v4/content/publish 立刻发出。发布是不可逆动作，宁可多花一次
         真实点击，也不要「点了但什么都没发生」。
 
-        按钮**晚于编辑器**渲染（真机 2026-09-28 实测：编辑器已就绪时按钮还没进
-        DOM，单次查找会误报 no-button），所以这里有界重试着找。
+        两个真机坑（都已踩过）：
+          · 按钮**晚于编辑器**渲染 → 有界重试着找；
+          · 按钮就绪前是 disabled，点它 Playwright 会一直等到超时 →
+            先等按钮可用再点。
         """
         deadline = time.time() + max(3, int(timeout))
         last = "no-button"
@@ -188,15 +284,64 @@ class WriteActionsMixin:
             try:
                 loc = self.page.get_by_role("button", name=re.compile("发布回答"))
                 if loc.count():
-                    loc.first.click(timeout=8000)
+                    if not loc.first.is_enabled():
+                        # 按钮还没就绪（draft 仍在加载/上一次提交还在飞）。点它会
+                        # 一直等到超时——旧代码就是这样把「已发出的发布」误报成
+                        # 「no-button」的（2026-09-28 线上事故）。
+                        last = "按钮暂不可用（disabled），等待就绪"
+                        time.sleep(1.5)
+                        continue
+                    loc.first.click(timeout=6000)
                     return {"ok": True, "how": "native"}
             except Exception as exc:            # noqa: BLE001
-                last = str(exc)[:120]
+                # ★ 点击抛错**不等于没点中**：按钮可能已经收到点击并重新渲染
+                #   （Playwright 的 actionability 检查因此超时）。这里绝不立刻
+                #   返回失败——交给上层 _recheck_after_click_gap 用「页面是否已
+                #   跳到回答页 / 草稿是否已清空 / 回执是否 code=0」来定性。
+                return {"ok": False, "how": "native-uncertain",
+                        "uncertain": True, "reason": str(exc)[:120]}
             hit = self._safe_evaluate(self._PUBLISH_BTN_JS, True)
             if hit:
-                return {"ok": True, "how": "js"}
+                if isinstance(hit, dict) and hit.get("disabled"):
+                    last = "按钮暂不可用（disabled）"
+                else:
+                    return {"ok": True, "how": "js"}
             time.sleep(1.5)
         return {"ok": False, "how": "", "reason": last}
+
+    def _draft_still_pending(self, qid):
+        """草稿箱里还有这篇草稿吗（True=还没发出去 / False=已经不在了）。
+
+        ★ 这是「这次到底发出去没有」的**权威判据**：草稿箱只列未发布的内容，
+        一篇草稿从草稿箱消失只有两种可能——已发布，或被人工删除。
+        返回 None = 读不到（网络/登录异常），调用方不得据此下结论。
+        """
+        cards = self.list_draft_cards()
+        if page_needs_login(self.page):
+            return None
+        qids = {str(c.get("qid") or "") for c in (cards or [])}
+        return str(qid) in qids
+
+    def _reconcile_failure(self, target):
+        """失败前的最后一道一致性检查：这篇草稿是不是其实已经发出去了。
+
+        ★ 2026-09-28 线上事故（用户看到「界面报失败、账号里却真有新回答」）：
+          发布请求成功、但代码因为拿不到确认信号而报失败，界面上就出现
+          「失败 + 账号里有新回答」的自相矛盾。宁可多花一次只读的草稿箱检查，
+          也不要给用户一个和事实相反的结论。
+        返回 (published: bool, detail: str)。
+        """
+        qid = str((target or {}).get("qid") or "")
+        if not qid:
+            return False, ""
+        try:
+            pending = self._draft_still_pending(qid)
+        except Exception as exc:                # noqa: BLE001
+            log.debug("browser_adapter: 失败核对（读草稿箱）异常：%s", exc)
+            return False, ""
+        if pending is False:
+            return True, "草稿已不在草稿箱（核对后确认：本次发布其实已成功）"
+        return False, ""
 
     def _turn_gift_off(self):
         """发布设置里把「送礼物」切成「关闭送礼物」（问题不支持送礼物时的必需动作）。
@@ -459,6 +604,38 @@ class WriteActionsMixin:
         self.page.goto(target["href"], wait_until="domcontentloaded",
                        timeout=_NAV_TIMEOUT)
         time.sleep(6)
+        # ★ 回执监听必须在**任何可能触发发布的动作之前**挂上。
+        watch = self._arm_publish_watch()
+
+        def _finish(ok, url, detail, **extra):
+            """统一收尾：摘监听 + 出结果（避免任何分支漏摘）。
+
+            ★ 报失败之前先跟草稿箱核对一次：宁可多一次只读检查，
+              也绝不报出「界面失败、账号里却有新回答」这种自相矛盾的结果。
+            """
+            if not ok and not extra.get("rehearsed") and not extra.get("certain"):
+                published, why = self._reconcile_failure(target)
+                if published:
+                    self._disarm_publish_watch(watch)
+                    _say("核对草稿箱后确认：本次发布其实已成功（%s）" % why)
+                    return {"ok": True, "qid": target.get("qid", ""),
+                            "title": target.get("title", ""),
+                            "url": url or (self.page.url or ""),
+                            "detail": why}
+            self._disarm_publish_watch(watch)
+            out = {"ok": ok, "qid": target.get("qid", ""),
+                   "title": target.get("title", ""), "url": url or "",
+                   "detail": detail}
+            out.update(extra)
+            return out
+
+        # 进页面先看结果：可能上一步（草稿箱页/导航）就已把发布发出去了。
+        # trust_draft=False：还没点过发布，草稿接口读回空不能当成功
+        # （首帧未加载也会读回空，那会「把没发的当成发了」）。
+        done, url0, why0 = self._publish_already_done(trust_draft=False)
+        if done:
+            _say("发布成功（%s）" % why0)
+            return _finish(True, url0, why0)
         # 等编辑器就绪（草稿正文可能还在异步填充）
         for _ in range(10):
             ready = self._safe_evaluate(
@@ -466,41 +643,40 @@ class WriteActionsMixin:
             if ready:
                 break
             time.sleep(1.5)
-        btn = self._safe_evaluate(self._PUBLISH_BTN_JS, not dry_run)
-        if not btn:
-            detail = "编辑器里没找到「发布回答」按钮（可能草稿还在加载/页面改版）"
-            if dry_run:
-                return {"ok": False, "reason": "dry_run", "rehearsed": False,
-                        "qid": target.get("qid", ""),
-                        "title": target.get("title", ""),
-                        "url": self.page.url or "", "detail": "演练未通过：" + detail}
-            return {"ok": False, "qid": target.get("qid", ""),
-                    "title": target.get("title", ""), "url": self.page.url or "",
-                    "detail": detail}
-        # 命中信息只用于日志：evaluate 的返回形状不保证（假件/页面改版），
-        # 一律按 dict 兜底解析，绝不让日志把发布流程带崩。
-        btn = btn if isinstance(btn, dict) else {}
-        log.info("browser_adapter: 命中「发布回答」按钮 cls=%s disabled=%s",
-                 btn.get("cls"), btn.get("disabled"))
         if dry_run:
+            # 演练：只确认「发布回答」按钮在，绝不点击（发布不可逆）
+            btn = self._safe_evaluate(self._PUBLISH_BTN_JS, False)
+            if not btn:
+                return _finish(False, self.page.url or "",
+                               "演练未通过：编辑器里没找到「发布回答」按钮",
+                               reason="dry_run", rehearsed=False)
             _say("演练通过：已定位《%s》与「发布回答」按钮（未点击）"
                  % (target.get("title") or target.get("qid")))
-            return {"ok": False, "reason": "dry_run", "rehearsed": True,
-                    "qid": target.get("qid", ""),
-                    "title": target.get("title", ""),
-                    "url": self.page.url or "",
-                    "detail": "演练通过：草稿箱 %d 篇，将发最旧的一篇《%s》，未点击发布"
-                              % (len(cards), target.get("title") or target.get("qid"))}
-        # ★ 真正点击（真实鼠标事件）之前先挂回执监听：发布是不可逆动作，
-        #   「点了但没发出去」必须当场分辨出来，不能靠 90s 超时反推。
-        watch = self._arm_publish_watch()
+            return _finish(False, self.page.url or "",
+                           "演练通过：草稿箱 %d 篇，将发最旧的一篇《%s》，未点击发布"
+                           % (len(cards), target.get("title") or target.get("qid")),
+                           reason="dry_run", rehearsed=True)
+        # ★ 这里**不再**用 _PUBLISH_BTN_JS 做「预检点击」：
+        #   它在非演练时是真的会点按钮的，等于把发布提前到点击函数之外——
+        #   2026-09-28 线上事故就是它发出的发布，随后真实点击因按钮已变灰而超时，
+        #   整次发布被误报成「no-button 失败」。现在只有一条点击路径。
         try:
             clicked = self._click_publish_native()
             if not clicked.get("ok"):
-                return {"ok": False, "qid": target.get("qid", ""),
-                        "title": target.get("title", ""),
-                        "url": self.page.url or "",
-                        "detail": "点击「发布回答」失败：%s" % clicked.get("reason")}
+                # 点击「失败」先别急着定性：请求可能已经发出去了。
+                # 判据只看结果——URL 跳到回答页 / 服务端草稿已清空 / 回执 code=0。
+                done, url, why = self._recheck_after_click_gap(watch)
+                if done:
+                    _say("发布成功（%s）" % why)
+                    return _finish(True, url, why)
+                verdict = _publish_verdict(
+                    clicked_ok=False, click_reason=clicked.get("reason"),
+                    url=self.page.url or "",
+                    draft_pending=self._draft_still_pending(target.get("qid")))
+                _say(verdict["detail"])
+                return _finish(verdict["ok"], self.page.url or "",
+                               verdict["detail"],
+                               certain=verdict["certain"])
             log.info("browser_adapter: 已用 %s 方式点击「发布回答」",
                      clicked.get("how"))
         except Exception:
@@ -620,11 +796,16 @@ class WriteActionsMixin:
             detail += "；页面提示：%s" % " / ".join(errs[:2])
         if shot:
             detail += "；现场截图：%s" % shot
-        detail += "（请人工核对草稿箱与回答页）"
-        self._disarm_publish_watch(watch)
-        return {"ok": False, "qid": target.get("qid", ""),
-                "title": target.get("title", ""), "url": self.page.url or "",
-                "detail": detail}
+        detail += "（已核对草稿箱仍在此篇，请人工核对回答页）"
+        verdict = _publish_verdict(
+            clicked_ok=True, click_reason="", url=self.page.url or "",
+            draft_pending=self._draft_still_pending(target.get("qid")),
+            receipt_ok=receipt.get("ok"), receipt_detail=receipt.get("detail") or "",
+            errors=errs)
+        if verdict["detail"]:
+            detail = verdict["detail"] + "；" + detail
+        return _finish(verdict["ok"], self.page.url or "", detail,
+                       certain=verdict["certain"])
 
     def publish_story(self, story, question_url=None, max_wait=60):
         """发布（编辑器写回答通道）：打开编辑器 → 清空旧草稿 → 富文本粘贴。
