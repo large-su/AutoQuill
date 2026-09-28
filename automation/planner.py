@@ -328,8 +328,49 @@ def materialize_day(now, plan, day_data, done_counts=None):
         day_data["plan_hash"] = fingerprint
         day_data.setdefault("notes", []).append(
             "%s 按最新计划重排（保留已完成 %d 项）" % (now.strftime("%H:%M"), len(keep)))
+    # 配额被「线上事实」填满时，之前排下的待执行作业要退场：
+    # 否则界面还挂着 3 个永远不会执行的「待执行」（2026-09-28 用户反馈的
+    # 「后面还规划着 3 篇，甚至排到时间轴之外」）。不影响已完成/执行中/手动作业。
+    day_data["schedule"] = _trim_over_quota(now, plan, day_data, done_counts)
     day_data["schedule"] = _deconflict(day_data["schedule"])
     return day_data
+
+
+def _trim_over_quota(now, plan, day_data, done_counts):
+    """配额已满时，把还没执行的「待执行」作业标成跳过（带原因）。
+
+    ★ 判据是 `已完成 >= 配额`（不是 >）：配额的语义是「今天最多做 N 件」，
+      做满之后剩下的待执行作业永远不会被执行，留在时间轴上只会误导用户
+      （2026-09-28 用户反馈：「后面还规划着 3 篇」——那天线上已 10 篇 = 配额 10）。
+    ★ 只动 status=planned 且非手动/非演练的作业；done / running / skipped /
+      needs_human 一律不碰。
+    """
+    if not done_counts:
+        return day_data.get("schedule", [])
+    schedule = day_data.get("schedule", [])
+    counters = dict(done_counts)
+    label = "%s 今日配额已满（已完成 %d/%d，含线上校核修正），本次不再执行"
+    for task_type, cfg in (plan.get("tasks") or {}).items():
+        cap = int((cfg or {}).get("daily_cap") or 0)
+        if cap <= 0:
+            continue
+        done = int(counters.get(task_type, 0))
+        if done < cap:
+            continue                    # 配额没满：这些待执行作业是合法排班
+        # 配额的语义是「今天最多做 N 件」：做满即止，剩下的待执行一律退场。
+        # （计数可能已超发——线上校核把误报的失败补了回来——那更该止住。）
+        rows = sorted(
+            [j for j in schedule
+             if j.get("type") == task_type and j.get("status") == STATUS_PLANNED
+             and not j.get("manual") and not j.get("dry_run")],
+            key=lambda j: str(j.get("planned_at") or ""))
+        for job in rows:
+            job["status"] = STATUS_SKIPPED
+            job["finished_at"] = now.strftime("%Y-%m-%dT%H:%M:%S")
+            job["note"] = label % (task_type, done, cap)
+            day_data.setdefault("notes", []).append(
+                "%s %s：%s" % (now.strftime("%H:%M"), task_type, job["note"]))
+    return schedule
 
 def apply_catch_up(now, plan, day_data):
     """处理错过的作业（电脑关机 / 程序没开 / 暂停导致）。

@@ -481,6 +481,24 @@ class AutomationScheduler:
             busy = browser_busy()
         except Exception:              # noqa: BLE001
             busy = []
+        # 进度事实（线上校核快照）：界面直接渲染，不再自己拼业务口径。
+        # 读不到就返回 ok=False，界面隐藏该行——**不显示可能过期的本地数字**。
+        try:
+            from webui import site_progress
+            sp = site_progress.status_payload(day)
+            snap = sp.get("snapshot") or {}
+            age = None
+            if sp.get("ok"):
+                from datetime import datetime as _dt
+                try:
+                    age = (_dt.now()
+                           - _dt.fromisoformat(snap.get("at") or "")).total_seconds() / 60.0
+                except (TypeError, ValueError):
+                    age = None
+            sp["age_minutes"] = age
+        except Exception as exc:       # noqa: BLE001 校核状态不该拖垮状态接口
+            log.debug("站点进度状态组装失败：%s", exc)
+            sp = {"ok": False, "snapshot": None, "reconcile": []}
         return {
             "now": now.strftime("%Y-%m-%dT%H:%M:%S"),
             "plan": plan,
@@ -497,6 +515,8 @@ class AutomationScheduler:
             "fails": fails,
             "browser_busy": busy,
             "notes": day_data.get("notes") or [],
+            # 线上进度事实（校核快照）：UI 只渲染，不自己算
+            "site_progress": sp,
             # 单次任务轴 + 两张详情卡的数据（UI 用；缺数据时返回空结构不报错）
             "single": _single_axis_payload(day, day_data, plan),
         }

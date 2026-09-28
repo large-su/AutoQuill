@@ -151,9 +151,15 @@ def load_ledger(day: str = "", limit: int = 0) -> list:
 def done_counts(day: str) -> dict:
     """当天各任务类型「已完成数量」——重启后续跑的依据（用户明确要求）。
 
-    口径：
-      - publish_drafts：按**条目数**计（一次作业可能发多篇）；
-      - full_chain：按**作业数**计（一次作业就是一篇）。
+    口径（2026-09-28 修订）：
+      - **默认按台账累加**：台账是我们下达过什么指令、结果如何的审计记录；
+      - **线上可核对的任务类型以线上为准**（publish_drafts）：
+        台账里的「失败」并不意味着没发出去——误报会把它漏掉，于是规划器
+        以为还差几篇、重复排班。计数合并只在 core.progress.merge_counts 一处，
+        本函数不自己判断谁大谁小。
+
+    ★ 这是「已完成数量」的**唯一出口**：planner / scheduler 只调它，
+      不直接读台账、更不直接读页面（避免错误耦合）。
     """
     counts = {}
     for row in load_ledger(day):
@@ -162,6 +168,17 @@ def done_counts(day: str) -> dict:
         t = row.get("type")
         n = int(row.get("units") or 1)
         counts[t] = counts.get(t, 0) + n
+    # 线上校核：只对「线上有等价物」的任务类型生效；读不到时原样返回台账数字
+    try:
+        from core import progress as _progress
+        snap = _progress.load(day)
+        if snap is not None:
+            for t in list(counts) + list(_progress.SITE_COUNTED_TYPES):
+                merged = _progress.merge_counts(t, counts.get(t, 0), snap, day=day)
+                if merged:
+                    counts[t] = merged
+    except Exception as exc:              # noqa: BLE001 校核失败绝不能影响排班
+        log.warning("进度校核参与计数失败（沿用台账数字）：%s", exc)
     return counts
 
 

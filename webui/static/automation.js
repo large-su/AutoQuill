@@ -107,6 +107,7 @@ async function loadAutomation() {
   } catch (e) { return; }
   renderAutoState();
   renderAutoProgress();
+  renderAutoProgressFact();
   renderAutoTimeline();
   renderAutoSingleAxis();
   renderAutoSingleCards();
@@ -115,8 +116,38 @@ async function loadAutomation() {
   renderAutoHistory();
 }
 
-function startAutoPoll() {
-  loadAutomation();
+// 进度事实：今天到底发了几篇，以**线上**为准（本地台账只作审计）。
+// 没有快照（还没校核过 / 读不到）时整行隐藏，不显示可能过期的本地数字。
+function renderAutoProgressFact() {
+  const el = $("autoProgressFact");
+  if (!el) return;
+  const p = (autoData || {}).site_progress || {};
+  const snap = p.snapshot;
+  if (!p.ok || !snap) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const when = (snap.at || "").slice(11, 16);
+  const ageMin = p.age_minutes;
+  let stale = "";
+  if (typeof ageMin === "number" && ageMin > 60) {
+    stale = "（" + Math.round(ageMin / 60) + " 小时前，可能已过期）";
+  }
+  let text = "线上进度 " + (when ? when + " 校核" : "已校核")
+    + "：今日已发布 " + (snap.published_today || 0) + " 篇"
+    + " · 待发草稿 " + (snap.drafts_pending || 0) + " 篇" + stale;
+  const rec = p.reconcile || [];
+  const gap = rec.length ? Number(rec[0].delta || 0) : 0;
+  if (gap > 0) {
+    // 台账曾少算：说明有「报了失败但其实发出去了」的作业，计数已按线上修正
+    text += " · 已按线上修正 " + gap + " 篇（台账曾少算）";
+  }
+  el.hidden = false;
+  el.textContent = text;
+}
+
+function startAutoPoll() {  loadAutomation();
   if (!autoTimer) autoTimer = setInterval(loadAutomation, 4000);
 }
 

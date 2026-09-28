@@ -36,6 +36,27 @@ def _browser_busy():
     return browser_busy()
 
 
+def _sync_progress(browser, *, note="", force=False):
+    """搭车校核线上进度（计数器必须来自线上，不能只信本地台账）。
+
+    ★ 只在**浏览器已经开着**的时候调——校核本身不额外拉起浏览器，
+      因此对任务时长的影响只有两次只读请求（实测 <2 秒）。
+    ★ 这里也是 automation 层唯一接触 webui 的职能点；具体怎么读、怎么解析
+      全在 webui.site_progress / core.progress，executor 不关心。
+    ★ 读不到、解析失败、落盘失败一律只记日志：校核绝不能拖垮任务本身。
+    """
+    try:
+        from automation import store as _store
+        from webui import site_progress
+        day = _store.now_str()[:10]
+        ledger_units = _store.done_counts(day).get("publish_drafts", 0)
+        return site_progress.refresh(browser, ledger_units=ledger_units,
+                                     note=note, force=force)
+    except Exception as exc:                # noqa: BLE001
+        log.warning("进度校核跳过（不影响任务）：%s", exc)
+        return None
+
+
 def _full_chain(job, should_stop=None, progress=None):
     """全链路撰写一篇：复用 TaskRunner 的经典/纯净完整链路（rounds=1）。"""
     from webui.run_manager import _RunSpec, runner
@@ -50,6 +71,13 @@ def _full_chain(job, should_stop=None, progress=None):
     params = job.get("params") or {}
     mode = params.get("mode") if params.get("mode") in ("single", "clean") else "single"
     rounds = max(1, int(params.get("rounds") or 1))
+    # 顺带校核线上进度：共享浏览器随后就会由任务拉起，这里借它的便车
+    # （拿不到浏览器/读不到一律跳过，绝不影响撰写本身）
+    try:
+        from web_drivers.browser_pool import get_browser
+        _sync_progress(get_browser(), note="撰写前校核")
+    except Exception as exc:                # noqa: BLE001
+        log.debug("撰写前校核跳过：%s", exc)
     # 打卡互动上下文：写草稿时顺带关注/赞同（打卡任务没启用 → 空上下文，
     # 工作流那侧零行为变化）。翻转兜底只在当天最后一班（is_last_of_day）。
     checkin_ctx = _checkin_context(job)
@@ -136,6 +164,7 @@ def _publish_drafts(job, should_stop=None, progress=None):
         b = ZhihuBrowser(headless=True)
         try:
             b.start()
+            _sync_progress(b, note="发布前校核")
             params = job.get("params") or {}
             qid = str(params.get("qid") or "")
 
@@ -149,6 +178,11 @@ def _publish_drafts(job, should_stop=None, progress=None):
 
             r = b.publish_draft(qid=qid, progress=_say,
                                 dry_run=bool(job.get("dry_run")))
+            if not r.get("ok") and r.get("reason") != "empty":
+                # 发布没成功：**当场再校核一次**。这篇草稿如果已经不在草稿箱里，
+                # 说明其实发出去了（今天的真实事故）——下一次排班就会用线上数字，
+                # 不会再把已发布的算成没发、重复排班。
+                _sync_progress(b, note="发布失败后核对", force=True)
         except ProfileBusy as exc:
             # 租约被抢（登录引导/并发实例）：不算失败，顺延重排
             raise BrowserBusy(str(exc))
@@ -250,6 +284,7 @@ def _checkin(job, should_stop=None, progress=None):
             b.start()
             if not b.is_logged_in():
                 raise NeedHuman(LOGIN_EXPIRED_MSG)
+            _sync_progress(b, note="打卡顺带校核")
 
             def _say(text):
                 if progress:
@@ -322,6 +357,7 @@ def _reply_comment(job, should_stop=None, progress=None):
     try:
         if not b.is_logged_in():
             raise NeedHuman(LOGIN_EXPIRED_MSG)
+        _sync_progress(b, note="回复评论前校核")
         r = reply_task.run_reply_job(b, count=count, dry_run=dry_run,
                                      progress=_say) or {}
     finally:
