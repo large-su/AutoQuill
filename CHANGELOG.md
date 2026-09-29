@@ -2,6 +2,62 @@
 
 版本号以 core/version.py 为唯一事实来源（发布 tag 为 v<VERSION>）。
 
+## v4.9.14（2026-09-29）
+
+### 修复 + 稳定期收口：回滚「跨线程唤醒浏览器」的回归，reply_comment 退出默认
+
+**事故（用户 09-29 反馈：加了打卡/回复之后开始频繁报错）**。先把账拆清楚：
+
+| 日期 | full_chain | publish_drafts | checkin | reply_comment |
+|---|---|---|---|---|
+| 09-25 | 10 成功 | 9 成功 / 1 需人工 | — | — |
+| 09-26 | 10 成功 | **10 成功 · 0 失败** | — | — |
+| 09-27 | 10 成功 | **10 成功 · 0 失败** | 1 成功 | **3 失败** |
+| 09-28 | 9 成功 | 7 成功 / **5 失败** | 1 成功 | **4 失败** |
+| 09-29 | 1 成功 / 1 需人工 | 1 成功 / **2 失败** | — | — |
+
+用户的判断准确。但要区分两件不同的事：
+
+- **reply_comment 是新功能引入的真问题**（09-27 `profile_in_use` 漏 import、
+  发送后误判；09-27/28 共 7 次失败）；
+- **publish_drafts 的判定一直很脆弱，只是以前从不较真**——那两天「10 条全成功」
+  是因为判定只读一次草稿箱、从不核对服务端回执；09-28 那 5 条失败**全是「其实
+  发出去了」的误报**（老判定 + 我 4.9.11 前的改动）。
+
+**本次回滚（我引入的回归，09-29）**
+
+- 现象：`publish_drafts` 与 `full_chain` 连续报
+  `It looks like you are using Playwright Sync API inside the asyncio loop`，
+  自动化随后被暂停（`deepseek_login` 预检失败）。
+- 根因：我在 v4.9.13 的「撰写前校核」里调了 `get_browser()`——而 full_chain 的
+  浏览器是 **TaskRunner 在另一个线程**里创建的，于是共享单例被创建在调度线程，
+  Playwright 的 sync API 跨线程使用直接抛错。**为了省一次浏览器启动，把单例在
+  错误的线程里唤醒了。**
+- 修法：
+  · `_full_chain` 里**删掉**这次校核（进度校核只在「本线程自己建浏览器」的
+    作业里搭车：发布前 / 发布失败后 / 打卡 / 回复，覆盖已足够）；
+  · `_sync_progress` 只允许用 `get_shared_browser()`（**只取不建**，没有就跳过）；
+  · browser_pool 新增 `get_shared_browser()`：没有实例返回 None，**绝不顺手创建**。
+
+**稳定期收口（用户 09-29 选择「保守版」）**
+
+- `reply_comment` 移出 `DEFAULT_ENABLED`：它是唯一需要「共享浏览器 + 网页版大模型」
+  双通道的一环，也是连续出错并被熔断的那一环。**已有计划的显式开关不会被覆盖**，
+  要用的用户在面板上手动打开即可；
+- **打卡保持开启**（09-27/28 两次都是成功的，且它同时承载「撰写时顺带关注/赞同」，
+  关掉会连带停掉每天要做的打卡）；
+- 结果：稳定期只跑 `full_chain` + `publish_drafts` + `checkin`——就是 09-25/26
+  两天 100% 干净的那个组合。
+
+**新增护栏（这类 bug 不许再悄悄回来）**
+
+`tests/test_automation_core.py::BrowserThreadingGuardTest`：用 AST 检查
+（不看注释）确保 `_full_chain` 不调用 `get_browser` / `_sync_progress`，
+`_sync_progress` 不调用 `get_browser`，且 `get_shared_browser()` 在无实例时
+只返回 None 而不创建。
+
+**验证**：全量 `tests/run_all.py` **882 例 0 失败**。
+
 ## v4.9.13（2026-09-28）
 
 ### 新增：进度校核 —— 计数只认线上（本地台账降级为审计日志）

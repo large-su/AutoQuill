@@ -36,7 +36,7 @@ def _browser_busy():
     return browser_busy()
 
 
-def _sync_progress(browser, *, note="", force=False):
+def _sync_progress(browser=None, *, note="", force=False, shared=False):
     """搭车校核线上进度（计数器必须来自线上，不能只信本地台账）。
 
     ★ 只在**浏览器已经开着**的时候调——校核本身不额外拉起浏览器，
@@ -44,8 +44,22 @@ def _sync_progress(browser, *, note="", force=False):
     ★ 这里也是 automation 层唯一接触 webui 的职能点；具体怎么读、怎么解析
       全在 webui.site_progress / core.progress，executor 不关心。
     ★ 读不到、解析失败、落盘失败一律只记日志：校核绝不能拖垮任务本身。
+
+    shared=True：取共享浏览器单例（**不创建**）。
+      Playwright 的 sync API 有线程粘性：在调度线程里 get_browser() 创建出来的
+      单例，被另一个线程使用时会抛「Sync API inside the asyncio loop」，
+      整个作业直接崩（2026-09-29 事故）。所以这里宁可「这次不校核」，
+      也绝不在错误的线程里把浏览器唤醒。
     """
     try:
+        if browser is None:
+            if not shared:
+                return None
+            from web_drivers.browser_pool import get_shared_browser
+            browser = get_shared_browser()
+            if browser is None:
+                log.debug("进度校核跳过：共享浏览器尚未启动（不在本线程创建）")
+                return None
         from automation import store as _store
         from webui import site_progress
         day = _store.now_str()[:10]
@@ -71,13 +85,14 @@ def _full_chain(job, should_stop=None, progress=None):
     params = job.get("params") or {}
     mode = params.get("mode") if params.get("mode") in ("single", "clean") else "single"
     rounds = max(1, int(params.get("rounds") or 1))
-    # 顺带校核线上进度：共享浏览器随后就会由任务拉起，这里借它的便车
-    # （拿不到浏览器/读不到一律跳过，绝不影响撰写本身）
-    try:
-        from web_drivers.browser_pool import get_browser
-        _sync_progress(get_browser(), note="撰写前校核")
-    except Exception as exc:                # noqa: BLE001
-        log.debug("撰写前校核跳过：%s", exc)
+    # ★ 这里**刻意不做**进度校核（2026-09-29 事故复盘）：
+    #   full_chain 的浏览器是 TaskRunner 在**另一个线程**里创建的，而本函数跑在
+    #   调度线程；在这里调 get_browser() 会在调度线程把共享浏览器单例唤醒，
+    #   之后 Playwright 的 sync API 跨线程使用就直接抛
+    #   「It looks like you are using Playwright Sync API inside the asyncio loop」，
+    #   把 publish_drafts 连同 full_chain 一起打挂。
+    #   进度校核只在「本线程自己创建浏览器」的作业里搭车（发布/打卡/回复），
+    #   这些点已经足够覆盖（发布前 + 发布失败后各一次）。
     # 打卡互动上下文：写草稿时顺带关注/赞同（打卡任务没启用 → 空上下文，
     # 工作流那侧零行为变化）。翻转兜底只在当天最后一班（is_last_of_day）。
     checkin_ctx = _checkin_context(job)

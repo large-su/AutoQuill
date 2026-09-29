@@ -168,6 +168,18 @@ def create_browser(headless):
     return _factory(headless)
 
 
+def get_shared_browser():
+    """只读返回共享浏览器单例；**没有就返回 None，绝不创建**。
+
+    ★ 2026-09-29 事故的护栏：Playwright 的 sync API 有线程粘性。如果某个
+      后台线程为了「顺便做点只读的事」调用 get_browser()，就会把共享实例
+      创建在那个线程里；随后别处再使用时直接抛
+      「It looks like you are using Playwright Sync API inside the asyncio loop」，
+      把整个作业打挂。需要「有就用、没有就算了」的场景一律用本函数。
+    """
+    return _shared_browser
+
+
 def get_browser():
     """获取全局共享浏览器（懒启动，线程安全）。
 

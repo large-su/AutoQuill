@@ -112,10 +112,18 @@ class PlannerTest(unittest.TestCase):
                           if j["type"] not in ("full_chain", "publish_drafts")])
 
     def test_new_tasks_enabled_by_default(self):
-        """用户 2026-09-27 口径：打卡互动与回复评论**默认开启**（新装的计划里没有它们时）。"""
+        """新装默认开启的任务：写 / 发 / 打卡。
+
+        ★ 2026-09-29 稳定期调整：**reply_comment 移出默认**——它是唯一需要
+          「共享浏览器 + 网页版大模型」双通道的一环，也是连续出错并被熔断的
+          那一环（09-27/28 误判失败、09-29 跨线程崩溃还带崩了发布链路）。
+          稳定期先不默认开；用户在面板上手动打开即可。
+        """
         plan = normalize_plan({})
-        for t in ("full_chain", "publish_drafts", "checkin", "reply_comment"):
+        for t in ("full_chain", "publish_drafts", "checkin"):
             self.assertTrue(plan["tasks"][t]["enabled"], "%s 应默认开启" % t)
+        self.assertFalse(plan["tasks"]["reply_comment"]["enabled"],
+                         "稳定期 reply_comment 不默认开启")
 
     def test_explicit_off_is_never_overridden(self):
         """默认开启**绝不覆盖**已有计划里的显式关闭（例如熔断自动停用后的状态）。"""
@@ -992,6 +1000,60 @@ class CheckinInteractWiringTest(unittest.TestCase):
         r = apply_action(FakeBrowser(), "follow", 0, "toggle", pause=0)
         self.assertFalse(r["ok"])
         self.assertEqual(calls, [False], "取消没成功就不该硬点第二次")
+
+
+class BrowserThreadingGuardTest(unittest.TestCase):
+    """跨线程创建浏览器 = 整个作业崩（2026-09-29 事故的护栏）。
+
+    事故：进度校核为了「顺便读两个只读接口」，在 full_chain 里调了
+    get_browser()——而 full_chain 的浏览器是 TaskRunner 在另一个线程里建的。
+    共享单例被创建在调度线程后，Playwright 的 sync API 跨线程使用直接抛
+    「It looks like you are using Playwright Sync API inside the asyncio loop」，
+    把 publish_drafts 与 full_chain 一起打挂（当天 2 次发布失败 + 自动化暂停）。
+    """
+
+    @staticmethod
+    def _called_names(fn):
+        """函数体里**真正被调用**的名字（走 AST，不看注释/docstring）。"""
+        import ast
+        import inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                target = node.func
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+                elif isinstance(target, ast.Attribute):
+                    names.add(target.attr)
+        return names
+
+    def test_full_chain_never_syncs_or_creates_a_browser(self):
+        """作业入口里的校核必须走 shared=True（只取不建）；full_chain 干脆不做。"""
+        from automation import executor as _exec
+        called = self._called_names(_exec._full_chain)
+        self.assertNotIn("get_browser", called)
+        self.assertNotIn("_sync_progress", called)
+
+    def test_sync_progress_never_creates_shared_browser(self):
+        """校核只能用 get_shared_browser（返回 None 就跳过），绝不 get_browser。"""
+        from automation import executor as _exec
+        called = self._called_names(_exec._sync_progress)
+        self.assertIn("get_shared_browser", called)
+        self.assertNotIn("get_browser", called)
+
+    def test_get_shared_browser_returns_none_without_creating(self):
+        """没有实例时必须返回 None，而不是顺手建一个（否则又回到事故里）。"""
+        from web_drivers import browser_pool
+        saved = browser_pool._shared_browser
+        browser_pool._shared_browser = None
+        try:
+            with mock.patch.object(browser_pool, "create_browser") as fake:
+                fake.side_effect = AssertionError("不该创建浏览器")
+                self.assertIsNone(browser_pool.get_shared_browser())
+        finally:
+            browser_pool._shared_browser = saved
 
 
 if __name__ == "__main__":
