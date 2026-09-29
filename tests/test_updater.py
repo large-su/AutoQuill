@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """一键自动更新（P1）回归：解析 / 校验 / 状态机 / 安装参数。
 
 不碰网络、不装任何东西：全部用真实 release JSON 的结构做夹具，
@@ -254,9 +254,16 @@ class InstallDirTest(unittest.TestCase):
     """安装目录探测：换装必须装回原处（你机器上就是 D:\\AutoQuill）。"""
 
     def test_frozen_uses_executable_dir(self):
+        """冻结态取 exe 所在目录。
+
+        断言按**当前平台**算：CI 跑在 Linux 上，写死 Windows 路径会被
+        Path.resolve() 解析成 POSIX 路径而失败（CI 已经抓过一次）。
+        """
+        exe = str(Path(r"D:\AutoQuill\AutoQuill.exe"))
         with mock.patch("sys.frozen", True, create=True), \
-                mock.patch("sys.executable", r"D:\AutoQuill\AutoQuill.exe"):
-            self.assertEqual(updater.current_install_dir(), r"D:\AutoQuill")
+                mock.patch("sys.executable", exe):
+            self.assertEqual(updater.current_install_dir(),
+                             str(Path(exe).resolve().parent))
 
     def test_source_tree_returns_none(self):
         """源码态不该自动换装（会把开发目录当成安装目录）。"""
