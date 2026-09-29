@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # core/updater.py — 自动更新的**纯逻辑**层
 #
 # 只做三件事，且都不碰 UI / 浏览器 / 进程：
@@ -357,6 +357,82 @@ def installer_args(installer, install_dir, log_path=None):
     if log_path:
         args.append('/LOG="%s"' % str(log_path))
     return args
+
+
+def apply_script_path():
+    """定位换装脚本 `tools/apply_update.py`。
+
+    真机踩过两次路径坑，所以把所有可能的位置都试一遍：
+      · 源码态：项目根/tools/apply_update.py；
+      · 冻结态：程序目录/tools/... 或 PyInstaller 解包目录(_MEIPASS)/tools/...
+        （spec 把它作为 datas 打进 `_internal/tools/`，而冻结态下 __file__
+         指向 _internal/，只按 exe 同级目录找会扑空）。
+    找不到返回空串（调用方必须能优雅失败，不能让更新进程挂住）。
+    """
+    import sys
+    here = Path(__file__).resolve().parent            # <root>/core
+    candidates = [here.parent / "tools" / "apply_update.py",          # 源码态
+                  here.parent / "_internal" / "tools" / "apply_update.py"]
+    meipass = getattr(sys, "_MEIPASS", "") or ""
+    if meipass:
+        candidates.insert(0, Path(meipass) / "tools" / "apply_update.py")
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.insert(0, exe_dir / "tools" / "apply_update.py")
+        candidates.insert(1, exe_dir / "_internal" / "tools" / "apply_update.py")
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return str(cand)
+        except OSError:
+            continue
+    return ""
+
+
+def run_apply_script(argv=None):
+    """在**当前进程**里执行换装脚本（把 --apply-update 之后的参数转给它）。
+
+    由 launcher（冻结态入口）与 main.py（源码态入口）共同调用——两处入口都要
+    能分流，否则打包后点「重启并安装」只会又开一个窗口（真机踩到）。
+    返回进程退出码。
+
+    ★ 真机教训：windowed 打包态的 stdout/stderr 是 None，任何 print/异常回溯都
+      可能无声无息。所以这里**第一步就把自己的 stdio 接到 apply.log**，
+      任何后续异常都能被看见（而不是"点了没反应"）。
+    """
+    import runpy
+    import sys
+    rest = [a for a in (argv if argv is not None else sys.argv[1:])
+            if a != "--apply-update"]
+    try:
+        from core import update_stage as _stage
+        logf = open(_stage.log_file(), "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = logf
+    except Exception:                           # noqa: BLE001 接不上也不能中断更新
+        pass
+    try:
+        script = apply_script_path()
+        if script:
+            sys.argv = [script] + rest
+            runpy.run_path(script, run_name="__main__")
+            return 0
+        from tools import apply_update          # 兜底：仅源码态可用
+        sys.argv = ["apply_update"] + rest
+        return apply_update.main()
+    except SystemExit as exc:                   # 脚本自己 sys.exit
+        return int(getattr(exc, "code", 0) or 0)
+    except Exception as exc:                    # noqa: BLE001
+        import traceback
+        try:
+            traceback.print_exc()
+        except Exception:                       # noqa: BLE001
+            pass
+        try:
+            from core import update_stage as _stage2
+            _stage2.mark_failed("换装进程异常：%s" % exc)
+        except Exception:                       # noqa: BLE001
+            pass
+        return 1
 
 
 @dataclass

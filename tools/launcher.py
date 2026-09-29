@@ -1179,6 +1179,16 @@ def _message_box(title, text):
 
 
 def main():
+    # ★ 一键更新的换装进程：**必须在最前面分流**。本文件才是冻结态的真正入口
+    #   （下面 --service 才是 main.py），只在 main.py 里判断是不够的。
+    #   用环境变量而不是命令行参数：真机踩到过「参数没传到 Python 层」的情况，
+    #   环境变量对冻结态/源码态一视同仁，且不会与单实例逻辑抢窗口。
+    #   ★ 这里**刻意不调用 _redirect_frozen_stdio()**：它是按 data_root() 定位的，
+    #     出问题会抛异常；换装进程有自己的日志接管（core.updater.run_apply_script）。
+    if '--apply-update' in sys.argv or os.environ.get("AQ_APPLY_UPDATE") == "1":
+        from core import updater as _updater
+        return _updater.run_apply_script()
+
     # 必须先于任何 print：windowed 模式下 sys.stdout 可能为 None
     _redirect_frozen_stdio()
     if sys.stdout and not sys.stdout.isatty():

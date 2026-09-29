@@ -23,6 +23,7 @@
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -53,21 +54,30 @@ def reconcile_file() -> Path:
     return _state_dir() / "reconcile.jsonl"
 
 
-def _write_json_atomic(path: Path, payload) -> bool:
-    """原子写（先 .tmp 再 replace）：断电/中途退出不留半截文件。"""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-        return True
-    except Exception as exc:                # noqa: BLE001
-        log.warning("进度快照写入失败 %s：%s", path.name, exc)
+def _write_json_atomic(path: Path, payload, attempts=3) -> bool:
+    """原子写（先 .tmp 再 replace）：断电/中途退出不留半截文件。
+
+    ★ 临时文件用**进程唯一名**并在被占用时退避重试：固定名 .tmp 在两个进程
+      同时写时会撞锁（PermissionError），状态就丢了——真实场景里
+      「主程序校核」与「子进程换装」确实会并发（2026-09-29 真机踩到）。
+    """
+    for attempt in range(max(1, int(attempts))):
+        tmp = path.with_suffix("%s.%d.%d.tmp" % (path.suffix, os.getpid(), attempt))
         try:
-            tmp.unlink()
-        except OSError:
-            pass
-        return False
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+            return True
+        except Exception as exc:            # noqa: BLE001
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            if attempt + 1 >= max(1, int(attempts)):
+                log.warning("进度快照写入失败 %s：%s", path.name, exc)
+                return False
+            time.sleep(0.2 * (2 ** attempt))
+    return False
 
 
 # ------------------------------------------------------------

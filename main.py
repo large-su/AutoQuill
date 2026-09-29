@@ -34,17 +34,13 @@ import sys as _sys
 #   重启 → 清理」，不该加载本项目任何业务模块（配置/文风签名/浏览器等）。
 #   放在文件最顶端，避免下面的重依赖 import 产生杂音甚至副作用。
 if '--apply-update' in _sys.argv:
+    # 换装进程的唯一职责是「等主程序退出 → 静默安装 → 重启 → 清理」，
+    # 不该加载本项目任何业务模块。定位与执行逻辑收在 core.updater 里，
+    # launcher（冻结态入口）与这里（源码态入口）共用同一份，避免两处走偏。
     import os as _os
-    import runpy as _runpy
-    _script = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                            "tools", "apply_update.py")
-    _sys.argv = [_script] + [a for a in _sys.argv[1:] if a != '--apply-update']
-    if _os.path.isfile(_script):
-        _runpy.run_path(_script, run_name="__main__")
-        raise SystemExit(0)
-    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_script)))
-    from tools import apply_update as _apply      # 兜底：脚本缺失时按包导入
-    raise SystemExit(_apply.main())
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from core import updater as _updater
+    raise SystemExit(_updater.run_apply_script(_sys.argv[1:]))
 
 # DPI 感知（Windows 高分屏适配）
 try:

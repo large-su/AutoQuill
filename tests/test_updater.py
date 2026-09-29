@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """一键自动更新（P1）回归：解析 / 校验 / 状态机 / 安装参数。
 
 不碰网络、不装任何东西：全部用真实 release JSON 的结构做夹具，
@@ -8,6 +8,7 @@
   - 「失败可手动兜底」→ 失败必须保留安装包并留下原因。
 """
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -206,6 +207,24 @@ class StageStateTest(unittest.TestCase):
         part = d / "AutoQuill-Setup-9.9.9.exe.part"
         part.write_bytes(b"half")
         self.assertIn(part.name, stage.clear_download_artifacts())
+
+    def test_save_survives_locked_temp_name(self):
+        """真机教训：固定 .tmp 名在主程序与子进程并发写时会撞锁。
+
+        现在临时名带 pid+序号并退避重试，被占用也要写成功。
+        """
+        real_replace = os.replace
+
+        def flaky_replace(src, dst):
+            # 第一次假装被占用，第二次放行
+            if not getattr(flaky_replace, "failed", False):
+                flaky_replace.failed = True
+                raise PermissionError(13, "Permission denied")
+            return real_replace(src, dst)
+
+        with mock.patch("os.replace", side_effect=flaky_replace):
+            self.assertTrue(stage.update(stage=stage.STAGE_STAGED, version="9.9.9"))
+        self.assertEqual(stage.load()["stage"], stage.STAGE_STAGED)
 
 
 class InstallerArgsTest(unittest.TestCase):

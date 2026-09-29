@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # core/update_stage.py — 一键更新的**状态落盘**（谁都能读，谁都别猜）
 #
 # 为什么单独一层：更新是「跨进程」的事——主程序下载、子进程换装、主程序下次
@@ -16,6 +16,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -86,27 +87,36 @@ def load() -> dict:
     return out
 
 
-def save(state: dict) -> bool:
-    """原子写状态。任何失败只记日志——更新状态写不进去不该影响主流程。"""
+def save(state: dict, attempts=3) -> bool:
+    """原子写状态。任何失败只记日志——更新状态写不进去不该影响主流程。
+
+    ★ 真机踩到（2026-09-29）：临时文件用**固定名** .json.tmp 时，两个进程
+      （主程序 + 换装子进程）同时写就会撞锁 → PermissionError → 状态写不进去。
+      现在用进程唯一的临时名，并在被占用时退避重试。
+    """
     payload = blank()
     payload.update(state or {})
     payload["updated_at"] = _now()
     if not payload.get("at"):
         payload["at"] = payload["updated_at"]
     path = stage_file()
-    tmp = path.with_suffix(".json.tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-        return True
-    except Exception as exc:                # noqa: BLE001
-        log.warning("更新状态写入失败：%s", exc)
+    for attempt in range(max(1, int(attempts))):
+        tmp = path.with_suffix(".%d.%d.tmp" % (os.getpid(), attempt))
         try:
-            tmp.unlink()
-        except OSError:
-            pass
-        return False
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+            return True
+        except Exception as exc:            # noqa: BLE001
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            if attempt + 1 >= max(1, int(attempts)):
+                log.warning("更新状态写入失败：%s", exc)
+                return False
+            time.sleep(0.2 * (2 ** attempt))     # 被别人占着：退避重试
+    return False
 
 
 def update(**changes) -> dict:

@@ -63,6 +63,19 @@
 - **唯一未测**：真的替换你机器上的 `D:\AutoQuill`（那会覆盖你正在用的安装）。
   这一步留给你第一次点「重启并安装」时验证。
 
+### 补充修复（同版本内，真机验证时发现）
+
+- **原子写在并发时会撞锁**：状态/快照的临时文件用了**固定名** `.tmp`，
+  两个进程同时写就 `PermissionError`（真机实测：主程序校核与换装子进程并发）。
+  现在临时名带 pid+序号，并在被占用时退避重试（`update_stage` 与 `progress` 两处）。
+- **冻结态换装入口**：`--apply-update` 只在 main.py 里分流是不够的——
+  打包后的真正入口是 `tools/launcher.py`（它先接管并开 GUI 窗口）。
+  现在 launcher 与 main.py 都分流，并支持 `AQ_APPLY_UPDATE=1` 环境变量
+  （比命令行参数更可靠）；换装进程第一步就把自己的 stdout/stderr 接到
+  `apply.log`，任何异常都留痕，不再"点了没反应"。
+- `tools/apply_update.py` 进 PyInstaller datas，并由 `core.updater` 统一
+  在源码态/冻结态的所有可能位置定位它。
+
 ## v4.9.14（2026-09-29）
 
 ### 修复 + 稳定期收口：回滚「跨线程唤醒浏览器」的回归，reply_comment 退出默认

@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # webui/update_api.py — 一键更新的接口层（编排，不实现细节）
 #
 # 分工：
@@ -12,6 +12,7 @@
 # ============================================================
 
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -217,12 +218,12 @@ def api_update_apply(dry_run: bool = False):
         stage.mark_failed("安装包不见了：%s" % installer)
         return {"ok": False, "message": "安装包不见了，请重新下载"}
 
-    cmd = _apply_command(state, dry_run=dry_run)
+    cmd, env = _apply_command(state, dry_run=dry_run)
     if cmd is None:
         return {"ok": False, "message": "找不到执行更新的程序，请手动运行安装包"}
     try:
         subprocess.Popen(
-            cmd, cwd=str(Path(cmd[0]).resolve().parent),
+            cmd, cwd=str(Path(cmd[0]).resolve().parent), env=env,
             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             close_fds=True)
@@ -237,22 +238,28 @@ def api_update_apply(dry_run: bool = False):
 
 
 def _apply_command(state, dry_run=False):
-    """换装进程的命令行：冻结态用 exe 自带参数，源码态退回 python 脚本。"""
+    """换装进程的命令：冻结态用 exe 自己，源码态退回 python 脚本。
+
+    ★ 用**环境变量** AQ_APPLY_UPDATE=1 表达「我是来换装的」，不用命令行参数：
+      真机踩到过参数没传到 Python 层（冻结态入口是 tools/launcher.py，它先接管），
+      环境变量对两种形态一视同仁；argv 仍然照传，作为双保险。
+    """
+    env = dict(os.environ)
+    env["AQ_APPLY_UPDATE"] = "1"
     pid = str(_current_pid())
     args = ["--apply-update", "--pid", pid]
     if dry_run:
         args.append("--dry-run")
     if getattr(sys, "frozen", False):
-        return [sys.executable] + args
+        return [sys.executable] + args, env
     script = Path(__file__).resolve().parent.parent / "tools" / "apply_update.py"
     if not script.exists():
-        return None
-    py = sys.executable or "python"
-    return [py, str(script), "--pid", pid] + (["--dry-run"] if dry_run else [])
+        return None, env
+    return [sys.executable or "python", str(script), "--pid", pid] + (
+        ["--dry-run"] if dry_run else []), env
 
 
 def _current_pid():
-    import os
     return os.getpid()
 
 
