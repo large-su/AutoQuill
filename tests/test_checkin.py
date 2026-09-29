@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 
 from core import checkin as ck
 from core import paths
+from applications.zhihu_story import checkin_task as task
+from applications.zhihu_story import comment_fallback as cfb
 
 
 class CheckinBase(unittest.TestCase):
@@ -293,6 +295,185 @@ class TestContextWriterIsOnlyAutomation(unittest.TestCase):
                         '打卡上下文的写入点只能有 %s，实际 %s' % (self.ALLOWED, hits))
         self.assertIn('automation/executor.py', hits,
                       '自动化执行器仍应是上下文的唯一写入方')
+
+
+class _FakeCommentBrowser:
+    '''只实现评论兜底用到的那几个方法。'''
+
+    def __init__(self, send_ok=True):
+        self.comments = []
+        self.opened = []
+        self.send_ok = send_ok
+
+    def open_question(self, url):
+        self.opened.append(url)
+
+    def send_answer_comment(self, text, dry_run=False):
+        self.comments.append(text)
+        if self.send_ok:
+            return {'ok': True, 'sent': True, 'detail': '已发送并确认'}
+        return {'ok': False, 'sent': False, 'detail': '发布按钮不可用'}
+
+
+class CommentFallbackTest(unittest.TestCase):
+    '''打卡评论兜底：当天最后一班在参考故事下补一条贴题评论。
+
+    用户口径（2026-09-29）：回复读者评论那条链路会「挑不出合适的评论」而整体
+    跳过——界面显示完成、实际一条评论都没发出去，打卡的「发布评论」项永远
+    达不成。评论别人的回答没有任何限制，所以最后一班就地补一条做保底。
+    '''
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='aq_cfb_')
+        self._orig_root = paths.DATA_ROOT
+        paths.DATA_ROOT = self.tmp
+
+    def tearDown(self):
+        paths.DATA_ROOT = self._orig_root
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ---------- 纯逻辑：提示词与校验 ----------
+
+    def test_prompt_feeds_story_and_forbids_empty_praise(self):
+        p = cfb.build_prompt('测试标题', '他把伞收起来，水珠落在地砖上。')
+        self.assertIn('测试标题', p)
+        self.assertIn('水珠落在地砖上', p)          # 正文真的喂进去了
+        self.assertIn('贴着这段内容说', p)          # 要求贴题
+        self.assertIn('写得好', p)                  # 明确禁止空话
+        self.assertIn('%d-%d 字' % (cfb.COMMENT_MIN_CHARS, cfb.COMMENT_MAX_CHARS), p)
+
+    def test_check_comment_accepts_specific_comment(self):
+        self.assertEqual(
+            cfb.check_comment('那把伞收起来的细节写得好，水珠那段一下就有画面了'), [])
+
+    def test_check_comment_flags_too_short(self):
+        issues = cfb.check_comment('写得好')
+        self.assertTrue(any('太短' in x for x in issues))
+
+    def test_check_comment_flags_cliche(self):
+        issues = cfb.check_comment('感谢您的认可，故事真的很精彩我一直在追更呢')
+        self.assertTrue(any('套话' in x for x in issues), issues)
+
+    def test_check_comment_flags_emoji_text(self):
+        issues = cfb.check_comment('这段反转挺意外的[微笑]后面还有吗想继续看')
+        self.assertTrue(any('表情包' in x for x in issues), issues)
+
+    def test_check_comment_flags_duplicate_of_today(self):
+        old = '那把伞收起来的细节写得好，水珠那段一下就有画面了'
+        issues = cfb.check_comment(old, avoid_texts=[old])
+        self.assertTrue(any('太像' in x for x in issues), issues)
+
+    def test_extract_comment_strips_wrapping(self):
+        self.assertEqual(cfb.extract_comment('「他把伞收起来了，这个动作有味道」'),
+                         '他把伞收起来了，这个动作有味道')
+
+    # ---------- compose：生成 → 校验 → 重写 ----------
+
+    def test_compose_retries_when_too_short(self):
+        answers = iter(['写得好', '那把伞收起来的细节写得好，水珠那段一下就有画面了'])
+        got = cfb.compose(lambda *a, **k: next(answers), '题', '正文')
+        self.assertTrue(got['ok'])
+        self.assertIn('伞', got['comment'])
+
+    def test_compose_retries_when_driver_returns_empty(self):
+        answers = iter(['', '这段反转收得干净，最后一句留白很舒服我反复看了两遍'])
+        got = cfb.compose(lambda *a, **k: next(answers), '题', '正文')
+        self.assertTrue(got['ok'])
+
+    def test_compose_gives_up_after_budget(self):
+        got = cfb.compose(lambda *a, **k: '写得好', '题', '正文', max_retry=1)
+        self.assertFalse(got['ok'])
+        self.assertTrue(got['issues'])
+
+    def test_compose_survives_ask_exception(self):
+        def boom(*a, **k):
+            raise RuntimeError('驱动炸了')
+        got = cfb.compose(boom, '题', '正文')
+        self.assertFalse(got['ok'])
+        self.assertTrue(any('提问失败' in x for x in got['issues']))
+
+    # ---------- 触发条件（浏览器用替身） ----------
+
+    def test_skips_when_not_last_run(self):
+        r = task.maybe_comment_fallback(_FakeCommentBrowser(),
+                                        ctx={'is_last': False})
+        self.assertTrue(r['skipped'])
+        self.assertFalse(r['sent'])
+
+    def test_skips_when_comment_already_done(self):
+        st = ck.fresh_state()
+        ck.mark_done(st, 'comment', detail='今天已经评论过')
+        r = task.maybe_comment_fallback(
+            _FakeCommentBrowser(),
+            ctx={'is_last': True, 'story': {'text': '正文',
+                                            'url': 'https://x/question/1'}},
+            state=st)
+        self.assertTrue(r['skipped'])
+        self.assertIn('已达成', r['detail'])
+
+    def test_skips_without_story(self):
+        r = task.maybe_comment_fallback(_FakeCommentBrowser(),
+                                        ctx={'is_last': True},
+                                        state=ck.fresh_state())
+        self.assertTrue(r['skipped'])
+        self.assertIn('参考故事', r['detail'])
+
+    def test_sends_when_last_run_and_pending(self):
+        '''末班 + 评论未达成 + 有故事 → 真的发送，并把打卡记账为完成。'''
+        b = _FakeCommentBrowser()
+        st = ck.fresh_state()
+        r = task.maybe_comment_fallback(
+            b, ctx={'is_last': True,
+                    'story': {'title': '题', 'text': '他把伞收起来，水珠落在地砖上。',
+                              'url': 'https://www.zhihu.com/question/1'}},
+            state=st,
+            ask=lambda *a, **k: '那把伞收起来的细节写得好，水珠那段一下就有画面了')
+        self.assertTrue(r['sent'], r)
+        self.assertEqual(len(b.comments), 1)                 # 只发一条
+        self.assertTrue(st['done']['comment'])               # 打卡记账完成
+        rows = [x for x in ck.load_replies() if x.get('source') == 'checkin-fallback']
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].get('sent'))
+
+    def test_does_not_send_when_generated_text_fails_check(self):
+        '''生成不达标 → 宁可不评论，也不留一条废评论。'''
+        b = _FakeCommentBrowser()
+        st = ck.fresh_state()
+        r = task.maybe_comment_fallback(
+            b, ctx={'is_last': True,
+                    'story': {'text': '正文',
+                              'url': 'https://www.zhihu.com/question/1'}},
+            state=st, ask=lambda *a, **k: '写得好')
+        self.assertFalse(r['sent'])
+        self.assertEqual(b.comments, [])                     # 一条都没发
+        self.assertFalse(st['done']['comment'])
+
+    def test_send_failure_is_recorded_not_marked_done(self):
+        b = _FakeCommentBrowser(send_ok=False)
+        st = ck.fresh_state()
+        r = task.maybe_comment_fallback(
+            b, ctx={'is_last': True,
+                    'story': {'text': '正文',
+                              'url': 'https://www.zhihu.com/question/1'}},
+            state=st,
+            ask=lambda *a, **k: '那把伞收起来的细节写得好，水珠那段一下就有画面了')
+        self.assertFalse(r['sent'])
+        self.assertFalse(st['done']['comment'])
+        self.assertTrue(st['tried'])                         # 记「试过」便于排查
+
+    def test_no_duplicate_when_today_has_same_text(self):
+        '''今天已经发过一模一样的评论 → 不再重复发（去重）。'''
+        same = '那把伞收起来的细节写得好，水珠那段一下就有画面了'
+        ck.append_reply({'reply': same, 'sent': True, 'source': 'reader'})
+        b = _FakeCommentBrowser()
+        st = ck.fresh_state()
+        r = task.maybe_comment_fallback(
+            b, ctx={'is_last': True,
+                    'story': {'text': '正文',
+                              'url': 'https://www.zhihu.com/question/1'}},
+            state=st, ask=lambda *a, **k: same, now=None)
+        # 生成的都是同一句 → 校验判「太像」→ 不发
+        self.assertFalse(r['sent'], r)
 
 
 if __name__ == '__main__':

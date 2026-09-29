@@ -256,6 +256,17 @@ _ZW_HELPERS = '''
     return a.length ? a : Array.from(document.querySelectorAll('.QuestionAnswer-content'));
   };
   const answerIdOf = url => { const m = (url || '').match(/answer[/]([0-9]+)/); return m ? m[1] : ''; };
+  // shown：元素**真的能被点到**（几何可见性）。
+  // ★ 不能用 offsetParent !== null：知乎回答页大量用 position:fixed 的吸顶/悬浮栏，
+  //   而 fixed 元素的 offsetParent 恒为 null —— 真机实测「添加评论」按钮所在的操作栏
+  //   在 .AnswerItem 下 offsetParent 为 null（2026-09-29，把过滤条件改成几何判断才对）。
+  const shown = e => {
+    if (!e) return false;
+    const r = e.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const cs = getComputedStyle(e);
+    return cs.visibility !== 'hidden' && cs.display !== 'none';
+  };
 '''
 
 
@@ -828,21 +839,55 @@ _OPEN_REPLY_JS = _js('target', '''
   return { ok: true, nested_before: before, comment: txt(cc).slice(0, 60) };
 ''')
 
+# 评论/回复共用的编辑器状态与「发布」按钮定位。
+# ★ 判据与回复链路保持一致（已被真机验证无数次）：编辑器取最后一个可见的
+#   Draft 编辑器；「发布」按钮取**最后一个**文案为「发布」的按钮。
 _EDITOR_STATE_JS = _js('', '''
   const eds = Array.from(document.querySelectorAll('div.public-DraftEditor-content'))
       .filter(e => e.offsetParent);
   const active = eds.find(e => document.activeElement === e || e.contains(document.activeElement));
   const ed = active || eds[eds.length - 1] || null;
+  // 「发布」按钮：直接量到文案为「发布」且可点的按钮。
+  // ★ 不加 offsetParent 过滤 —— 真机实测：评论框的按钮在部分环境下
+  //   offsetParent 为 null（fixed/惰性渲染），过滤掉就会误判「发布不可用」
+  //   而永远发不出去（回复链路当年也踩过同一类坑）。
   const pubs = Array.from(document.querySelectorAll('button'))
-      .filter(b => b.offsetParent && txt(b) === '发布');
+      .filter(b => flat(txt(b)) === '发布');
   const pub = pubs[pubs.length - 1] || null;
   return { has_editor: !!ed, focused: !!active, text: ed ? txt(ed) : '',
-           publish_found: !!pub, publish_disabled: pub ? !!pub.disabled : null };
+           publish_found: !!pub, publish_disabled: pub ? !!pub.disabled : null,
+           publish_candidates: pubs.length };
+''')
+
+# 给「这条回答」发新评论的入口（真机探针 2026-09-29 确认）：
+#   回答操作栏里的按钮文案是「添加评论」（class 含 ContentItem-action，文本带零宽字符）；
+#   ★ 必须限定在 .ContentItem-actions 内——问题头部也有「N 条评论」，
+#     点错了展开的是问题的评论（同类坑真机踩过）；
+#   ★ 可见性用 shown()（几何判断）挑**优先**候选，但找不到可见的就退回第一个匹配：
+#     回答页操作栏是 fixed 布局（offsetParent 恒为 null），不能拿它当过滤器。
+_OPEN_ANSWER_COMMENT_JS = _js('', '''
+  const scopes = Array.from(document.querySelectorAll(
+      '.AnswerItem .ContentItem-actions, .QuestionAnswer-content .ContentItem-actions, .ContentItem-actions'));
+  const picks = [];
+  for (const scope of scopes) {
+    const btns = Array.from(scope.querySelectorAll('button'));
+    for (const b of btns) {
+      if (flat(txt(b)) === '添加评论'
+          || /添加评论/.test(b.getAttribute('aria-label') || '')) {
+        picks.push(b);
+      }
+    }
+  }
+  if (!picks.length) return { ok: false, reason: 'no-comment-entry' };
+  const hit = picks.find(shown) || picks[0];      // 优先可见的那个
+  hit.click();
+  return { ok: true, via: flat(txt(hit)) === '添加评论' ? '添加评论' : 'aria',
+           shown: shown(hit), candidates: picks.length };
 ''')
 
 _CLICK_PUBLISH_JS = _js('', '''
   const pubs = Array.from(document.querySelectorAll('button'))
-      .filter(b => b.offsetParent && txt(b) === '发布');
+      .filter(b => shown(b) && flat(txt(b)) === '发布');
   const pub = pubs[pubs.length - 1];
   if (!pub) return { ok: false, reason: 'no-publish-button' };
   if (pub.disabled) return { ok: false, reason: 'publish-disabled' };
@@ -978,6 +1023,144 @@ class ReplyActionsMixin:
                     return True
             return False
         return True
+
+    def open_answer_comment_editor(self, pause=2.5):
+        '''点开「这条回答」的评论输入框（给别人的回答发**新评论**，不是回复）。
+
+        真机探针确认（2026-09-29）：回答操作栏里是 `添加评论` 按钮
+        （class 含 ContentItem-action）；点开出现 Draft.js 编辑器（自动聚焦），
+        发表按钮文案是「发布」。
+        ★ 必须限定在 `本回答` 的 .ContentItem-actions 内：问题头部也有
+        「N 条评论」，点错了展开的是**问题**的评论（真机踩过同类坑）。
+        '''
+        r = self._safe_evaluate(_OPEN_ANSWER_COMMENT_JS) or {}
+        if not r.get('ok'):
+            return {'ok': False, 'detail': r.get('reason') or '找不到评论入口'}
+        time.sleep(pause)
+        state = self._safe_evaluate(_EDITOR_STATE_JS) or {}
+        if not state.get('has_editor'):
+            return {'ok': False, 'detail': '点了添加评论但没出现编辑器'}
+        return {'ok': True, 'detail': '', 'state': state}
+
+    def _focus_comment_editor(self):
+        '''把输入焦点放到「当前可见的那个 Draft 编辑器」上。
+
+        真机教训（2026-09-29）：点开评论框后编辑器**未必真的拿到焦点**
+        （页面 JS 报 focused=true，但 keyboard.type 仍打在 body 上，文字进不去、
+        「发布」永远禁用）。所以这里三级兜底：
+          ① JS focus()；② Playwright 真实鼠标点进编辑器；③ 再校验一次。
+        '''
+        js_focus = """() => {
+          const vis = e => {
+            if (!e) return false;
+            const r = e.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            const cs = getComputedStyle(e);
+            return cs.visibility !== 'hidden' && cs.display !== 'none';
+          };
+          const eds = Array.from(document.querySelectorAll(
+              'div.public-DraftEditor-content, [contenteditable=true], textarea'))
+              .filter(vis);
+          const ed = eds[eds.length - 1];
+          if (!ed) return false;
+          ed.focus();
+          return document.activeElement === ed || ed.contains(document.activeElement);
+        }"""
+        if self._safe_evaluate(js_focus):
+            return True
+        # ② 真实鼠标点进去（js focus 无效时最可靠）
+        try:
+            self.page.locator(
+                'div.public-DraftEditor-content').last.click(timeout=5000)
+        except Exception as exc:            # noqa: BLE001
+            log.debug('点击评论编辑器失败：%s', exc)
+            return False
+        # ③ 校验
+        return bool(self._safe_evaluate(js_focus))
+
+    def _type_into_comment_box(self, text):
+        '''往评论框输入正文；返回 (ok, how, error)。
+
+        ★ 优先 Playwright 的「对元素 type」：它会自己滚动到元素、确保可交互、
+          聚焦后再敲键——比「先 focus 再 keyboard.type」可靠（真机踩到过
+          JS focus 报成功、实际按键仍打在 body 上，文字一个字都没进去）。
+        '''
+        try:
+            loc = self.page.locator('div.public-DraftEditor-content').last
+            loc.type(text, timeout=8000)
+            return True, 'locator.type', ''
+        except Exception as exc:            # noqa: BLE001
+            log.debug('locator.type 失败，退回 keyboard.type：%s', exc)
+        self._focus_comment_editor()
+        try:
+            self.page.keyboard.type(text)
+            return True, 'keyboard.type', ''
+        except Exception as exc:            # noqa: BLE001
+            return False, 'keyboard.type', str(exc)
+
+    def send_answer_comment(self, text, dry_run=False, type_pause=0.4,
+                           ready_timeout=10, verify_wait=8):
+        '''在当前回答页给这条回答发一条新评论。
+
+        返回 {ok, sent, detail}。与 send_reply 同一套判据：编辑器空时「发布」
+        禁用、输入后可用 —— 「发布按钮可用」即发送就绪，不靠猜。
+        发送后**重新加载页面**确认评论真的在（verify_reply_landed 同款逻辑）。
+        '''
+        text = str(text or '').strip()
+        if not text:
+            return {'ok': False, 'sent': False, 'detail': '评论内容为空'}
+        opened = self.open_answer_comment_editor()
+        if not opened.get('ok'):
+            return {'ok': False, 'sent': False,
+                    'detail': opened.get('detail') or '打不开评论框'}
+        time.sleep(type_pause)
+        ok, how, err = self._type_into_comment_box(text)
+        if not ok:
+            return {'ok': False, 'sent': False, 'detail': '输入失败：%s' % err}
+        log.info('评论兜底：已用 %s 输入正文', how)
+        deadline = time.time() + max(2, int(ready_timeout))
+        state = {}
+        while time.time() < deadline:
+            time.sleep(0.8)
+            state = self._safe_evaluate(_EDITOR_STATE_JS) or {}
+            if not state.get('publish_disabled'):
+                break
+        if state.get('publish_disabled') or not state.get('publish_found'):
+            self._clear_editor()
+            return {'ok': False, 'sent': False,
+                    'detail': '输入后「发布」按钮仍不可用（页面可能改版）'}
+        if dry_run:
+            self._clear_editor()
+            return {'ok': True, 'sent': False,
+                    'detail': '演练：已填入评论并确认可发布，未点击发布'}
+        clicked = self._safe_evaluate(_CLICK_PUBLISH_JS) or {}
+        if not clicked.get('ok'):
+            return {'ok': False, 'sent': False,
+                    'detail': clicked.get('reason') or '点发布失败'}
+        # 发送后核实：重新加载当前页，在评论区正文里找我们的评论
+        if self.verify_answer_comment_landed(text, reload_wait=max(3, verify_wait)):
+            return {'ok': True, 'sent': True, 'detail': '已发送并确认（重新加载后读到）'}
+        return {'ok': True, 'sent': True,
+                'detail': '已点发布，未在本页确认到（请人工核对）'}
+
+    def verify_answer_comment_landed(self, text, reload_wait=6, max_rounds=2):
+        '''核实评论是否落地：重新加载当前页 → 在正文里找我们的评论文本。'''
+        want = flat_text(text or '')[:60]
+        if not want:
+            return False
+        for _round in range(max(1, int(max_rounds))):
+            try:
+                self.page.reload(wait_until='domcontentloaded', timeout=45000)
+                time.sleep(reload_wait)
+            except Exception as exc:        # noqa: BLE001
+                log.debug('发送评论后重新加载失败：%s', exc)
+            try:
+                body = flat_text(self._page_body_text() or '')
+            except Exception:               # noqa: BLE001
+                body = ''
+            if want in body:
+                return True
+        return False
 
     def send_reply(self, comment_text, text, dry_run=False, type_pause=0.4,
                    ready_timeout=10, verify_wait=8):

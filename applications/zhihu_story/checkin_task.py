@@ -20,6 +20,8 @@ import time
 
 from core import checkin
 
+from applications.zhihu_story import comment_fallback
+
 log = logging.getLogger(__name__)
 
 KIND_LABEL = {'follow': '关注', 'vote': '赞同'}
@@ -75,18 +77,33 @@ def apply_action(browser, kind, index, action, pause=2.0):
 
 
 def run_interaction(browser, question_url, ctx=None, state=None, now=None,
-                    progress=None):
-    '''写草稿提取成功后调用：按上下文完成打卡互动。
+                    progress=None, ask=None):
+    '''写草稿提取成功后调用：按上下文完成打卡互动（关注 / 赞同 / 评论兜底）。
 
-    ctx: {'follow': 'do'|'toggle'|'done'|'skip', 'vote': 同上, 'is_last': bool}
+    ctx: {'follow': 'do'|'toggle'|'done'|'skip', 'vote': 同上,
+          'comment': 同上, 'is_last': bool,
+          'story': {'title','text','url'} 可选 —— 参考故事，供评论兜底用}
     返回 {ok, handled, skipped, detail}；ctx 为空时立刻返回，零开销。
+
+    ★ 评论兜底（用户 2026-09-29 口径）：当天「发布评论」还没达成时，
+      **当天最后一班**在参考故事下补一条贴题评论。评论别人的回答没有任何
+      限制条件，比"回复读者评论"（可能挑不出对象而整体跳过）可靠得多，
+      用来保证每天的打卡挑战能完成。
     '''
     ctx = dict(ctx or {})
     kinds = [k for k in ('follow', 'vote') if ctx.get(k) in ('do', 'toggle')]
-    if not kinds:
-        return {'ok': True, 'handled': [], 'skipped': [], 'detail': '无需互动'}
     is_last = bool(ctx.get('is_last'))
     state = state if state is not None else checkin.load_state(now=now)
+    if not kinds:
+        # 关注/赞同今天都达成了——但「发布评论」可能还欠着（用户 2026-09-29
+        # 口径：回复读者评论会因「挑不出合适的评论」整体跳过，打卡就永远差一项）。
+        # 所以这里不能直接返回，仍要给评论兜底一次机会。
+        r = maybe_comment_fallback(browser, ctx=ctx, state=state, now=now,
+                                   progress=progress, ask=ask)
+        return {'ok': bool(r.get('ok') or r.get('skipped')),
+                'handled': ['comment'] if r.get('sent') else [],
+                'skipped': [] if r.get('sent') else kinds,
+                'detail': r.get('detail') or '无需互动'}
     _say(progress, '本次要完成：%s%s'
          % ('、'.join(KIND_LABEL[k] for k in kinds),
             '（当天最后一班，允许翻转）' if is_last else ''))
@@ -129,8 +146,111 @@ def run_interaction(browser, question_url, ctx=None, state=None, now=None,
             details.append('%s：失败（%s）' % (KIND_LABEL[kind], r.get('detail') or ''))
         _say(progress, details[-1])
     checkin.save_state(state)
+    # 关注/赞同做完后，若当天「发布评论」仍欠着，最后一班再补一条评论兜底
+    fb = maybe_comment_fallback(browser, ctx=ctx, state=state, now=now,
+                                progress=progress, ask=ask)
+    if fb.get('sent'):
+        handled.append('comment')
+        details.append(fb.get('detail') or '评论兜底已发送')
+    elif not fb.get('skipped'):
+        skipped.append('comment')
+        details.append(fb.get('detail') or '评论兜底未完成')
+    checkin.save_state(state)
     return {'ok': bool(handled) or not skipped, 'handled': handled,
             'skipped': skipped, 'detail': '；'.join(details) or '完成'}
+
+
+# ------------------------------------------------------------
+# 打卡评论兜底（当天最后一班；参考故事下的贴题评论）
+# ------------------------------------------------------------
+
+def maybe_comment_fallback(browser, ctx=None, state=None, now=None,
+                           progress=None, ask=None, dry_run=False):
+    '''当天「发布评论」还没达成时，在参考故事下补一条贴题评论。
+
+    ★ 触发条件（缺一不可）：
+      1. 是当天**最后一班**（is_last）—— 白天还有机会真回复读者评论；
+      2. 打卡的「发布评论」项**还没达成**（needs(state,'comment')）；
+      3. 拿到了参考故事（标题/正文/URL）——否则评论没法贴题。
+    ★ 刻意不做的事：不在此处读打卡页。打卡快照由 `_refresh_checkin_after_reply`
+      与独立巡检任务刷新；这里读的是**已保存的当日进度**，省一次导航。
+
+    返回 {ok, sent, skipped, detail}；不满足条件时 skipped=True 且零开销。
+    '''
+    ctx = dict(ctx or {})
+    if not bool(ctx.get('is_last')):
+        return {'ok': True, 'sent': False, 'skipped': True,
+                'detail': '非最后一班，不做评论兜底'}
+    state = state if state is not None else checkin.load_state(now=now)
+    if not checkin.needs(state, 'comment'):
+        return {'ok': True, 'sent': False, 'skipped': True,
+                'detail': '今天的评论打卡已达成'}
+    story = dict(ctx.get('story') or {})
+    text_src = story.get('text') or ''
+    url = story.get('url') or ''
+    if not (text_src and url):
+        return {'ok': True, 'sent': False, 'skipped': True,
+                'detail': '没拿到参考故事正文，跳过评论兜底'}
+    try:
+        browser.open_question(url)                    # 幂等：同页不重载
+    except Exception as exc:                          # noqa: BLE001
+        log.warning('评论兜底：回到参考回答页失败：%s', exc)
+    already = _reply_texts_today(now=now)             # 今天已发过的评论（去重用）
+    compose = ask or _default_ask(browser)
+    got = comment_fallback.compose(
+        compose, story.get('title') or '', text_src,
+        avoid_texts=already, progress=lambda t: _say(progress, t))
+    if not got.get('ok'):
+        detail = '评论兜底：生成不达标（%s），未发送' % '；'.join(got.get('issues') or [])
+        checkin.mark_tried(state, 'comment', reason=detail, now=now)
+        checkin.save_state(state)
+        _say(progress, detail)
+        return {'ok': False, 'sent': False, 'skipped': False, 'detail': detail}
+    comment = got['comment']
+    _say(progress, '评论兜底：将在参考故事下评论：%s' % comment[:40])
+    try:
+        r = browser.send_answer_comment(comment, dry_run=dry_run)
+    except Exception as exc:                          # noqa: BLE001
+        log.warning('评论兜底：发送异常：%s', exc)
+        r = {'ok': False, 'sent': False, 'detail': str(exc)}
+    if r.get('sent'):
+        checkin.mark_done(state, 'comment',
+                          detail='评论兜底：%s' % comment[:30])
+        checkin.append_reply({
+            'key': '', 'author': '', 'comment': '',
+            'answer_url': url, 'reply': comment, 'issues': [],
+            'dry_run': bool(dry_run), 'sent': True,
+            'attempted': True, 'source': 'checkin-fallback',
+            'send_detail': r.get('detail') or '',
+        })
+        checkin.save_state(state)
+        return {'ok': True, 'sent': True, 'skipped': False,
+                'detail': '评论兜底已发送：%s' % comment[:40]}
+    checkin.mark_tried(state, 'comment',
+                       reason=(r.get('detail') or '发送失败'), now=now)
+    checkin.save_state(state)
+    return {'ok': False, 'sent': False, 'skipped': False,
+            'detail': '评论兜底未发出：%s' % (r.get('detail') or '未知原因')}
+
+
+def _default_ask(browser):
+    '''默认提问通道：按当前生成通道（Web 网页版 / API）问模型。'''
+    def ask(prompt, reuse_session=True):
+        from applications.zhihu_story import reply_task
+        return reply_task.ask_llm(prompt, reuse_session=reuse_session)
+    return ask
+
+
+def _reply_texts_today(now=None):
+    '''今天**真的发出去过**的评论文本（供兜底去重，避免又发一条差不多的）。'''
+    out = []
+    try:
+        for r in checkin.replies_today(now=now):
+            if r.get('sent') and r.get('reply'):
+                out.append(str(r['reply']))
+    except Exception as exc:                  # noqa: BLE001 台账读不到不该阻断
+        log.debug('读今日评论台账失败（不影响兜底）：%s', exc)
+    return out
 
 
 def _first_recommend_question(browser, max_cards=6):

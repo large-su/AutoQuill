@@ -253,7 +253,9 @@ def _checkin_context(job):
     """当天这一班写草稿要不要顺带做打卡互动（关注 / 赞同）。
 
     打卡任务没启用时返回 {} → 工作流那侧完全不走互动逻辑。
-    返回 {follow: do|toggle|done|skip, vote: 同, is_last: bool}。
+    返回 {follow: do|toggle|done|skip, vote: 同, comment: 同, is_last: bool}。
+    comment 项同样参与决策：只有当天最后一班、且「发布评论」还没达成时，
+    才会在参考故事下补一条贴题评论（用户 2026-09-29 口径）。
     """
     try:
         from automation.store import load_plan
@@ -268,6 +270,10 @@ def _checkin_context(job):
             "is_last": is_last,
             "follow": _ck.decide(state, "follow", is_last=is_last),
             "vote": _ck.decide(state, "vote", is_last=is_last),
+            # 评论项同样交给决策：只有当天最后一班、且「发布评论」还没达成时，
+            # 才会在参考故事下补一条（用户 2026-09-29 口径）。白天不回，
+            # 因为那时还有机会真的回复读者评论。
+            "comment": _ck.decide(state, "comment", is_last=is_last),
         }
     except Exception as exc:       # noqa: BLE001
         log.debug("打卡上下文构建失败（不影响撰写）：%s", exc)
