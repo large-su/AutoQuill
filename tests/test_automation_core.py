@@ -44,6 +44,56 @@ def _plan(**tasks):
     return normalize_plan(raw)
 
 
+class StoreAtomicWriteTest(unittest.TestCase):
+    """排班/计划落盘的原子写。
+
+    ★ 2026-09-29 全量测试真实抓到过一次 `PermissionError`：临时文件用**固定名**
+      `.tmp`，同一进程重入或两个进程同时写同一文件时撞锁，当日排班直接写丢。
+      另两处同类问题在 core/progress.py 与 core/update_stage.py（已统一修法）。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_w_"))
+        self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._p.start()
+
+    def tearDown(self):
+        self._p.stop()
+
+    def test_write_survives_occupied_temp_name(self):
+        """第一次替换假装被占用 → 退避重试后仍要写成功。"""
+        import os as _os
+        target = self.tmp / "day.json"
+        real = _os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 模拟"被占用"：源文件其实还在，替换失败
+                raise PermissionError(13, "Permission denied")
+            return real(src, dst)
+
+        with mock.patch("os.replace", side_effect=flaky):
+            store._atomic_write(target, '{"ok": true}')
+        self.assertTrue(target.exists())
+        self.assertIn("ok", target.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(calls["n"], 2)
+
+    def test_temp_name_is_process_unique(self):
+        """临时文件名必须带 pid：固定名就是撞锁的根因。"""
+        import inspect
+        src = inspect.getsource(store._atomic_write)
+        self.assertIn("getpid()", src)
+        self.assertNotIn('suffix + ".tmp"', src)
+
+    def test_write_never_raises_on_failure(self):
+        """写盘失败只告警不抛：当日排班丢了能重建，不该让自动化崩掉。"""
+        target = self.tmp / "day.json"
+        with mock.patch("os.replace", side_effect=OSError("boom")):
+            store._atomic_write(target, "{}")     # 不应抛出
+
+
 class PlannerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_p_"))

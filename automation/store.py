@@ -39,30 +39,35 @@ def day_file(day: str) -> Path:
     return _state_dir() / ("day_%s.json" % day)
 
 
-def _atomic_write(path: Path, text: str):
-    """原子写：先写 .tmp 再替换；Windows 上偶发被句柄/杀软占用 → 重试。
+def _atomic_write(path: Path, text: str, attempts: int = 3):
+    """原子写：先写临时文件再替换；Windows 上偶发被句柄/杀软占用 → 退避重试。
+
+    ★ 临时文件必须用**进程唯一名**（2026-09-29 全量测试抓到）：
+      固定名 `.tmp` 在「同一进程内两次写同一文件」或「两个进程同时写」时会撞锁，
+      直接 `PermissionError` 把当日排班写丢。这是同一类问题的第三处
+      （另两处在 core/progress.py 与 core/update_stage.py，已一并统一）。
 
     最终仍失败只告警不抛（当日排班/计划丢了可以重建，不该让自动化崩掉）。
     """
     import time as _time
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    for attempt in range(3):
+    for attempt in range(max(1, attempts)):
+        tmp = path.with_suffix("%s.%d.%d.tmp" % (path.suffix, os.getpid(), attempt))
         try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
             return
         except OSError as exc:
-            if attempt == 2:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            if attempt + 1 >= max(1, attempts):
                 log.warning("写入失败（%s）：%s", path.name, exc)
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
                 return
-            _time.sleep(0.15 * (attempt + 1))
+            _time.sleep(0.2 * (2 ** attempt))
 
 
 def load_plan() -> dict:

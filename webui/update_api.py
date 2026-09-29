@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # webui/update_api.py — 一键更新的接口层（编排，不实现细节）
 #
 # 分工：
@@ -154,8 +154,17 @@ def _release_payload_for(version):
 
 @router.get("/api/update/status")
 def api_update_status():
-    """当前更新状态（界面每次刷新都读它）。"""
+    """当前更新状态（界面每次刷新都读它）。
+
+    * 若上次停在 applying（换装没走完就重启了），这里会判成失败并给出原因——
+      不能让用户"点了更新却什么都没发生"（2026-09-29 事故后加的交代）。
+    """
     state = stage.load()
+    if state.get("stage") == stage.STAGE_APPLYING:
+        stage.mark_failed(
+            "上次自动更新没有完成（换装进程可能被中断）。"
+            "安装包已保留，可手动安装。")
+        state = stage.load()
     info = dict(state)
     info["stage_text"] = stage.STAGE_TEXT.get(state.get("stage"), "")
     installer = Path(state.get("installer") or "")
@@ -206,9 +215,16 @@ def api_update_download():
 
 @router.post("/api/update/apply")
 def api_update_apply(dry_run: bool = False):
-    """拉起独立子进程换装；主程序随即退出，由子进程重启新版本。
+    """拉起隐藏的换装宿主，并**真正请求本程序退出**，由宿主装完重启。
 
-    ★ 不在这里等安装完成——那会让界面卡死；进度看 /api/update/status。
+    ★ 2026-09-29 线上事故的两个根因（都在这一个函数里）：
+      1. 换装进程曾经是 `AutoQuill.exe --apply-update` —— 但冻结态入口是
+         **launcher**（先接管并开窗口），于是它把这次调用当成「正常启动」：
+         开窗口 → 抢单实例 → 失败退出，黑框不停弹；主程序却一直没退出。
+         → 现在换装宿主是 **PowerShell**（CREATE_NO_WINDOW 隐藏），绝不自我循环。
+      2. 这里只 spawn 了子进程，**从来没请求退出**——而本程序的退出要由启动器做
+         （`/api/launcher/quit` 写标志、启动器 5 秒轮询到才退）。
+         → 现在 spawn 之后**立刻写退出请求**，启动器随即退出，宿主才开始安装。
     """
     state = stage.load()
     if state.get("stage") != stage.STAGE_STAGED:
@@ -218,45 +234,58 @@ def api_update_apply(dry_run: bool = False):
         stage.mark_failed("安装包不见了：%s" % installer)
         return {"ok": False, "message": "安装包不见了，请重新下载"}
 
-    cmd, env = _apply_command(state, dry_run=dry_run)
-    if cmd is None:
-        return {"ok": False, "message": "找不到执行更新的程序，请手动运行安装包"}
+    install_dir = str(state.get("install_dir") or "")
+    cmd = updater.powershell_apply_command(
+        installer, _current_pid(), install_dir, stage.log_file(),
+        relaunch_exe=_relaunch_exe(install_dir))
+    if dry_run:
+        # 演练：不等待、不安装（宿主只记日志），用于验证命令行拼装
+        cmd = updater.powershell_apply_command(
+            installer, 0, install_dir, stage.log_file(), relaunch_exe="")
     try:
         subprocess.Popen(
-            cmd, cwd=str(Path(cmd[0]).resolve().parent), env=env,
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-            close_fds=True)
+            cmd, close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     except Exception as exc:                # noqa: BLE001
-        stage.mark_failed("启动更新进程失败：%s" % exc)
-        return {"ok": False, "message": "启动更新进程失败：%s" % exc}
+        stage.mark_failed("启动换装宿主失败：%s" % exc)
+        return {"ok": False, "message": "启动换装宿主失败：%s" % exc}
 
     stage.update(stage=stage.STAGE_APPLYING, error="")
-    log.info("更新：已拉起换装进程（dry_run=%s），主程序即将退出", dry_run)
+    if not dry_run:
+        _request_app_quit()
+    log.info("更新：已拉起换装宿主（dry_run=%s），已请求本程序退出", dry_run)
     return {"ok": True, "dry_run": bool(dry_run),
-            "message": "更新已开始，程序将自动退出并重启"}
+            "message": ("演练：宿主已就绪（不会安装）" if dry_run
+                        else "更新已开始：程序将自动退出并重启")}
 
 
-def _apply_command(state, dry_run=False):
-    """换装进程的命令：冻结态用 exe 自己，源码态退回 python 脚本。
+def _relaunch_exe(install_dir):
+    """装完要重启的程序路径（冻结态才有意义；源码态返回空）。"""
+    if not getattr(sys, "frozen", False):
+        return ""
+    if install_dir:
+        cand = Path(install_dir) / "AutoQuill.exe"
+        if cand.exists():
+            return str(cand)
+    return str(sys.executable)
 
-    ★ 用**环境变量** AQ_APPLY_UPDATE=1 表达「我是来换装的」，不用命令行参数：
-      真机踩到过参数没传到 Python 层（冻结态入口是 tools/launcher.py，它先接管），
-      环境变量对两种形态一视同仁；argv 仍然照传，作为双保险。
+
+def _request_app_quit():
+    """请求本程序退出：写启动器的退出标志（启动器最多 5 秒轮询到就真退出）。
+
+    这是**唯一**能让「窗口 + 服务 + 自动化」一起干净退出的入口——
+    直接 os._exit 会让服务进程/浏览器变成孤儿。
     """
-    env = dict(os.environ)
-    env["AQ_APPLY_UPDATE"] = "1"
-    pid = str(_current_pid())
-    args = ["--apply-update", "--pid", pid]
-    if dry_run:
-        args.append("--dry-run")
-    if getattr(sys, "frozen", False):
-        return [sys.executable] + args, env
-    script = Path(__file__).resolve().parent.parent / "tools" / "apply_update.py"
-    if not script.exists():
-        return None, env
-    return [sys.executable or "python", str(script), "--pid", pid] + (
-        ["--dry-run"] if dry_run else []), env
+    try:
+        from core import launcher_config
+        stamp = launcher_config.request_quit()
+        log.info("更新：已请求退出（%s）", stamp)
+        return True
+    except Exception as exc:                # noqa: BLE001
+        log.warning("更新：请求退出失败（%s），换装宿主会等待超时后强制结束", exc)
+        return False
 
 
 def _current_pid():

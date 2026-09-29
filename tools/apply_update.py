@@ -97,8 +97,11 @@ def run_installer(installer, install_dir, dry_run=False):
         log("[dry-run] 不真的执行安装（安装目录=%s）" % (install_dir or "未探测到"))
         return True, "dry-run：已通过校验，未执行安装"
     try:
+        # CREATE_NO_WINDOW：这是个 windowed 程序拉起的子进程，不给它开控制台窗口，
+        # 否则换装时会闪黑框（2026-09-29 用户反馈的"黑框反复弹出"）。
         r = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=600)
+                           stderr=subprocess.DEVNULL, timeout=600,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception as exc:        # noqa: BLE001
         return False, "启动安装器失败：%s" % exc
     if r.returncode != 0:

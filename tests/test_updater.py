@@ -397,5 +397,106 @@ class FetchShaTest(unittest.TestCase):
         self.assertIn("拿不到校验和", got["error"])
 
 
+class ApplyHostTest(unittest.TestCase):
+    """换装宿主（PowerShell）的命令生成。
+
+    ★ 2026-09-29 线上事故（用户反馈「黑框不停弹出又关闭、界面一直不关」）：
+      换装进程曾经是 `AutoQuill.exe --apply-update`，但冻结态入口是 **launcher**
+      （先接管并开窗口）→ 它把这次调用当成「正常启动」：开窗口、抢单实例、
+      失败退出，循环往复；而主程序始终没退出。
+      现在宿主换成 Windows 自带的 PowerShell（隐藏窗口），不再是本程序。
+    """
+
+    def _script(self, **kw):
+        import base64
+        cmd = updater.powershell_apply_command(
+            kw.get("installer", r"D:\AutoQuill\data\update\AutoQuill-Setup-9.9.9.exe"),
+            kw.get("pid", 1234),
+            kw.get("install_dir", r"D:\AutoQuill"),
+            kw.get("log_path", r"D:\AutoQuill\data\update\apply.log"),
+            relaunch_exe=kw.get("relaunch_exe", ""),
+            wait_seconds=kw.get("wait_seconds", 600))
+        self.assertEqual(cmd[0], "powershell.exe")
+        self.assertIn("-EncodedCommand", cmd)
+        self.assertIn("-NoProfile", cmd)
+        raw = base64.b64decode(cmd[cmd.index("-EncodedCommand") + 1])
+        return cmd, raw.decode("utf-16-le")
+
+    def test_host_is_powershell_not_our_own_exe(self):
+        """宿主绝不能是本程序自己的 exe（否则启动器会当成正常启动 → 黑框循环）。"""
+        cmd, _ = self._script()
+        self.assertEqual(cmd[0].lower(), "powershell.exe")
+
+    def test_waits_for_the_parent_pid_before_installing(self):
+        cmd, script = self._script(pid=4321, wait_seconds=600)
+        self.assertIn("$target=4321", script)
+        self.assertIn("等待主程序退出", script)
+        self.assertIn("AddSeconds(600)", script)
+        # 顺序必须是「先等父进程」再「装」
+        self.assertLess(script.index("等待主程序退出"),
+                        script.index("Start-Process -FilePath"))
+
+    def test_never_kills_the_parent_immediately(self):
+        """超时兜底才强杀，且等待窗口要给足（旧实现 60 秒就 taskkill）。"""
+        _cmd, script = self._script(wait_seconds=600)
+        self.assertIn("Stop-Process", script)
+        self.assertGreaterEqual(600, 300)
+
+    def test_installer_arguments_are_silent_and_install_in_place(self):
+        _cmd, script = self._script(install_dir=r"D:\AutoQuill")
+        self.assertIn("/VERYSILENT", script)
+        self.assertIn('/DIR="D:\\AutoQuill"', script)
+        self.assertIn("/LOG=", script)
+
+    def test_restarts_only_when_relaunch_exe_given(self):
+        _cmd, no_exe = self._script(relaunch_exe="")
+        self.assertNotIn("已重启 AutoQuill", no_exe)
+        _cmd2, with_exe = self._script(relaunch_exe=r"D:\AutoQuill\AutoQuill.exe")
+        self.assertIn("已重启 AutoQuill", with_exe)
+        self.assertIn(r"Start-Process -FilePath 'D:\AutoQuill\AutoQuill.exe'", with_exe)
+
+    def test_cleanup_only_on_success(self):
+        _cmd, script = self._script()
+        self.assertIn("Remove-Item", script)
+        # 删除必须发生在「返回码为 0」的分支里
+        self.assertLess(script.index("$p.ExitCode -eq 0"),
+                        script.index("Remove-Item"))
+
+    def test_quotes_and_chinese_paths_survive_encoding(self):
+        """中文路径 + 引号必须原样送达（-EncodedCommand 就是为此）。"""
+        _cmd, script = self._script(
+            installer=r"D:\我的 程序\data\update\AutoQuill-Setup-9.9.9.exe")
+        self.assertIn(r"D:\我的 程序\data\update", script)
+
+    def test_pid_zero_means_no_waiting(self):
+        _cmd, script = self._script(pid=0)
+        self.assertIn("$target=0", script)
+
+
+class QuitRequestTest(unittest.TestCase):
+    """更新时必须**真正请求退出**（否则主程序不退、宿主白等、更新卡死）。"""
+
+    def test_request_quit_writes_the_flag_the_launcher_polls(self):
+        from core import launcher_config
+        import tempfile as _tf
+        with mock.patch.object(paths, "DATA_ROOT",
+                               _tf.mkdtemp(prefix="aq_quit_")):
+            self.assertFalse(launcher_config.load().get("quit_requested_at"))
+            stamp = launcher_config.request_quit()
+            self.assertTrue(stamp)
+            self.assertTrue(launcher_config.load().get("quit_requested_at"))
+            launcher_config.clear_quit_request()
+            self.assertFalse(launcher_config.load().get("quit_requested_at"))
+
+    def test_apply_endpoint_requests_quit(self):
+        """apply 接口必须调用退出请求（源码级契约，防回归）。"""
+        import inspect
+        from webui import update_api
+        src = inspect.getsource(update_api.api_update_apply)
+        self.assertIn("_request_app_quit", src)
+        helper = inspect.getsource(update_api._request_app_quit)
+        self.assertIn("request_quit", helper)
+
+
 if __name__ == "__main__":
     unittest.main()

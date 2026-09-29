@@ -2,7 +2,16 @@ name: test
 
 on:
   push:
-  pull_request:
+    branches: [main]
+    tags: ["v*"]
+  # 去掉 pull_request 触发：本仓库的流程是直接推 main，
+  # 每次推 main + 打 tag 会触发两次完全相同的测试（用户 2026-09-29 反馈 CI 慢）。
+  workflow_dispatch:
+
+# 同一 ref 连推时只保留最新一次，避免排队白等
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   unittest:
@@ -13,18 +22,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
+        # 一次 pip 调用（原来分两次）+ pip 缓存：安装步骤从这里省时间
         run: |
-          python -m pip install --upgrade pip
-          pip install fastapi uvicorn pydantic requests httpx 2>/dev/null || true
-          pip install -r requirements.txt 2>/dev/null || true
+          python -m pip install --upgrade pip --quiet
+          python -m pip install --quiet -r requirements.txt fastapi uvicorn pydantic requests httpx
 
       - name: Prepare local-only config for tests
         # config/llm_providers.json 含用户密钥、不入库（.gitignore）；
         # CI 用占位示例文件生成，保证 config 模块可导入（单测只读不调 API）。
-        run: |
-          cp config/llm_providers.example.json config/llm_providers.json
+        run: cp config/llm_providers.example.json config/llm_providers.json
 
       - name: Run unit tests (skip browser-dependent suites)
         run: python tests/run_all.py

@@ -435,6 +435,62 @@ def run_apply_script(argv=None):
         return 1
 
 
+def powershell_apply_command(installer, pid, install_dir, log_path,
+                             relaunch_exe="", wait_seconds=600):
+    """生成「等主程序退出 → 静默安装 → 重启 → 清理」的 PowerShell 命令。
+
+    ★ 为什么不再用 `AutoQuill.exe --apply-update` 跑换装（2026-09-29 线上事故）：
+      冻结态的入口是 **launcher**（它先接管并开窗口）。拿 exe 当换装进程时，
+      启动器会把这次调用当成「正常启动」：开窗口 → 抢单实例 → 失败退出，
+      于是**黑框不停弹出又关闭**，而主程序始终没退出，更新卡死。
+      改用 Windows 自带的 PowerShell（配合 CREATE_NO_WINDOW 隐藏窗口）作为换装
+      宿主：它不是本程序，绝不会自我循环，也不依赖 PyInstaller 的任何路径。
+
+    pid=0 表示不等待（仅在已经退出时用）。返回可直接交给 Popen 的参数列表。
+    """
+    args = " ".join(installer_args(installer, install_dir, log_path))
+    exe = str(relaunch_exe or "")
+    restart_block = ""
+    if exe:
+        restart_block = ("  Start-Process -FilePath '%s' | Out-Null;"
+                         "  L '已重启 AutoQuill';" % exe)
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "$log='{log}';"
+        "function L($m){{ Add-Content -LiteralPath $log -Encoding UTF8 "
+        "-Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $m) }};"
+        "L '=== 换装开始（PowerShell 宿主）===';"
+        "$target={pid};"
+        "if ($target -gt 0) {{"
+        "  L ('等待主程序退出 pid=' + $target);"
+        "  $deadline=(Get-Date).AddSeconds({wait});"
+        "  while ((Get-Date) -lt $deadline) {{"
+        "    if (-not (Get-Process -Id $target -ErrorAction SilentlyContinue)) {{ break }};"
+        "    Start-Sleep -Milliseconds 700 }};"
+        "  if (Get-Process -Id $target -ErrorAction SilentlyContinue) {{"
+        "    L '主程序超时未退出，强制结束';"
+        "    Stop-Process -Id $target -Force -ErrorAction SilentlyContinue;"
+        "    Start-Sleep -Seconds 2 }}"
+        "  else {{ L '主程序已退出' }} }};"
+        "$p=Start-Process -FilePath '{installer}' -ArgumentList '{args}' -Wait -PassThru "
+        "-WindowStyle Hidden;"
+        "L ('安装器返回码=' + $p.ExitCode);"
+        "if ($p.ExitCode -eq 0) {{"
+        "  L '安装成功';"
+        "{restart}"
+        "  Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue;"
+        "  L '已删除安装包' }}"
+        "else {{ L '安装失败，保留安装包供手动安装' }};"
+        "L '=== 换装结束 ===';"
+    ).format(log=str(log_path), pid=int(pid or 0), wait=int(wait_seconds),
+             installer=str(installer), args=args, restart=restart_block)
+    # -EncodedCommand 要求 UTF-16LE + base64：彻底避开引号与中文路径的转义地狱
+    import base64
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return ["powershell.exe", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded]
+
+
 @dataclass
 class UpdatePlan:
     """一次更新的完整计划（检查阶段的产物，UI 与执行都只看它）。"""
