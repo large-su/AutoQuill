@@ -28,6 +28,23 @@
 # ============================================================
 
 import ctypes
+import sys as _sys
+
+# ★ 一键更新的换装进程必须**最先**分流：它只是「等主程序退出 → 静默安装 →
+#   重启 → 清理」，不该加载本项目任何业务模块（配置/文风签名/浏览器等）。
+#   放在文件最顶端，避免下面的重依赖 import 产生杂音甚至副作用。
+if '--apply-update' in _sys.argv:
+    import os as _os
+    import runpy as _runpy
+    _script = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "tools", "apply_update.py")
+    _sys.argv = [_script] + [a for a in _sys.argv[1:] if a != '--apply-update']
+    if _os.path.isfile(_script):
+        _runpy.run_path(_script, run_name="__main__")
+        raise SystemExit(0)
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_script)))
+    from tools import apply_update as _apply      # 兜底：脚本缺失时按包导入
+    raise SystemExit(_apply.main())
 
 # DPI 感知（Windows 高分屏适配）
 try:
@@ -234,6 +251,7 @@ def ask_batch_params():
 # ============================================================
 
 def main():
+    # 注：--apply-update 已在**文件顶部**分流（换装进程不该加载任何业务模块）
     # --web 必须先于 banner 处理：banner 含 emoji，GBK 控制台打印即崩；
     # 且 Web 控制台不需要 OCR/API 检查
     if '--headless' in sys.argv:

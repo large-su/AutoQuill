@@ -154,6 +154,7 @@ def _static_automation_js():
 # —— P0 拆分：业务路由按域装配（实现见各 api_*.py / run_manager.py）
 from webui.dashboard_api import register_dashboard
 from webui.drafts_api import register_drafts
+from webui.update_api import router as update_router
 app.include_router(settings_router)
 app.include_router(setup_router)
 app.include_router(library_router)
@@ -161,6 +162,7 @@ app.include_router(runs_router)
 app.include_router(feedback_router)
 app.include_router(automation_router)
 app.include_router(launcher_router)
+app.include_router(update_router)
 
 # —— 兼容门面：历史调用方(tests/外部脚本)习惯 webui.server.X 直接取用
 from .api_library import *   # noqa: F401,F403

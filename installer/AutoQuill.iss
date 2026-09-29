@@ -38,6 +38,12 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 用户目录安装 + 未签名 exe：关闭安装器自身的权限/安全提示噪音
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
+; ★ 一键自动更新（2026-09-29）：关程序必须由**我们**控制。
+;   安装器默认会在安装前自己结束占用文件的进程——那会在换装子进程还没准备好
+;   时就把主程序杀掉，更新流程的时序就乱了。这里设为 no，由
+;   tools/apply_update.py 先等主程序退出、再静默安装。
+CloseApplications=no
+RestartApplications=no
 
 ; 单语言（中文）：避免多语言导致安装器弹出「选择安装语言」对话框，
 ; 静默安装（/VERYSILENT）会因该对话框挂起

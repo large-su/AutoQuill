@@ -66,3 +66,6 @@ AutoQuill.exe
 
 # Claude Code 个人配置（权限白名单等，仅本机）
 .claude/settings.local.json
+
+# 一键更新的运行时产物（安装包/状态/日志）——不属于源码
+data/update/

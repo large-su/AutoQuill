@@ -1,0 +1,433 @@
+﻿# ============================================================
+# core/updater.py — 自动更新的**纯逻辑**层
+#
+# 只做三件事，且都不碰 UI / 浏览器 / 进程：
+#   1. 解析 GitHub Release 的两个 JSON（releases/latest、assets）→ 结构化信息；
+#   2. 解析版本号 / 资产名 / sha256 文本；
+#   3. 下载（流式 + 进度回调）与校验（sha256）。
+#
+# 为什么单独一层：更新的判定逻辑最容易出错（下载半截、校验和错、版本比较），
+# 而这些全是纯函数，能脱离网络与界面单测。执行换装的部分在 tools/apply_update.py，
+# 状态落盘在 core/update_stage.py，接口编排在 webui/update_api.py。
+#
+# 依赖方向：core 不认识 webui / automation（只依赖 core.paths）。
+# ============================================================
+
+import hashlib
+import json
+import logging
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from core import paths
+
+log = logging.getLogger(__name__)
+
+REPO = "large-su/AutoQuill"
+SETUP_PREFIX = "AutoQuill-Setup-"
+SETUP_SUFFIX = ".exe"
+SHA_SUFFIX = ".exe.sha256"
+CHUNK = 256 * 1024          # 256 KB：进度回调不至于太频繁，也不至于太粗
+_SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
+
+
+# ------------------------------------------------------------
+# 解析（纯函数）
+# ------------------------------------------------------------
+
+def version_tuple(v):
+    """'4.9.6' / 'v4.9.6' → (4, 9, 6)；解析不了返回 None（宁可说没更新也不误报）。"""
+    try:
+        return tuple(int(x) for x in str(v).lstrip("vV").strip().split("."))
+    except (AttributeError, ValueError, TypeError):
+        return None
+
+
+def is_newer(latest, current):
+    """latest 是否比 current 新；任一解析不了 → False（不误报有更新）。"""
+    a, b = version_tuple(latest), version_tuple(current)
+    return bool(a and b and a > b)
+
+
+def clean_tag(tag):
+    """'v4.9.6' → '4.9.6'；空/异常返回 None。"""
+    text = str(tag or "").strip().lstrip("vV").strip()
+    return text or None
+
+
+def setup_asset_name(version):
+    """版本号 → 安装包资产名（与 tools/build_release.py 的产物命名严格一致）。"""
+    return "%s%s%s" % (SETUP_PREFIX, version, SETUP_SUFFIX)
+
+
+def sha_asset_name(version):
+    return setup_asset_name(version) + ".sha256"
+
+
+def parse_sha256_text(text):
+    """`.sha256` 资产内容 → 小写十六进制；找不到返回 None。
+
+    build_release.py 用 certutil 生成，文件里就是 64 个十六进制字符。
+    这里放宽（允许前后有空白/杂字符）但不放宽长度：宁可判失败，也不猜。
+    """
+    m = _SHA256_RE.search(str(text or ""))
+    return m.group(1).lower() if m else None
+
+
+def parse_digest(value):
+    """GitHub API 的 asset.digest（形如 'sha256:abc...'）→ 小写十六进制。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if ":" in text:
+        algo, _, hexpart = text.partition(":")
+        if algo.strip().lower() != "sha256":
+            return None                 # 不是 sha256 就不采信
+        text = hexpart
+    return parse_sha256_text(text)
+
+
+def parse_release(payload):
+    """GitHub `/releases/latest` 的 JSON → 结构化信息（异常输入返回 ok=False）。
+
+    返回 {ok, version, tag, page_url, notes, installer, sha256, digest, error}
+      installer: {"name", "url", "size"}
+      sha256   : 期望的安装包 sha256（取自 .sha256 资产内容，需另外下载）
+      digest   : GitHub 自己算的 sha256（API 直接给，不用额外下载）
+    """
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "发布信息格式异常"}
+    tag = payload.get("tag_name") or payload.get("name") or ""
+    version = clean_tag(tag)
+    if not version:
+        return {"ok": False, "error": "发布信息里没有版本号"}
+    assets = payload.get("assets") or []
+    if not isinstance(assets, list):
+        assets = []
+    want = setup_asset_name(version)
+    want_sha = sha_asset_name(version)
+    installer = sha_asset = None
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name") or "")
+        url = str(a.get("browser_download_url") or "")
+        if not url:
+            continue
+        if name == want:
+            installer = {"name": name, "url": url,
+                         "size": int(a.get("size") or 0),
+                         "digest": parse_digest(a.get("digest"))}
+        elif name == want_sha:
+            sha_asset = {"name": name, "url": url}
+    if not installer:
+        return {"ok": False, "version": version,
+                "error": "这个版本没有找到安装包资产（%s）" % want,
+                "page_url": payload.get("html_url") or ""}
+    return {
+        "ok": True,
+        "version": version,
+        "tag": str(tag),
+        "page_url": str(payload.get("html_url") or ""),
+        "notes": str(payload.get("body") or "")[:4000],
+        "installer": installer,
+        "sha_asset": sha_asset,
+        "digest": installer.get("digest"),
+        "error": None,
+    }
+
+
+# ------------------------------------------------------------
+# 落盘位置（更新专用的暂存区，绝不与用户数据混在一起）
+# ------------------------------------------------------------
+
+def update_dir() -> Path:
+    d = Path(paths.data("data", "update"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def installer_path(version) -> Path:
+    return update_dir() / setup_asset_name(version)
+
+
+# ------------------------------------------------------------
+# 下载与校验
+# ------------------------------------------------------------
+
+def sha256_file(path, progress: Optional[Callable[[int, int], None]] = None,
+                chunk: int = CHUNK) -> str:
+    """算文件 sha256；progress(已读字节, 总字节) 可选。"""
+    total = 0
+    try:
+        total = os.path.getsize(path)
+    except OSError:
+        total = 0
+    h = hashlib.sha256()
+    read = 0
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+            read += len(block)
+            if progress:
+                try:
+                    progress(read, total)
+                except Exception:       # noqa: BLE001 进度回调绝不能影响校验
+                    pass
+    return h.hexdigest()
+
+
+def download(url, dest, *, progress=None, timeout=(30, 60),
+             attempts=3, retry_wait=2.0, chunk=CHUNK, session=None,
+             expected_size=0) -> dict:
+    """流式下载到 dest（先写 .part 再原子改名），**带重试**。
+
+    ★ 2026-09-29 真机反馈：43MB 安装包在国内网络下一次就成功并不可靠
+      （实测 release CDN 读超时）。所以：
+        · timeout 拆成 (连接超时, 读超时)：43MB 慢速下载需要更宽的读窗口；
+        · 失败自动重试（默认 3 次，退避 1/2/4 秒）；
+        · 每次重试都从头写 .part —— 不装断点续传（收益小、易出半截包的坑）。
+
+    返回 {"ok", "bytes", "path", "error", "attempts"}。任何失败都清理 .part，
+    绝不留半截文件冒充完整包。
+    """
+    import requests
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    getter = session.get if session is not None else requests.get
+    last = {"ok": False, "bytes": 0, "path": str(dest), "error": "未开始",
+            "attempts": 0}
+    tries = max(1, int(attempts))
+    for attempt in range(1, tries + 1):
+        written = 0
+        try:
+            with getter(url, stream=True, timeout=timeout,
+                        headers={"User-Agent": "AutoQuill"}) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("Content-Length") or expected_size or 0)
+                with open(part, "wb") as f:
+                    for block in r.iter_content(chunk_size=chunk):
+                        if not block:
+                            continue
+                        f.write(block)
+                        written += len(block)
+                        if progress:
+                            try:
+                                progress(written, total)
+                            except Exception:   # noqa: BLE001
+                                pass
+            os.replace(part, dest)
+            return {"ok": True, "bytes": written, "path": str(dest),
+                    "error": None, "attempts": attempt}
+        except Exception as exc:        # noqa: BLE001
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            last = {"ok": False, "bytes": written, "path": str(dest),
+                    "error": "%s: %s" % (exc.__class__.__name__, exc),
+                    "attempts": attempt}
+            log.warning("更新：下载第 %d/%d 次失败（%s）", attempt, tries, exc)
+            if attempt < tries:
+                # 进度回退到 0，界面不要显示一个假的"已完成一半"
+                if progress:
+                    try:
+                        progress(0, expected_size)
+                    except Exception:       # noqa: BLE001
+                        pass
+                time.sleep(retry_wait * (2 ** (attempt - 1)))
+    return last
+
+
+def fetch_expected_sha256(info, *, timeout=15, session=None) -> dict:
+    """取「期望的 sha256」，两个来源交叉验证。
+
+    来源 A：release 里的 `.sha256` 资产（我们构建时用 certutil 生成）。
+    来源 B：GitHub API 的 asset.digest（GitHub 自己算的）。
+    两者都有且不一致 → 判失败（宁可拒绝更新，也不装来路不明的东西）。
+    返回 {"ok", "sha256", "sources", "error"}
+    """
+    import requests
+
+    getter = session.get if session is not None else requests.get
+    found = {}
+    sha_asset = (info or {}).get("sha_asset") or {}
+    if sha_asset.get("url"):
+        try:
+            r = getter(sha_asset["url"], timeout=timeout,
+                       headers={"User-Agent": "AutoQuill"})
+            r.raise_for_status()
+            got = parse_sha256_text(getattr(r, "text", "") or "")
+            if got:
+                found["asset"] = got
+        except Exception as exc:        # noqa: BLE001
+            log.warning("更新：下载 .sha256 资产失败（%s）", exc)
+    digest = parse_digest((info or {}).get("digest"))
+    if digest:
+        found["digest"] = digest
+    if not found:
+        return {"ok": False, "sha256": None, "sources": [],
+                "error": "拿不到校验和（既没有 .sha256 资产，也没有 API digest）"}
+    values = set(found.values())
+    if len(values) > 1:
+        return {"ok": False, "sha256": None, "sources": sorted(found),
+                "error": "两个来源的校验和不一致，已拒绝更新（%s）"
+                         % "、".join("%s=%s" % (k, v[:12]) for k, v in sorted(found.items()))}
+    return {"ok": True, "sha256": values.pop(), "sources": sorted(found), "error": None}
+
+
+def verify(path, expected) -> dict:
+    """校验已下载的安装包。返回 {"ok", "sha256", "error"}。"""
+    want = parse_sha256_text(expected)
+    if not want:
+        return {"ok": False, "sha256": None, "error": "期望的校验和无效"}
+    got = sha256_file(path)
+    if got != want:
+        return {"ok": False, "sha256": got,
+                "error": "校验和不匹配（期望 %s… 实际 %s…）" % (want[:12], got[:12])}
+    return {"ok": True, "sha256": got, "error": None}
+
+
+# ------------------------------------------------------------
+# 安装目录探测（换装必须装回原处）
+# ------------------------------------------------------------
+
+def current_install_dir():
+    """当前程序所在目录；**冻结态一定是**，源码态返回 None（不该自动换装）。
+
+    用户机器上可能装在任意目录（例如 D:\\AutoQuill），安装器的默认目录是
+    %LOCALAPPDATA%\\Programs\\AutoQuill——所以换装时必须显式带 /DIR。
+    """
+    import sys
+    if not getattr(sys, "frozen", False):
+        return None
+    try:
+        return str(Path(sys.executable).resolve().parent)
+    except Exception as exc:            # noqa: BLE001
+        log.warning("更新：探测安装目录失败（%s）", exc)
+        return None
+
+
+def detect_existing_install_dir_from_registry():
+    """从卸载信息里读安装目录（探测失败时的兜底）。找不到返回 None。"""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    key = (r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+           r"\{F0D565E3-C1A9-40A6-894E-615014A3A357}_is1")
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            value, _ = winreg.QueryValueEx(k, "InstallLocation")
+            value = str(value or "").strip()
+            return value or None
+    except OSError:
+        return None
+    except Exception as exc:            # noqa: BLE001
+        log.debug("更新：读注册表安装目录失败（%s）", exc)
+        return None
+
+
+def resolve_install_dir():
+    """换装目标目录：优先 sys.executable 的父目录，其次注册表。"""
+    return current_install_dir() or detect_existing_install_dir_from_registry()
+
+
+def installer_args(installer, install_dir, log_path=None):
+    """静默换装的命令行参数（Inno Setup 6）。
+
+    /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL：全静默、不弹框、
+      不自己重启、不允许取消——用户点过确认了，中途不该再问。
+    /CLOSEAPPLICATIONS 不传：关程序由我们自己控制（安装器脚本里已设
+      CloseApplications=no），避免它在没准备好时就动手。
+    /DIR 必传：装回原目录（用户可能装在 D:\\AutoQuill 而不是默认位置）。
+    """
+    args = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/NOCANCEL"]
+    if install_dir:
+        args.append('/DIR="%s"' % str(install_dir))
+    if log_path:
+        args.append('/LOG="%s"' % str(log_path))
+    return args
+
+
+@dataclass
+class UpdatePlan:
+    """一次更新的完整计划（检查阶段的产物，UI 与执行都只看它）。"""
+
+    version: str = ""
+    current: str = ""
+    installer_url: str = ""
+    installer_name: str = ""
+    installer_size: int = 0
+    sha256: str = ""
+    sha_sources: tuple = ()
+    page_url: str = ""
+    notes: str = ""
+    dest: str = ""
+    error: str = ""
+    release_info: dict = field(default_factory=dict)   # 解析后的 release（取校验和用）
+    extra: dict = field(default_factory=dict)
+
+    def to_dict(self):
+        d = {
+            "version": self.version, "current": self.current,
+            "installer_url": self.installer_url,
+            "installer_name": self.installer_name,
+            "installer_size": int(self.installer_size or 0),
+            "sha256": self.sha256, "sha_sources": list(self.sha_sources or ()),
+            "page_url": self.page_url, "notes": self.notes,
+            "dest": self.dest, "error": self.error,
+        }
+        d.update(self.extra or {})
+        return d
+
+
+def build_plan(release_payload, current_version, *, sha_lookup=None) -> UpdatePlan:
+    """把 release JSON + 当前版本 → UpdatePlan（纯函数，便于单测）。
+
+    sha_lookup: 可注入的「取期望校验和」函数（默认走网络）；
+                单测里传 lambda info: {"ok": True, "sha256": "..."} 即可脱网。
+    """
+    info = parse_release(release_payload)
+    plan = UpdatePlan(current=str(current_version or ""))
+    if not info.get("ok"):
+        plan.error = info.get("error") or "发布信息不可用"
+        plan.page_url = info.get("page_url") or ""
+        return plan
+    plan.version = info["version"]
+    plan.page_url = info.get("page_url") or ""
+    plan.notes = info.get("notes") or ""
+    plan.installer_url = info["installer"]["url"]
+    plan.installer_name = info["installer"]["name"]
+    plan.installer_size = int(info["installer"]["size"] or 0)
+    plan.dest = str(installer_path(plan.version))
+    if not is_newer(plan.version, plan.current):
+        plan.error = ""                 # 不是错误：只是没有更新
+        return plan
+    lookup = sha_lookup or fetch_expected_sha256
+    got = lookup(info) or {}
+    plan.sha_sources = tuple(got.get("sources") or ())
+    if got.get("ok") and got.get("sha256"):
+        plan.sha256 = got["sha256"]
+    else:
+        # 拿不到校验和 → 不许更新（宁可不更新，也不装来路不明的东西）
+        plan.error = got.get("error") or "拿不到校验和"
+    return plan
+
+
+def load_release_from_disk(path) -> dict:
+    """读本地保存的 release JSON（离线/单测用）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:            # noqa: BLE001
+        return {"__error": str(exc)}

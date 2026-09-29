@@ -2,6 +2,67 @@
 
 版本号以 core/version.py 为唯一事实来源（发布 tag 为 v<VERSION>）。
 
+## v4.9.15（2026-09-29）
+
+### 新增：一键自动更新（P1）——点一下，剩下的它自己做完
+
+**用户口径**：像 Clash Verge 那样，检查到新版本 → 点一次「更新」→
+自动下载、装好、重启，安装包自动删掉，不用再跳网站手动下载安装。
+
+**流程**（一键到底）
+
+```
+检查更新（已有）→ 点「确定」
+  → 后台下载（带进度，显示 已下载 xx MB / 43.5 MB）
+  → SHA256 双源校验（release 的 .sha256 资产 + GitHub API 的 digest）
+  → 校验通过 → 按钮变「重启并安装」→ 再确认一次
+  → 拉起独立换装进程 → 主程序退出 → 静默安装到原目录 → 自动重启 → 删除安装包
+```
+
+**关键技术点**
+
+- **运行中的 exe 不能被替换** → 换装由 `tools/apply_update.py` 这个
+  **脱离主程序的独立进程**完成（DETACHED_PROCESS，父进程死掉不影响它）；
+- **必须装回原安装目录**：从 `sys.executable` 取（你机器上是 `D:\AutoQuill`，
+  而不是安装器默认的 `%LOCALAPPDATA%\Programs\AutoQuill`），显式传
+  `/DIR="..."`；
+- **安装器不许自己关程序**：新增 `CloseApplications=no` / `RestartApplications=no`，
+  把「什么时候退」的控制权留给换装进程；
+- **换装脚本必须进包**：`tools/apply_update.py` 加入 PyInstaller datas，
+  并由 `main.py` 在**文件最顶端**按脚本路径分流（换装进程不加载任何业务模块）。
+
+**安全底线**
+
+- **双源校验**：`.sha256` 资产与 API digest 必须一致且匹配；不一致/拿不到校验和
+  → **直接拒绝更新**（不提供"仍然安装"）；
+- **永远由用户点确认**（两次：开始下载 + 开始安装），不会在你写文章时偷偷换装；
+- **失败可手动兜底**：安装包保留、`/LOG` 全量日志、状态写
+  `data/update/stage.json`；界面直接给出安装包路径与日志尾部；
+- 下载**带重试**（3 次退避）、先写 `.part` 再原子改名、失败清理半截文件
+  —— 真机实测：43.5 MB 一次成功 3.6 秒；首次实测遇到 CDN 读超时，故把超时
+  拆成（连接, 读）并加重试。
+
+**新增/改动**
+
+| 文件 | 作用 |
+|---|---|
+| `core/updater.py` | 纯逻辑：解析 release、版本比较、下载（重试）、双源校验、安装参数、目录探测 |
+| `core/update_stage.py` | 状态机落盘（idle→downloading→staged→applying→done/failed），跨进程唯一真相 |
+| `tools/apply_update.py` | 独立换装进程：校验 → 等父进程退出 → 静默安装 → 重启 → 清理 |
+| `webui/update_api.py` | 接口：`/api/update/status\|download\|apply\|restart\|cleanup` |
+| `webui/static/app.js` | 「检查更新」按钮接一键流程（进度、二次确认、失败原因） |
+
+**验证**
+
+- 新增 `tests/test_updater.py` **37 例**（版本比较 / 资产解析 / digest 解析 /
+  校验失败拒绝 / 状态机与坏文件回退 / 静默参数 / 安装目录探测 / 下载重试 /
+  双源交叉验证），全量 `tests/run_all.py` **919 例 0 失败**；
+- **真机端到端（dry-run）**：真下载 43.5 MB → 双源校验通过 → 状态 `staged` →
+  `main.py --apply-update --dry-run` 走通 → 校验与参数正确 → 未安装、未重启、
+  安装包保留；
+- **唯一未测**：真的替换你机器上的 `D:\AutoQuill`（那会覆盖你正在用的安装）。
+  这一步留给你第一次点「重启并安装」时验证。
+
 ## v4.9.14（2026-09-29）
 
 ### 修复 + 稳定期收口：回滚「跨线程唤醒浏览器」的回归，reply_comment 退出默认

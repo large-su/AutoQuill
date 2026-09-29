@@ -2467,18 +2467,119 @@ async function checkUpdate() {
     }
     if (d.has_update) {
       btn.textContent = "有新版本";
-      if (confirm(`发现新版本 ${d.latest}（当前 ${d.current}）\n\n点击「确定」前往下载页。下载后运行安装包即可升级，数据会自动保留。`)) {
-        window.open(d.url, "_blank");
+      // 一键更新：确认后自动下载 → 校验 → 换装 → 重启 → 清理（P1）
+      if (confirm(`发现新版本 ${d.latest}（当前 ${d.current}）\n\n`
+        + `点击「确定」自动完成升级：下载 → 校验 → 安装 → 重启，安装包自动删除。\n`
+        + `你的数据（登录态、草稿、计划）会全部保留。`)) {
+        startAutoUpdate(d.latest);
+        return;
       }
-    } else {
-      btn.textContent = "已是最新版本";
-      setTimeout(() => { btn.textContent = orig; }, 3000);
+      btn.textContent = orig;
+      return;
     }
+    btn.textContent = "已是最新版本";
+    setTimeout(() => { btn.textContent = orig; }, 3000);
   } catch (e) {
     btn.textContent = orig;
     alert("检查更新失败：" + e.message);
   } finally {
     btn.disabled = false;
+  }
+}
+
+/* ---------- 一键更新：下载 → 校验 → 安装 → 重启 ---------- */
+
+let _updTimer = null;
+
+function fmtMB(n) {
+  return (Number(n || 0) / 1048576).toFixed(1) + " MB";
+}
+
+async function startAutoUpdate(version) {
+  const btn = $("btnUpdate");
+  btn.disabled = true;
+  btn.textContent = "准备下载…";
+  try {
+    const r = await fetch("/api/update/download", { method: "POST" });
+    const d = await r.json();
+    if (!d.ok) { alert("无法开始更新：" + (d.message || "未知原因")); 
+      btn.textContent = "检查更新"; btn.disabled = false; return; }
+    pollUpdateStatus(version);
+  } catch (e) {
+    alert("无法开始更新：" + e.message);
+    btn.textContent = "检查更新";
+    btn.disabled = false;
+  }
+}
+
+function pollUpdateStatus(version) {
+  if (_updTimer) clearInterval(_updTimer);
+  const btn = $("btnUpdate");
+  const tick = async () => {
+    let st;
+    try {
+      st = await (await fetch("/api/update/status")).json();
+    } catch (e) { return; }               // 网络抖动：下一轮再试
+    const dl = st.download || {};
+    if (st.stage === "downloading" || dl.running) {
+      btn.textContent = dl.total
+        ? `下载中 ${fmtMB(dl.bytes)} / ${fmtMB(dl.total)}`
+        : `下载中 ${fmtMB(dl.bytes)}`;
+      btn.disabled = true;
+      return;
+    }
+    if (st.stage === "staged") {
+      clearInterval(_updTimer); _updTimer = null;
+      btn.disabled = false;
+      btn.textContent = "重启并安装";
+      const ok = confirm(
+        `v${st.version} 已下载并通过校验。\n\n`
+        + `点击「确定」立即安装：程序会自动退出 → 静默安装 → 自动重启，`
+        + `安装包随后自动删除。\n\n你的数据不会受影响。`);
+      if (!ok) { btn.textContent = "稍后安装"; return; }
+      applyUpdate();
+      return;
+    }
+    if (st.stage === "failed") {
+      clearInterval(_updTimer); _updTimer = null;
+      btn.disabled = false;
+      btn.textContent = "更新失败";
+      let msg = "更新失败：" + (st.error || "未知原因");
+      if (st.installer_exists) {
+        msg += "\n\n安装包已保留，可手动运行：\n" + st.installer;
+      }
+      if (st.log_tail) msg += "\n\n日志尾部：\n" + st.log_tail;
+      alert(msg);
+      return;
+    }
+    // idle / done / 其它：停轮询，恢复按钮
+    clearInterval(_updTimer); _updTimer = null;
+    btn.disabled = false;
+    btn.textContent = "检查更新";
+  };
+  _updTimer = setInterval(tick, 1000);
+  tick();
+}
+
+async function applyUpdate() {
+  const btn = $("btnUpdate");
+  btn.disabled = true;
+  btn.textContent = "正在安装…";
+  try {
+    const r = await fetch("/api/update/apply", { method: "POST" });
+    const d = await r.json();
+    if (!d.ok) {
+      alert("无法开始安装：" + (d.message || "未知原因"));
+      btn.disabled = false;
+      btn.textContent = "重启并安装";
+      return;
+    }
+    btn.textContent = "即将重启…";
+    // 换装子进程会结束本程序并重启新版本；这里不必再做什么
+  } catch (e) {
+    alert("无法开始安装：" + e.message);
+    btn.disabled = false;
+    btn.textContent = "重启并安装";
   }
 }
 

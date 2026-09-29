@@ -23,6 +23,10 @@ a = Analysis(
         ('../config/model_pricing.json', 'config'),
         ('../config/builtin_general_profile.json', 'config'),
         ('../assets/AutoQuill.ico', 'assets'),
+        # 一键更新的换装脚本：由 AutoQuill.exe --apply-update 以**脚本路径**
+        # 执行（main.py 里用 runpy），所以必须作为数据文件进包——
+        # 它不在 launcher 的静态分析图里，漏了会导致更新到"重启并安装"时失败。
+        ('../tools/apply_update.py', 'tools'),
     ],
     hiddenimports=[
         # web_drivers/__init__.py 用 importlib.import_module 动态加载驱动
