@@ -243,14 +243,22 @@ def api_update_apply(dry_run: bool = False):
         cmd = updater.powershell_apply_command(
             installer, 0, install_dir, stage.log_file(), relaunch_exe="")
     try:
+        # ★ 只用 CREATE_NO_WINDOW（隐藏控制台）+ 独立进程组。
+        #   绝不能同时给 DETACHED_PROCESS：它让子进程**没有控制台**，PowerShell
+        #   直接起不来（真机踩到：接口报成功、宿主进程根本没产生、日志为空）。
         subprocess.Popen(
             cmd, close_fds=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     except Exception as exc:                # noqa: BLE001
         stage.mark_failed("启动换装宿主失败：%s" % exc)
         return {"ok": False, "message": "启动换装宿主失败：%s" % exc}
+
+    # 起没起来要看得见：宿主不写日志就说明它没跑起来，别报"成功"骗用户
+    if not _wait_host_started(stage.log_file()):
+        stage.mark_failed("换装宿主没有启动（日志未写入）")
+        return {"ok": False,
+                "message": "换装宿主没有启动；可手动运行安装包完成更新"}
 
     stage.update(stage=stage.STAGE_APPLYING, error="")
     if not dry_run:
@@ -259,6 +267,25 @@ def api_update_apply(dry_run: bool = False):
     return {"ok": True, "dry_run": bool(dry_run),
             "message": ("演练：宿主已就绪（不会安装）" if dry_run
                         else "更新已开始：程序将自动退出并重启")}
+
+
+def _wait_host_started(log_path, timeout=6.0):
+    """确认换装宿主真的起来了：它启动后第一件事就是写日志。
+
+    ★ 2026-09-29 教训：`CREATE_NO_WINDOW|DETACHED_PROCESS` 组合让 PowerShell 起不来，
+      而接口照样返回「成功」——用户点了更新却什么都没发生。现在起不来就如实报错。
+    """
+    import time as _time
+    path = Path(log_path)
+    before = path.stat().st_mtime if path.exists() else 0
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if path.exists() and path.stat().st_mtime > before:
+            return True
+        if path.exists() and before == 0 and path.stat().st_size > 0:
+            return True
+        _time.sleep(0.3)
+    return False
 
 
 def _relaunch_exe(install_dir):

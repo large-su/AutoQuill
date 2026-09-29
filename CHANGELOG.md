@@ -2,6 +2,39 @@
 
 版本号以 core/version.py 为唯一事实来源（发布 tag 为 v<VERSION>）。
 
+## v4.9.18（2026-09-29）
+
+### 修复：v4.9.17 里换装宿主根本起不来（真机联调抓到）
+
+v4.9.17 换掉了换装宿主（改用 PowerShell），但 spawn 时我同时给了
+`CREATE_NO_WINDOW` **和** `DETACHED_PROCESS`——这两个标志**冲突**：
+`DETACHED_PROCESS` 让子进程没有控制台，PowerShell 直接起不来。
+后果最恶劣的地方在于：**接口照样返回「成功」**，用户点了更新却什么都没发生。
+
+**修法**
+
+- 只保留 `CREATE_NO_WINDOW` + `CREATE_NEW_PROCESS_GROUP`；
+- 新增 `_wait_host_started()`：spawn 之后**等宿主写第一行日志**（最多 6 秒），
+  没写就如实报「换装宿主没有启动」并把安装包路径留给用户手动兜底——
+  绝不再报假的成功。
+
+**真机联调证据（起真实服务 + 真实接口）**
+
+```
+POST /api/update/apply?dry_run=true  →  {"ok":true,"dry_run":true,...}
+apply.log                            →  === 换装开始（PowerShell 宿主）===
+GET  /api/update/status              →  HTTP 200（dry_run 不该退出，确实没退）
+```
+
+### 修复：提交记录中文变乱码（发版脚本的坑）
+
+`tools/release.py` 原来只支持 `-m` 从命令行传提交信息，中文经 PowerShell 管道
+会被转码 → **提交记录乱码**（v4.9.17 那条已修干净，tag 已前移到正确提交）。
+现在支持 `--message-file`（按 UTF-8 读文件）。
+
+### 测试
+全量 `tests/run_all.py` **951 例 0 失败**。
+
 ## v4.9.17（2026-09-29）
 
 ### 修复：点「重启并安装」后黑框不停弹出、界面一直不关（v4.9.15 引入的严重 bug）
