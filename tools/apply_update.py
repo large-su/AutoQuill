@@ -110,8 +110,23 @@ def run_installer(installer, install_dir, dry_run=False):
     return True, "安装完成"
 
 
-def relaunch(install_dir):
-    """重启新版本（安装目录下的 AutoQuill.exe）。"""
+def relaunch(install_dir, override=""):
+    """重启新版本（安装目录下的 AutoQuill.exe）。
+
+    override 仅供自测：指向任意程序（如 notepad.exe）验证「重启」这一步真的执行了，
+    而不必真的再拉起一个 AutoQuill。
+    """
+    if override:
+        exe = Path(override)
+        if not exe.exists():
+            return False, "指定的重启程序不存在：%s" % exe
+        try:
+            subprocess.Popen([str(exe)],
+                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            log("已重新启动（自测）：%s" % exe)
+            return True, "已重启"
+        except Exception as exc:        # noqa: BLE001
+            return False, "重启失败：%s" % exc
     if not install_dir:
         return False, "没探测到安装目录，跳过重启"
     exe = Path(install_dir) / "AutoQuill.exe"
@@ -142,11 +157,18 @@ def main():
     ap.add_argument("--pid", type=int, default=0, help="主程序 pid（等它退出）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只做校验与准备，不执行安装、不重启")
-    ap.add_argument("--wait", type=int, default=60, help="等主程序退出的秒数")
+    ap.add_argument("--wait", type=int, default=600,
+                    help="等主程序退出的秒数（默认 600；旧值是 60，太短）")
+    ap.add_argument("--installer", default="",
+                    help="覆盖安装包路径（**仅供自测**：用假安装器验证整条链路，"
+                         "不真装）")
+    ap.add_argument("--relaunch-exe", default="",
+                    help="装完要重启的程序（**仅供自测**：如 notepad.exe）")
     args = ap.parse_args()
 
     state = stage.load()
-    installer = Path(state.get("installer") or "")
+    installer = Path(args.installer) if args.installer else \
+        Path(state.get("installer") or "")
     version = str(state.get("version") or "")
     expected = str(state.get("sha256") or "")
     install_dir = str(state.get("install_dir") or "") or (updater.resolve_install_dir() or "")
@@ -180,8 +202,10 @@ def main():
         return 0
 
     # ④ 重启 + ⑤ 清理
-    relaunched, relaunch_why = relaunch(install_dir)
-    cleanup(installer)
+    relaunched, relaunch_why = relaunch(
+        install_dir, override=args.relaunch_exe)
+    if not args.installer:                  # 自测（假安装器）时不删真包
+        cleanup(installer)
     stage.update(stage=stage.STAGE_DONE,
                  error="" if relaunched else relaunch_why,
                  bytes=0)

@@ -242,48 +242,107 @@ def api_update_apply(dry_run: bool = False):
         # 演练：不等待、不安装（宿主只记日志），用于验证命令行拼装
         cmd = updater.powershell_apply_command(
             installer, 0, install_dir, stage.log_file(), relaunch_exe="")
-    try:
-        # ★ 只用 CREATE_NO_WINDOW（隐藏控制台）+ 独立进程组。
-        #   绝不能同时给 DETACHED_PROCESS：它让子进程**没有控制台**，PowerShell
-        #   直接起不来（真机踩到：接口报成功、宿主进程根本没产生、日志为空）。
-        subprocess.Popen(
-            cmd, close_fds=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-    except Exception as exc:                # noqa: BLE001
-        stage.mark_failed("启动换装宿主失败：%s" % exc)
-        return {"ok": False, "message": "启动换装宿主失败：%s" % exc}
 
-    # 起没起来要看得见：宿主不写日志就说明它没跑起来，别报"成功"骗用户
-    if not _wait_host_started(stage.log_file()):
-        stage.mark_failed("换装宿主没有启动（日志未写入）")
+    ok, detail = _spawn_detached_host(cmd, stage.log_file(), dry_run=dry_run)
+    if not ok:
+        stage.mark_failed("拉起换装宿主失败：%s" % detail)
         return {"ok": False,
-                "message": "换装宿主没有启动；可手动运行安装包完成更新"}
+                "message": "拉起换装宿主失败（%s）。已保留安装包，"
+                           "请手动运行安装包完成更新。" % detail}
 
     stage.update(stage=stage.STAGE_APPLYING, error="")
     if not dry_run:
         _request_app_quit()
-    log.info("更新：已拉起换装宿主（dry_run=%s），已请求本程序退出", dry_run)
+    log.info("更新：已拉起换装宿主（已脱离主程序进程树，dry_run=%s），已请求退出", dry_run)
     return {"ok": True, "dry_run": bool(dry_run),
             "message": ("演练：宿主已就绪（不会安装）" if dry_run
-                        else "更新已开始：程序将自动退出并重启")}
+                        else "更新已开始：程序将自动退出并安装，完成后自动重启")}
 
 
-def _wait_host_started(log_path, timeout=6.0):
+def _spawn_detached_host(cmd, log_path, dry_run=False):
+    """拉起换装宿主，并让它**脱离本进程的进程树**。
+
+    ★★ 这是整个功能最关键的一步（2026-10-01 线上事故的根因）：
+      用 `subprocess.Popen` 起的宿主是**本进程的子进程**，本进程退出时会被
+      一起结束。真机表现：「点了重启，程序关了，更新没装，也没重启」，
+      apply.log 停在「等待主程序退出 pid=…」之后再无一行。
+      正确做法：用 WMI（`Win32_Process.Create`）创建 —— 宿主挂到 WMI 服务
+      （WmiPrvSE.exe）名下，**不在本进程树里**。实测：父进程被强杀后，
+      宿主仍继续存活并写满日志。
+      这里用系统自带的 wscript.exe 跑一小段 VBScript 来调用 WMI
+      （比在本进程里加载 WMI COM 简单，也不必依赖 pywin32/pythonnet）。
+
+    返回 (ok, detail)。
+    """
+    script_path = Path(stage.file()).parent / "spawn_host.vbs"
+    try:
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        # VBScript 交给 Windows 的是命令行字符串：首段含空格要加引号
+        head = str(cmd[0])
+        quoted = '"%s"' % head if " " in head else head
+        full = quoted + " " + " ".join(str(c) for c in cmd[1:])
+        vbs = updater.vbs_detach_launcher(full, str(log_path),
+                                          env=_host_env())
+        # ★ 必须以 ANSI 写：wscript 是 ANSI 引擎，UTF-8 的 .vbs 会把路径读成乱码，
+        #   表现为「WMI 报 rc=0 但宿主根本没跑」（真机踩到）。
+        #   上面的 vbs_detach_launcher 已保证脚本只含 ASCII。
+        script_path.write_text(vbs, encoding="ascii", errors="replace")
+    except Exception as exc:                # noqa: BLE001
+        return False, "无法写入宿主启动脚本：%s" % exc
+
+    try:
+        # wscript 自身很快退出；真正的宿主由 WMI 创建，不受本进程退出影响
+        subprocess.Popen(
+            ["wscript.exe", "//B", "//Nologo", str(script_path)],
+            close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    except Exception as exc:                # noqa: BLE001
+        return False, "wscript 启动失败：%s" % exc
+
+    if dry_run:
+        return True, "dry_run"
+    # 确认宿主真的起来了（它启动后第一件事就是写日志）
+    if _wait_host_started(log_path):
+        return True, "ok"
+    return False, "宿主未在预期时间内写入日志"
+
+
+def _host_env():
+    """换装宿主必须继承的环境变量。
+
+    ★ 必须显式传（2026-10-01 实测）：WMI 创建的子进程**不继承**本进程的环境变量，
+      靠 `os.environ` 传递会失效 —— 宿主会去读默认数据目录，拿到空的更新状态，
+      报「期望的校验和无效」。AQ_DATA_DIR 决定它去哪儿读 stage.json / 写日志。
+    """
+    env = {}
+    for key in ("AQ_DATA_DIR", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+                "USERPROFILE", "SystemRoot", "windir", "ProgramData"):
+        val = os.environ.get(key)
+        if val:
+            env[key] = val
+    return env
+
+
+def _wait_host_started(log_path, timeout=12.0):
     """确认换装宿主真的起来了：它启动后第一件事就是写日志。
 
-    ★ 2026-09-29 教训：`CREATE_NO_WINDOW|DETACHED_PROCESS` 组合让 PowerShell 起不来，
-      而接口照样返回「成功」——用户点了更新却什么都没发生。现在起不来就如实报错。
+    ★ 起不来就要**如实报错**，不能让界面报「成功」而实际什么都没发生
+      （2026-09-29 的教训：标志位冲突让 PowerShell 起不来，接口照样返回成功）。
     """
     import time as _time
     path = Path(log_path)
-    before = path.stat().st_mtime if path.exists() else 0
+    try:
+        before = path.stat().st_mtime if path.exists() else 0.0
+    except OSError:
+        before = 0.0
     deadline = _time.time() + timeout
     while _time.time() < deadline:
-        if path.exists() and path.stat().st_mtime > before:
-            return True
-        if path.exists() and before == 0 and path.stat().st_size > 0:
-            return True
+        try:
+            if path.exists() and path.stat().st_mtime > before:
+                return True
+        except OSError:
+            pass
         _time.sleep(0.3)
     return False
 

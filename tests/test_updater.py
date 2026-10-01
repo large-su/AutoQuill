@@ -473,6 +473,74 @@ class ApplyHostTest(unittest.TestCase):
         self.assertIn("$target=0", script)
 
 
+class DetachHostTest(unittest.TestCase):
+    """换装宿主必须**脱离主程序进程树**（2026-10-01 线上事故）。
+
+    事故现象：点「重启并安装」后程序关了、更新没装、也没重启，仍是旧版本。
+    根因：宿主是用 `subprocess.Popen` 从主程序里起的**子进程**，主程序一退
+    就被一起结束；真机 apply.log 停在「等待主程序退出 pid=…」之后再无一行。
+    → 改用 WMI（Win32_Process.Create）创建，宿主挂到 WmiPrvSE 名下。
+    """
+
+    def test_host_script_logs_every_step(self):
+        script = updater.powershell_host_script(
+            r"D:\x\Setup.exe", 1234, r"D:\AutoQuill", r"D:\x\apply.log",
+            relaunch_exe=r"D:\AutoQuill\AutoQuill.exe")
+        # 关键步骤都要落日志：出问题时日志是唯一事实来源
+        for mark in ("换装开始", "等待主程序退出", "主程序已退出",
+                     "安装前 AutoQuill.exe 时间戳", "安装器返回码",
+                     "安装后 AutoQuill.exe 时间戳", "正在重启新版本", "换装结束"):
+            self.assertIn(mark, script, mark)
+
+    def test_host_script_reports_whether_files_changed(self):
+        """安装前后比时间戳：装完没变化要能在日志里看出来。"""
+        script = updater.powershell_host_script(
+            r"D:\x\Setup.exe", 0, r"D:\AutoQuill", r"D:\x\apply.log")
+        self.assertIn("文件已更新（时间戳变化）", script)
+        self.assertIn("警告：exe 时间戳未变化", script)
+
+    def test_vbs_uses_wmi_not_a_child_process(self):
+        vbs = updater.vbs_detach_launcher("prog.exe --a", "log.txt")
+        self.assertIn("Win32_Process", vbs)
+        self.assertIn("Create", vbs)
+        # 必须只含 ASCII：wscript 是 ANSI 引擎，UTF-8 脚本会把路径读成乱码
+        self.assertTrue(vbs.isascii(), "VBS 必须只含 ASCII（wscript 读不了 UTF-8）")
+
+    def test_vbs_builds_quotes_at_runtime(self):
+        """引号必须用 Chr(34) 运行时拼：字面量嵌套转义会算错（真机踩到）。"""
+        vbs = updater.vbs_detach_launcher(
+            '"C:\\Program Files\\x.exe" --a "C:\\我的 目录\\b.exe"', "l.txt")
+        self.assertIn("Q = Chr(34)", vbs)
+        self.assertIn("Q & ", vbs)
+
+    def test_vbs_keeps_flags_unquoted(self):
+        """只给含空格的片段加引号：把 --pid 包成 "--pid" 会让宿主收不到开关。"""
+        vbs = updater.vbs_detach_launcher("prog.exe --pid 7", "l.txt")
+        expr = vbs.split("rc = proc.Create(")[1].split(", Null")[0]
+        self.assertIn('"--pid"', expr)          # 无空格 → 源码里直接带引号，无 Q 拼接
+        self.assertNotIn('Q & "--pid"', expr)
+
+    def test_env_is_inlined_via_cmd(self):
+        """环境变量必须内联进命令行。
+
+        ★ 实测：WMI 创建的子进程由 WmiPrvSE 派生，**不继承**调用方环境，
+          只靠 os.environ 传会丢失 AQ_DATA_DIR → 宿主拿到空状态报「校验和无效」。
+        """
+        vbs = updater.vbs_detach_launcher(
+            "prog.exe --a", "l.txt", env={"AQ_DATA_DIR": r"C:\data"})
+        self.assertIn("cmd.exe", vbs)
+        self.assertIn("AQ_DATA_DIR=C:", vbs)
+
+    def test_ascii_safe_short_path_for_non_ascii(self):
+        """非 ASCII 路径要转成短路径（脚本宿主只认 ANSI）。"""
+        out = updater._ascii_safe_path(r"C:\Windows")
+        self.assertTrue(out.isascii())
+
+    def test_split_args_respects_quotes(self):
+        got = updater._split_args('prog.exe "C:\\a b\\c.exe" --pid 7')
+        self.assertEqual(got, ["prog.exe", "C:\\a b\\c.exe", "--pid", "7"])
+
+
 class QuitRequestTest(unittest.TestCase):
     """更新时必须**真正请求退出**（否则主程序不退、宿主白等、更新卡死）。"""
 
