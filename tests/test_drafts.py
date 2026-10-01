@@ -4,8 +4,9 @@ import json
 import re
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from webui import drafts
 
@@ -82,18 +83,28 @@ class DraftsDataLayerTest(unittest.TestCase):
         self.assertNotIn('.CreationCardContent-text span', js)
 
     def test_rel_to_date(self):
-        now = datetime.now()
-        self.assertEqual(drafts._rel_to_date('昨天'),
-                         (now - timedelta(days=1)).strftime('%Y-%m-%d'))
-        self.assertEqual(drafts._rel_to_date('前天'),
-                         (now - timedelta(days=2)).strftime('%Y-%m-%d'))
-        self.assertEqual(drafts._rel_to_date('3 天前'),
-                         (now - timedelta(days=3)).strftime('%Y-%m-%d'))
-        d = drafts._rel_to_date('5 小时前')
-        self.assertTrue(d.startswith(now.strftime('%Y-%m')), d)
-        self.assertEqual(drafts._rel_to_date('2026-08-20 10:00'), '2026-08-20')
-        self.assertEqual(drafts._rel_to_date(''), '')
-        self.assertEqual(drafts._rel_to_date('无法识别'), '')
+        """相对时间 → 日期。
+
+        ★ 必须**冻结「现在」**：原来是先算 `now` 再调用 `_rel_to_date`，
+          跨午夜时两者不是同一天（CI 在 2026-10-01 00:0x 真的挂过：
+          `now` 算的是 09-30、调用时已是 10-01 → 期望 09-30 却得到 10-01）。
+        """
+        fixed = datetime(2026, 10, 1, 12, 0, 0)
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed
+
+        with mock.patch.object(drafts, "datetime", _FrozenDatetime):
+            self.assertEqual(drafts._rel_to_date('昨天'), '2026-09-30')
+            self.assertEqual(drafts._rel_to_date('前天'), '2026-09-29')
+            self.assertEqual(drafts._rel_to_date('3 天前'), '2026-09-28')
+            self.assertEqual(drafts._rel_to_date('5 小时前'), '2026-10-01')
+            self.assertEqual(drafts._rel_to_date('昨天 20:21'), '2026-09-30')
+            self.assertEqual(drafts._rel_to_date('2026-08-20 10:00'), '2026-08-20')
+            self.assertEqual(drafts._rel_to_date(''), '')
+            self.assertEqual(drafts._rel_to_date('无法识别'), '')
 
     def test_draft_html_text(self):
         self.assertEqual(drafts._draft_html_text('<p>你好</p><p>世界</p>'), '你好世界')
