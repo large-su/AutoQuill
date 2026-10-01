@@ -397,11 +397,14 @@ function renderAutoSingleCards() {
    ["comment", "发布 1 条评论"]].forEach(function (r) {
     const t = tasks[r[0]];
     if (!t) return;
+    const effectiveDone = Boolean(t.done || localDone[r[0]]);
     let how = t.action || "待完成";
-    if (t.done && localDone[r[0]]) how = "自动化" + (noteAt[r[0]] ? " " + noteAt[r[0]] : "");
-    else if (t.done) how = "已完成";
-    html += '<div class="sa-item"><span class="' + (t.done ? "ok" : "no") + '">'
-      + (t.done ? "√" : "×") + '</span><span class="sa-item-name">' + esc(r[1])
+    if (localDone[r[0]]) {
+      how = "自动化" + (noteAt[r[0]] ? " " + noteAt[r[0]] : "");
+      if (!t.done || t.stale_page) how += "（平台待同步）";
+    } else if (t.done) how = "已完成";
+    html += '<div class="sa-item"><span class="' + (effectiveDone ? "ok" : "no") + '">'
+      + (effectiveDone ? "√" : "×") + '</span><span class="sa-item-name">' + esc(r[1])
       + '</span><span class="sa-item-how">' + esc(how) + '</span></div>';
   });
   const tried = ck.tried || [];

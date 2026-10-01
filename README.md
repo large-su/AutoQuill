@@ -1,11 +1,11 @@
-﻿# AutoQuill v5.0.5
+﻿# AutoQuill v5.0.6
 
 本地的**知乎故事创作助手**：自动选题 → 学习指定作者的文风生成故事 → 写入知乎草稿。
 一键安装，无需 Python、无需命令行。
 
 | 项目 | 内容 |
 |---|---|
-| **当前版本** | v5.0.5 |
+| **当前版本** | v5.0.6 |
 | **平台** | Windows 10 / 11（x64） |
 | **发布页** | [Releases](https://github.com/large-su/AutoQuill/releases) |
 | **变更记录** | [CHANGELOG.md](CHANGELOG.md) |
@@ -82,7 +82,7 @@
 **校验安装包**（可选）：同目录的 `.sha256` 文件为安装包的 SHA256 值。
 
 ```powershell
-certutil -hashfile AutoQuill-Setup-5.0.5.exe SHA256
+certutil -hashfile AutoQuill-Setup-5.0.6.exe SHA256
 ```
 
 ---
@@ -214,6 +214,7 @@ certutil -hashfile AutoQuill-Setup-5.0.5.exe SHA256
 
 | 版本 | 日期 | 主要内容 |
 |---|---|---|
+| v5.0.6 | 2026-10-01 | 修复打卡明细与完成汇总不一致；平台未同步时显示完成记录与提示 |
 | v5.0.5 | 2026-10-01 | 修复更新交接与完成判定；独立重启；真实 Windows 安装链路回归 |
 | v5.0.4 | 2026-10-01 | 仓库与文档规范化：移除第三方工具包、归档历史文档、文档头与发布规范 |
 | v5.0.3 | 2026-10-01 | 修复应用内安装失败（接口 500）；安装阶段不再访问网络 |

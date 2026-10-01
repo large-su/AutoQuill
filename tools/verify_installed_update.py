@@ -2,8 +2,8 @@
 """Destructive-in-a-private-temp-dir smoke test for a frozen Windows update.
 
 It never downloads a release and never targets the user's installation.  Supply a
-new, already-built ``dist/AutoQuill`` and it builds an old private copy from only
-tracked repository files, then upgrades that copy with a private Inno installer.
+new, already-built ``dist/AutoQuill`` and either an already-built old frozen
+copy or a source snapshot, then upgrades that copy with a private Inno installer.
 """
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OLD_VERSION = "5.0.4"
-TARGET_VERSION = "5.0.5"
 
 
 def say(message: str) -> None:
@@ -121,7 +120,7 @@ def replace_version(snapshot: Path, version: str) -> None:
     path.write_text(updated, encoding="utf-8")
 
 
-def build_old_fixture(snapshot: Path, build_root: Path) -> Path:
+def build_old_fixture(snapshot: Path, build_root: Path, old_version: str) -> Path:
     say("building isolated old frozen fixture")
     dist_root = build_root / "dist"
     work_root = build_root / "work"
@@ -132,7 +131,7 @@ def build_old_fixture(snapshot: Path, build_root: Path) -> Path:
     require((result / "AutoQuill.exe").is_file(), "old frozen AutoQuill.exe was not built")
     info = result / "_internal" / "build_info.json"
     info.parent.mkdir(parents=True, exist_ok=True)
-    info.write_text(json.dumps({"version": OLD_VERSION}, indent=2), encoding="utf-8")
+    info.write_text(json.dumps({"version": old_version}, indent=2), encoding="utf-8")
     return result
 
 
@@ -140,7 +139,7 @@ def inno_escape(path: Path) -> str:
     return str(path).replace('"', '""')
 
 
-def compile_private_installer(target_dist: Path, output: Path) -> Path:
+def compile_private_installer(target_dist: Path, output: Path, target_version: str) -> Path:
     iscc = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe"
     require(iscc.is_file(), "Inno Setup 6 ISCC.exe was not found at %s" % iscc)
     language = ROOT / "installer" / "languages" / "ChineseSimplified.isl"
@@ -173,7 +172,7 @@ RestartApplications=no
 Name: \"chinesesimplified\"; MessagesFile: \"%s\"
 [Files]
 Source: \"%s\\*\"; DestDir: \"{app}\"; Flags: recursesubdirs ignoreversion
-""" % (TARGET_VERSION, app_id, inno_escape(output), inno_escape(output),
+""" % (target_version, app_id, inno_escape(output), inno_escape(output),
          inno_escape(icon), inno_escape(language), inno_escape(target_dist)), encoding="utf-8")
     say("compiling private Inno installer")
     subprocess.run([str(iscc), str(iss)], cwd=output, check=True)
@@ -244,13 +243,25 @@ def quit_owned(port: int, pids: set[int], install_dir: Path) -> None:
         wait_until("owned process %s exit" % pid, lambda p=pid: not pid_alive(p), seconds=5)
 
 
-def run(target_dist: Path, report: Path | None) -> None:
+def run(target_dist: Path, report: Path | None, old_dist: Path | None = None,
+        old_version: str | None = None) -> None:
     target_dist = target_dist.resolve()
     require((target_dist / "AutoQuill.exe").is_file(), "target dist has no AutoQuill.exe: %s" % target_dist)
     manifest = target_dist / "_internal" / "build_info.json"
     require(manifest.is_file(), "target dist is missing _internal/build_info.json")
     target_version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
-    require(target_version == TARGET_VERSION, "target dist must contain version %s, got %r" % (TARGET_VERSION, target_version))
+    require(isinstance(target_version, str) and target_version, "target dist manifest has no version")
+    if old_dist is not None:
+        require(old_version is not None, "--old-version is required with --old-dist")
+        old_dist = old_dist.resolve()
+        require((old_dist / "AutoQuill.exe").is_file(), "old dist has no AutoQuill.exe: %s" % old_dist)
+        old_manifest = old_dist / "_internal" / "build_info.json"
+        require(old_manifest.is_file(), "old dist is missing _internal/build_info.json")
+        old_manifest_version = json.loads(old_manifest.read_text(encoding="utf-8")).get("version")
+        require(old_manifest_version == old_version,
+                "old dist must contain version %s, got %r" % (old_version, old_manifest_version))
+    else:
+        old_version = old_version or OLD_VERSION
     results: dict[str, object] = {"target": str(target_dist), "target_version": target_version}
     owned: set[int] = set()
     port = free_port()
@@ -260,14 +271,17 @@ def run(target_dist: Path, report: Path | None) -> None:
         raw = temporary.name
         if raw:
             root = Path(raw)
-            snapshot, build_root = root / "source", root / "build"
-            snapshot.mkdir(); build_root.mkdir()
-            tracked_snapshot(snapshot)
-            replace_version(snapshot, OLD_VERSION)
-            old_dist = build_old_fixture(snapshot, build_root)
-            installer = compile_private_installer(target_dist, root / "installer")
+            if old_dist is None:
+                snapshot, build_root = root / "source", root / "build"
+                snapshot.mkdir(); build_root.mkdir()
+                tracked_snapshot(snapshot)
+                replace_version(snapshot, old_version)
+                old_dist_for_install = build_old_fixture(snapshot, build_root, old_version)
+            else:
+                old_dist_for_install = old_dist
+            installer = compile_private_installer(target_dist, root / "installer", target_version)
             install_dir = root / "安装 空格 'private'"
-            shutil.copytree(old_dist, install_dir)
+            shutil.copytree(old_dist_for_install, install_dir)
             data_dir = root / "private-data"
             data_dir.mkdir()
             sentinel = data_dir / "must-survive.txt"
@@ -277,14 +291,14 @@ def run(target_dist: Path, report: Path | None) -> None:
             say("starting private old application")
             base = subprocess.Popen([str(install_dir / "AutoQuill.exe"), "--tray"], cwd=install_dir, env=environment)
             owned.add(base.pid)
-            old_status = wait_status(port, OLD_VERSION, install_dir)
+            old_status = wait_status(port, old_version, install_dir)
             old_service = int(old_status["running_pid"])
             owned.add(old_service)
             stage = data_dir / "data" / "update" / "stage.json"
             stage.parent.mkdir(parents=True, exist_ok=True)
             staged_installer = stage.parent / installer.name
             shutil.copy2(installer, staged_installer)
-            stage.write_text(json.dumps({"stage": "staged", "version": TARGET_VERSION,
+            stage.write_text(json.dumps({"stage": "staged", "version": target_version,
                                          "installer": str(staged_installer), "sha256": sha256(staged_installer),
                                          "install_dir": str(install_dir), "log": str(stage.parent / "apply.log")}, indent=2), encoding="utf-8")
             say("calling real local update API")
@@ -292,7 +306,7 @@ def run(target_dist: Path, report: Path | None) -> None:
             require(reply.get("ok") is True, "apply API refused update: %s" % reply.get("message"))
             wait_until("old launcher exit", lambda: not pid_alive(base.pid))
             wait_until("old service exit", lambda: not pid_alive(old_service))
-            new_status = wait_status(port, TARGET_VERSION, install_dir, old_service)
+            new_status = wait_status(port, target_version, install_dir, old_service)
             new_service = int(new_status["running_pid"])
             owned.add(new_service)
             wait_until("completed update state", lambda: (json.loads(stage.read_text(encoding="utf-8")) if stage.exists() else {}).get("stage") == "done")
@@ -303,14 +317,14 @@ def run(target_dist: Path, report: Path | None) -> None:
             require(not staged_installer.exists(), "installer was not removed after successful update")
             require(sentinel.read_text(encoding="utf-8") == "private user data", "private user-data sentinel changed")
             installed = json.loads((install_dir / "_internal" / "build_info.json").read_text(encoding="utf-8"))
-            require(installed.get("version") == TARGET_VERSION, "installed manifest is not target version")
+            require(installed.get("version") == target_version, "installed manifest is not target version")
             results.update(old_version=old_status["running_version"], old_launcher=base.pid,
                            old_service=old_service, new_service=new_service, new_launcher=new_launcher,
                            state=final_state.get("stage"))
             say("calling real local restart API")
             reply = request_json("http://127.0.0.1:%d/api/update/restart" % port, "POST")
             require(reply.get("ok") is True, "restart API refused: %s" % reply.get("message"))
-            restarted = wait_status(port, TARGET_VERSION, install_dir, new_service)
+            restarted = wait_status(port, target_version, install_dir, new_service)
             require(int(restarted["running_pid"]) != new_service, "restart retained old service PID")
             wait_until("previous launcher exit after restart", lambda: not pid_alive(new_launcher))
             wait_until("previous service exit after restart", lambda: not pid_alive(new_service))
@@ -322,7 +336,7 @@ def run(target_dist: Path, report: Path | None) -> None:
                 owned.add(int(restart_state["restarted_pid"]))
             # An old updater may have left a failed/applying record before a manual bootstrap.
             restart_state.update(stage="failed", operation="update", host_pid=0,
-                                 version=OLD_VERSION, error="old interrupted update")
+                                 version=old_version, error="old interrupted update")
             stage.write_text(json.dumps(restart_state), encoding="utf-8")
             reconciled = request_json(status_url(port))
             require(reconciled.get("stage") == "done" and not reconciled.get("error"),
@@ -361,12 +375,16 @@ def run(target_dist: Path, report: Path | None) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dist", type=Path, default=ROOT / "dist" / "AutoQuill")
+    parser.add_argument("--old-dist", type=Path,
+                        help="optional already-built old frozen dist; requires --old-version")
+    parser.add_argument("--old-version",
+                        help="version expected in --old-dist (or source fallback)")
     parser.add_argument("--report", type=Path, help="optional JSON result path (no secrets are recorded)")
     args = parser.parse_args()
     if os.name != "nt":
         raise SystemExit("This verifier requires Windows, a frozen target, and Inno Setup 6.")
     try:
-        run(args.target_dist, args.report)
+        run(args.target_dist, args.report, args.old_dist, args.old_version)
     except Exception as exc:
         say("FAILED: " + str(exc))
         return 1
