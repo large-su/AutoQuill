@@ -43,7 +43,8 @@ STAGE_TEXT = {
 
 _FIELDS = ("stage", "version", "current", "installer", "sha256", "sha_sources",
            "size", "bytes", "at", "updated_at", "error", "install_dir",
-           "log", "notes", "page_url", "attempts")
+           "log", "notes", "page_url", "attempts", "host_pid", "phase",
+           "attempt_id", "installed_version", "restarted_pid", "operation")
 
 
 def stage_file() -> Path:
@@ -62,7 +63,9 @@ def blank():
     return {"stage": STAGE_IDLE, "version": "", "current": "", "installer": "",
             "sha256": "", "sha_sources": [], "size": 0, "bytes": 0,
             "at": "", "updated_at": "", "error": "", "install_dir": "",
-            "log": str(log_file()), "notes": "", "page_url": "", "attempts": 0}
+            "log": str(log_file()), "notes": "", "page_url": "", "attempts": 0,
+            "host_pid": 0, "phase": "", "attempt_id": "",
+            "installed_version": "", "restarted_pid": 0, "operation": "update"}
 
 
 def load() -> dict:

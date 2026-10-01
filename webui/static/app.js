@@ -2464,6 +2464,7 @@ async function readApiJson(r) {
 
 async function checkUpdate() {
   const btn = $("btnUpdate");
+  if (btn.dataset.staged === "1") { applyUpdate(); return; }
   btn.disabled = true;
   const orig = btn.textContent;
   btn.textContent = "检查中…";
@@ -2548,6 +2549,7 @@ function pollUpdateStatus(version) {
     if (st.stage === "staged") {
       clearInterval(_updTimer); _updTimer = null;
       btn.disabled = false;
+      btn.dataset.staged = "1";
       btn.textContent = "重启并安装";
       const ok = confirm(
         `v${st.version} 已下载并通过校验。\n\n`
@@ -2560,6 +2562,7 @@ function pollUpdateStatus(version) {
     if (st.stage === "failed") {
       clearInterval(_updTimer); _updTimer = null;
       btn.disabled = false;
+      delete btn.dataset.staged;
       btn.textContent = "更新失败";
       let msg = "更新失败：" + (st.error || "未知原因");
       if (st.installer_exists) {
@@ -2567,6 +2570,19 @@ function pollUpdateStatus(version) {
       }
       if (st.log_tail) msg += "\n\n日志尾部：\n" + st.log_tail;
       alert(msg);
+      return;
+    }
+    if (st.stage === "applying") {
+      btn.disabled = true;
+      btn.textContent = "正在安装并重启…";
+      return;
+    }
+    if (st.stage === "done") {
+      clearInterval(_updTimer); _updTimer = null;
+      btn.disabled = false;
+      delete btn.dataset.staged;
+      btn.textContent = (st.operation === "restart" ? "已重启 v" : "已更新至 v") + st.running_version;
+      btn.title = "更新已完成，当前运行版本 v" + st.running_version;
       return;
     }
     // idle / done / 其它：停轮询，恢复按钮
@@ -2592,6 +2608,7 @@ async function applyUpdate() {
       return;
     }
     btn.textContent = "即将重启…";
+    delete btn.dataset.staged;
     // 换装宿主会结束本程序并重启新版本；这里不必再做什么
   } catch (e) {
     alert("无法开始安装：" + (e && e.message ? e.message : e));
@@ -2601,6 +2618,44 @@ async function applyUpdate() {
 }
 
 $("btnUpdate").addEventListener("click", checkUpdate);
+$("btnRestart").addEventListener("click", async () => {
+  if (!confirm("立即重启 AutoQuill？当前正在执行的任务会停止。")) return;
+  const btn = $("btnRestart");
+  btn.disabled = true;
+  btn.textContent = "准备重启…";
+  try {
+    const d = await readApiJson(await fetch("/api/update/restart", { method: "POST" }));
+    if (!d.ok) throw new Error(d.message || "无法开始重启");
+    btn.textContent = "即将重启…";
+  } catch (e) {
+    alert("重启失败：" + e.message);
+    btn.disabled = false;
+    btn.textContent = "重启";
+  }
+});
+
+async function restoreUpdateStatus() {
+  try {
+    const st = await readApiJson(await fetch("/api/update/status"));
+    const btn = $("btnUpdate");
+    btn.title = "当前运行版本 v" + st.running_version;
+    if (st.stage === "applying" || st.stage === "downloading") {
+      pollUpdateStatus(st.version);
+    } else if (st.stage === "staged") {
+      btn.dataset.staged = "1";
+      btn.textContent = "安装 v" + st.version + " 并重启";
+    } else if (st.stage === "done") {
+      btn.textContent = (st.operation === "restart" ? "已重启 v" : "已更新至 v") + st.running_version;
+    } else if (st.stage === "failed") {
+      const key = "aq-update-result-" + (st.attempt_id || st.updated_at);
+      if (!localStorage.getItem(key)) {
+        localStorage.setItem(key, "1");
+        alert("上次更新未完成：" + st.error + "\n\n当前运行版本：v" + st.running_version
+          + (st.installer_exists ? "\n安装包已保留：\n" + st.installer : ""));
+      }
+    }
+  } catch (e) { /* Service may still be starting; normal actions remain available. */ }
+}
 
 $("btnEdgeOk").addEventListener("click", () => {
   loadSetupStatus();
@@ -2936,6 +2991,7 @@ $("modalMask").addEventListener("click", (e) => {
   loadLogHistory().then(() => { window.__logHistoryLoaded = true; });  // 页面加载即回放最近日志；标记防首次运行重复回放
   fillSetupProviders();
   loadSetupStatus();  // 首启引导（未配置时弹出遮罩）
+  restoreUpdateStatus();
   try {
     const r = await fetch("/api/status");
     const st = await r.json();

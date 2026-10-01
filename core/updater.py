@@ -436,114 +436,66 @@ def run_apply_script(argv=None):
 
 
 def powershell_apply_command(installer, pid, install_dir, log_path,
-                             relaunch_exe="", wait_seconds=600):
-    """生成换装宿主的启动命令（参数列表，含 -EncodedCommand）。
+                             relaunch_exe="", wait_seconds=600, **options):
+    """Write the external worker outside the install tree, then run it via WMI.
 
-    ★★ 关键约束（2026-10-01 线上事故的根因，务必别改回去）：
-       宿主**必须脱离主程序的进程树**。这一点我踩了两次：
-         · v4.9.15：拿 AutoQuill.exe 当宿主 → 启动器把它当「正常启动」，
-           黑框循环，主程序始终没退；
-         · v4.9.17/18：用 Popen 从主程序里起 PowerShell → 主程序退出时
-           **宿主被一起带走**（进程树/作业对象连带结束）。真机日志停在
-           「等待主程序退出 pid=…」就没了：安装器根本没跑，版本没变，
-           程序也没重启——用户看到的就是「点了重启，程序关了，再也没回来」。
-       所以调用方必须用 `detach_via_wmi()`（WMI，宿主挂到 WmiPrvSE 名下）
-       或 `vbs_detach_launcher()` 来起它，**绝不能直接 Popen**。
-
-    pid=0 表示不等待（仅在已经退出时用）。
+    A file avoids cmd.exe's 8191-character and CreateProcess's command limits.
+    UTF-8 BOM lets Windows PowerShell 5.1 read Chinese paths correctly.
     """
-    script = powershell_host_script(installer, pid, install_dir, log_path,
-                                    relaunch_exe=relaunch_exe,
-                                    wait_seconds=wait_seconds)
-    # -EncodedCommand 要求 UTF-16LE + base64：彻底避开引号与中文路径的转义地狱
-    import base64
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return ["powershell.exe", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded]
+    import uuid
+    script = powershell_host_script(
+        installer, pid, install_dir, log_path, relaunch_exe=relaunch_exe,
+        wait_seconds=wait_seconds, **options)
+    dest = Path(log_path).parent / ("apply_host_%s.ps1" % uuid.uuid4().hex)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(script, encoding="utf-8-sig")
+    return [powershell_exe(), "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(dest)]
+
+
+def powershell_exe():
+    return str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+               / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
 
 def powershell_host_script(installer, pid, install_dir, log_path,
-                           relaunch_exe="", wait_seconds=600):
-    """换装宿主的 PowerShell 脚本正文（单独暴露，便于单测与人工核对）。
-
-    每一步都写日志：真机出问题时日志是唯一的事实来源
-    （上一次事故就是靠「日志停在哪一行」定位到宿主被带走的）。
-    安装前后各记一次 exe 时间戳，用来证明**文件真的被覆盖了**。
-    """
-    args = " ".join(installer_args(installer, install_dir, log_path))
-    exe = str(relaunch_exe or "")
-    install_dir = str(install_dir or "")
-    restart_block = ""
-    if exe:
-        restart_block = ("  L '正在重启新版本…';"
-                         "  Start-Process -FilePath '{exe}';"
-                         "  L '已重启 AutoQuill';".format(exe=exe))
-    return (
-        "$ErrorActionPreference='Continue';"
-        "$log='{log}';"
-        "function L($m){{ Add-Content -LiteralPath $log -Encoding UTF8 "
-        "-Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $m) }};"
-        "L ('=== 换装开始（宿主 pid=' + $PID + '，已脱离主程序进程树）===');"
-        "$target={pid};"
-        "if ($target -gt 0) {{"
-        "  L ('等待主程序退出 pid=' + $target);"
-        "  $deadline=(Get-Date).AddSeconds({wait});"
-        "  $gone=$false;"
-        "  while ((Get-Date) -lt $deadline) {{"
-        "    if (-not (Get-Process -Id $target -ErrorAction SilentlyContinue)) "
-        "{{ $gone=$true; break }};"
-        "    Start-Sleep -Milliseconds 500 }};"
-        "  if ($gone) {{ L '主程序已退出' }}"
-        "  else {{"
-        "    L '主程序超时未退出（上限 {wait} 秒），强制结束';"
-        "    Stop-Process -Id $target -Force -ErrorAction SilentlyContinue;"
-        "    Start-Sleep -Seconds 2 }}"
-        "}};"
-        "Start-Sleep -Seconds 2;"
-        "$exePath=Join-Path '{idir}' 'AutoQuill.exe';"
-        "$before='';"
-        "try {{ if (Test-Path $exePath) {{ "
-        "$before=(Get-Item $exePath).LastWriteTime.ToString('s') }} }} catch {{}};"
-        "L ('安装前 AutoQuill.exe 时间戳=' + $before);"
-        "L '运行安装包（静默）…';"
-        "$p=Start-Process -FilePath '{installer}' -ArgumentList '{args}' "
-        "-Wait -PassThru -WindowStyle Hidden;"
-        "L ('安装器返回码=' + $p.ExitCode);"
-        "$after='';"
-        "try {{ if (Test-Path $exePath) {{ "
-        "$after=(Get-Item $exePath).LastWriteTime.ToString('s') }} }} catch {{}};"
-        "L ('安装后 AutoQuill.exe 时间戳=' + $after);"
-        "if ($before -ne $after) {{ L '文件已更新（时间戳变化）' }}"
-        "else {{ L '警告：exe 时间戳未变化，安装可能没有真正覆盖' }};"
-        "{restart}"
-        "if ($p.ExitCode -eq 0) {{"
-        "  Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue;"
-        "  L '已删除安装包' }}"
-        "else {{ L '安装器返回非 0，保留安装包供手动安装' }};"
-        "L '=== 换装结束 ===';"
-    ).format(log=str(log_path), pid=int(pid or 0), wait=int(wait_seconds),
-             installer=str(installer), args=args, restart=restart_block,
-             idir=install_dir)
+                           relaunch_exe="", wait_seconds=600, *,
+                           stage_path="", expected_sha256="", expected_version="",
+                           extra_pids=(), dry_run=False, restart_only=False,
+                           runtime_url=""):
+    """Generate the same worker used in production and Windows integration tests."""
+    import base64
+    config = dict(installer=str(installer), pid=int(pid or 0),
+                  install_dir=str(install_dir), log_path=str(log_path),
+                  relaunch_exe=str(relaunch_exe), wait_seconds=int(wait_seconds),
+                  stage_path=str(stage_path), expected_sha256=str(expected_sha256),
+                  expected_version=str(expected_version), extra_pids=list(extra_pids),
+                  dry_run=bool(dry_run), restart_only=bool(restart_only),
+                  runtime_url=str(runtime_url))
+    encoded = base64.b64encode(json.dumps(config, ensure_ascii=False)
+                              .encode("utf-8")).decode("ascii")
+    prefix = ("$config = [Text.Encoding]::UTF8.GetString("
+              "[Convert]::FromBase64String('%s')) | ConvertFrom-Json\n" % encoded)
+    return prefix + Path(__file__).with_name("update_host.ps1").read_text(encoding="utf-8-sig")
 
 
 def _with_env(command, env):
-    """把环境变量内联进命令行：`cmd /c set K=V && <真正的命令>`。
-
-    ★ 为什么不用 VBS 的 Environment("PROCESS")（实测无效，2026-10-01）：
-      WMI 创建的新进程由 **WmiPrvSE 服务**派生，继承的是**服务**的环境块，
-      不是本进程的。所以只能在命令行里显式设好——交给 cmd.exe 设环境再拉起
-      子进程，子进程就一定能拿到。
-    """
-    items = []
+    """Pass the caller's environment explicitly without cmd.exe parsing."""
+    import base64
+    import subprocess
+    def literal(value):
+        return "'%s'" % str(value).replace("'", "''")
+    statements = []
     for k, v in dict(env or {}).items():
         key, val = str(k), str(v)
-        if key and val:
-            items.append((key, val))
-    if not items:
+        if key and val and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            statements.append("$env:%s=%s" % (key, literal(val)))
+    if not statements:
         return command
-    # set "K=V" 形式最安全（引号包住整个赋值，值里有 & | ^ 也不会被解释）
-    sets = " && ".join('set "%s=%s"' % (k, v) for k, v in items)
-    return '%s /c %s && %s' % (os.environ.get("COMSPEC") or "cmd.exe", sets, command)
+    statements.append("& " + " ".join(literal(arg) for arg in _split_args(command)))
+    encoded = base64.b64encode("; ".join(statements).encode("utf-16-le")).decode("ascii")
+    return subprocess.list2cmdline([powershell_exe(), "-NoProfile", "-NonInteractive",
+                                   "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded])
 
 
 def _split_args(cmdline):
@@ -600,83 +552,64 @@ def _ascii_safe_command(cmdline):
 
 
 def vbs_detach_launcher(command, log_path="", env=None):
-    """生成一段 VBScript：用 WMI 起进程，**自身立刻退出**。
+    """Create a hidden process outside the launcher's kill-on-close Job Object.
 
-    ★ 为什么必须绕这一道（实测结论，2026-10-01）：
-      从主程序里直接 `subprocess.Popen` 起的宿主是**子进程**，主程序退出时
-      会被一起结束（进程树/作业对象）→ 「程序关了、更新没装、也没重启」。
-      而 `Win32_Process.Create` 创建出来的进程挂在 WMI 服务（WmiPrvSE.exe）
-      名下，**不在主程序进程树里**。实测：宿主父进程被强杀后，
-      它仍继续存活并写满日志。
-      wscript.exe 是系统自带、无额外依赖，用它跑这段 VBS 最省事。
-
-    command: 要执行的完整命令行（字符串）。返回 VBS 脚本文本。
-    env: 需要额外传给子进程的环境变量（如 AQ_DATA_DIR）。
-         ★ 必须显式传（2026-10-01 实测）：WMI 创建的子进程**不继承**调用方的
-           环境变量（`WshShell.Environment("PROCESS")` 也无效，因为新进程由
-           WmiPrvSE 服务创建）。这里改成把变量内联进命令行：用
-           `cmd /c set K=V && 真正的命令`，由 cmd 自己设好环境再拉起子进程。
-
-    ★ 编码坑（2026-10-01 实测）：Windows 脚本宿主（wscript）是 **ANSI** 引擎，
-      读不了 UTF-8 的 .vbs —— 文件里的路径会被解成乱码，于是「WMI 报 rc=0
-      但目标程序根本没跑」。所以这里生成的脚本**只用 ASCII**：
-      非 ASCII 路径会先转成 8.3 短路径。日志正文由被启动的宿主自己写。
+    Preserve the entire command, including quotes. The fourth WMI argument is
+    an OUTPUT VARIABLE: passing literal 0 fails and Empty compares equal to 0.
+    ASCII source plus ChrW supports Unicode even when 8.3 paths are disabled.
+    The receipt is diagnostic only; readiness comes from the actual worker.
     """
     command = _with_env(command, env)
-    cmd = str(command)
-    if not cmd.isascii():
-        # 命令行含非 ASCII（例如中文用户名目录）：转成 8.3 短路径后再交给 ANSI 脚本宿主
-        cmd = _ascii_safe_command(cmd)
-    # ★★ 引号处理（真机踩到两次）：
-    #    ① VBScript 字面量里放双引号要写 ""，但 Win32_Process.Create 需要**看见**
-    #       引号，嵌套转义会算错（`""""x""""` → `""x""`），路径直接废掉；
-    #       → 改成运行时用 Chr(34) 拼引号，源码里不出现引号，零歧义。
-    #    ② 但**只给含空格的片段加引号**：把 `--pid` 也包成 `"--pid"` 会让
-    #       argparse 收不到开关；而 `set "K=V"` 这类片段本来就带引号，
-    #       必须原样保留（剥掉就把命令弄坏了）。
-    pieces = []
-    for part in _split_args(cmd):
-        if part.startswith('"') and part.endswith('"') and len(part) > 1:
-            pieces.append('Q & "%s" & Q' % part[1:-1])     # 保留原有引号
-        elif " " in part:
-            pieces.append('Q & "%s" & Q' % part)
-        else:
-            pieces.append('"%s"' % part)
-    create_expr = ' & " " & '.join(pieces)
-    log = str(log_path or "")
-    if log and not log.isascii():
-        log = _ascii_safe_path(log)
-    log = log.replace('"', '""')
-    # WMI 的 moniker 要写成 winmgmts:\\.\root\cimv2（VBScript 里反斜杠不转义）
-    moniker = "winmgmts:" + "\\\\" + "." + "\\root\\cimv2"
+    if len(command) > 30000:
+        raise ValueError("更新宿主命令过长")
+    def expr(value):
+        parts, buf = [], []
+        for ch in str(value):
+            if 32 <= ord(ch) < 127:
+                buf.append(ch)
+            else:
+                if buf:
+                    parts.append('"%s"' % "".join(buf).replace('"', '""'))
+                    buf = []
+                # UTF-16 code units also cover non-BMP usernames.
+                raw = ch.encode("utf-16-le")
+                for i in range(0, len(raw), 2):
+                    code = int.from_bytes(raw[i:i+2], "little")
+                    parts.append("ChrW(%d)" % (code if code < 32768 else code - 65536))
+        if buf:
+            parts.append('"%s"' % "".join(buf).replace('"', '""'))
+        return " & ".join(parts) or '""'
     lines = [
         'Option Explicit',
-        'Dim wmi, proc, rc, Q, en, ed, proc2',
-        'Q = Chr(34)',                        # 运行时的双引号：源码里不出现嵌套引号
-        'Set wmi = GetObject("%s")' % moniker,
+        'Dim wmi, proc, startup, rc, workerPid, en, ed',
+        'rc = -1',
+        'workerPid = 0',
         'On Error Resume Next',
-    ]
-    lines += [
+        'Set wmi = GetObject("winmgmts:\\\\.\\root\\cimv2")',
         'Set proc = wmi.Get("Win32_Process")',
-        'Set proc2 = wmi.Get("Win32_Process")',
-        'rc = proc.Create(%s, Null, Null, 0)' % create_expr,
+        'Set startup = wmi.Get("Win32_ProcessStartup").SpawnInstance_',
+        'startup.ShowWindow = 0',
+        'rc = proc.Create(%s, Null, startup, workerPid)' % expr(command),
         'en = Err.Number',
         'ed = Err.Description',
         'On Error GoTo 0',
     ]
-    if log:
+    if log_path:
         lines += [
             'Dim fso, f',
+            'On Error Resume Next',
             'Set fso = CreateObject("Scripting.FileSystemObject")',
-            'Set f = fso.OpenTextFile("%s", 8, True)' % log,
-            'If rc = 0 Then',
-            '  f.WriteLine "WMI spawn ok pid=" & proc2.ProcessId',
+            'Set f = fso.OpenTextFile(%s, 8, True)' % expr(log_path),
+            'If en = 0 And rc = 0 And workerPid > 0 Then',
+            '  f.WriteLine "WMI spawn ok pid=" & workerPid',
             'Else',
             '  f.WriteLine "WMI spawn FAILED rc=" & rc & " err=" & en & " " & ed',
             'End If',
             'f.Close',
+            'On Error GoTo 0',
         ]
-    lines.append('WScript.Quit 0')
+    lines += ['If en <> 0 Or rc <> 0 Or workerPid <= 0 Then WScript.Quit 1',
+              'WScript.Quit 0']
     return "\r\n".join(lines) + "\r\n"
 
 

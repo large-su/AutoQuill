@@ -167,6 +167,10 @@ def test_frontend(port):
             # 自动化面板：**整块 mock**——真实 plan.json 属于用户数据，
             # 测试绝不能写它（这也是这条用例必须 mock 而不是打真服务的原因）。
             AUTO_STATE = {"cap": 3, "posted": []}
+            UPDATE_STATE = {"stage": "done", "running_version": "5.0.5",
+                            "version": "5.0.5", "operation": "update",
+                            "download": {"running": False}}
+            UPDATE_CALLS = {"check": 0, "apply": 0, "restart": 0}
 
             def _auto_task(label, unit, lane, desc, mode=None):
                 t = {"label": label, "unit": unit, "lane": lane, "implemented": True,
@@ -206,6 +210,30 @@ def test_frontend(port):
 
             def route(route):
                 u = route.request.url
+                if "/api/setup/status" in u:
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "setup_needed": False, "version": "5.0.5", "edge_ok": True,
+                        "llm_configured": True, "zhihu_logged_in": True}, ensure_ascii=False))
+                    return
+                elif "/api/update/status" in u:
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps(UPDATE_STATE, ensure_ascii=False))
+                    return
+                elif "/api/update/check" in u:
+                    UPDATE_CALLS["check"] += 1
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"has_update":false,"current":"5.0.5","latest":"5.0.5"}')
+                    return
+                elif "/api/update/apply" in u:
+                    UPDATE_CALLS["apply"] += 1
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"ok":true,"stage":"applying"}')
+                    return
+                elif "/api/update/restart" in u:
+                    UPDATE_CALLS["restart"] += 1
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"ok":true,"stage":"applying"}')
+                    return
                 # 自动化：plan 保存 / 状态轮询都走 mock（顺序：先 plan 后状态）
                 if "/api/automation/plan" in u:
                     posted = (json.loads(route.request.post_data or "{}")
@@ -245,6 +273,8 @@ def test_frontend(port):
             pg.goto(base + "/", wait_until="networkidle", timeout=UI_TIMEOUT)
             pg.evaluate("() => { const m = document.getElementById('setupMask'); if (m) m.classList.remove('show'); }")
             pg.wait_for_timeout(600)
+            check("更新状态恢复", pg.evaluate(
+                "() => document.getElementById('btnUpdate').textContent.includes('已更新至 v5.0.5')"))
             check("首页加载", "AutoQuill" in pg.title())
             check("样式生效", "rgb(11, 14, 20)" in pg.evaluate("() => getComputedStyle(document.body).backgroundColor"))
             modes = pg.evaluate("() => Array.from(document.querySelectorAll('#leftModeSel option')).map(o => o.text)")
@@ -358,6 +388,17 @@ def test_frontend(port):
             pg.select_option("#leftModeSel", "workspace")
             pg.wait_for_timeout(300)
             check("回工作台", pg.evaluate("() => !document.getElementById('pane-workspace').hidden"))
+            UPDATE_STATE.update({"stage": "staged", "version": "5.0.6"})
+            pg.evaluate("() => restoreUpdateStatus()")
+            pg.wait_for_timeout(250)
+            pg.click("#btnUpdate")
+            pg.wait_for_timeout(300)
+            check("暂存更新点击安装", UPDATE_CALLS["apply"] == 1,
+                  "apply=%d" % UPDATE_CALLS["apply"])
+            pg.click("#btnRestart")
+            pg.wait_for_timeout(300)
+            check("重启确认并请求", UPDATE_CALLS["restart"] == 1,
+                  "restart=%d" % UPDATE_CALLS["restart"])
             check("页面无 console 错误", not errors, errors[:3] and "; ".join(errors[:3]))
 
             b.close()

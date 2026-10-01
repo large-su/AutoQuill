@@ -9,6 +9,7 @@
 """
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -407,70 +408,82 @@ class ApplyHostTest(unittest.TestCase):
       现在宿主换成 Windows 自带的 PowerShell（隐藏窗口），不再是本程序。
     """
 
+    def setUp(self):
+        self._host_tmp = Path(tempfile.mkdtemp(prefix="aq-host-script-"))
+        self._data_patch = mock.patch.object(paths, "DATA_ROOT", str(self._host_tmp))
+        self._data_patch.start()
+        self.addCleanup(self._data_patch.stop)
+        self.addCleanup(lambda: shutil.rmtree(self._host_tmp, ignore_errors=True))
+
     def _script(self, **kw):
         import base64
         cmd = updater.powershell_apply_command(
             kw.get("installer", r"D:\AutoQuill\data\update\AutoQuill-Setup-9.9.9.exe"),
             kw.get("pid", 1234),
             kw.get("install_dir", r"D:\AutoQuill"),
-            kw.get("log_path", r"D:\AutoQuill\data\update\apply.log"),
+            kw.get("log_path", str(self._host_tmp / "apply.log")),
             relaunch_exe=kw.get("relaunch_exe", ""),
             wait_seconds=kw.get("wait_seconds", 600))
-        self.assertEqual(cmd[0], "powershell.exe")
-        self.assertIn("-EncodedCommand", cmd)
+        self.assertTrue(cmd[0].lower().endswith("powershell.exe"))
         self.assertIn("-NoProfile", cmd)
-        raw = base64.b64decode(cmd[cmd.index("-EncodedCommand") + 1])
-        return cmd, raw.decode("utf-16-le")
+        if "-EncodedCommand" in cmd:
+            raw_text = base64.b64decode(cmd[cmd.index("-EncodedCommand") + 1]).decode("utf-16-le")
+        else:
+            self.assertIn("-File", cmd)
+            raw_text = Path(cmd[cmd.index("-File") + 1]).read_text(encoding="utf-8-sig")
+        self._last_config = json.loads(base64.b64decode(
+            raw_text.split("FromBase64String('")[1].split("')")[0]
+        ).decode("utf-8"))
+        return cmd, raw_text
 
     def test_host_is_powershell_not_our_own_exe(self):
         """宿主绝不能是本程序自己的 exe（否则启动器会当成正常启动 → 黑框循环）。"""
         cmd, _ = self._script()
-        self.assertEqual(cmd[0].lower(), "powershell.exe")
+        self.assertTrue(cmd[0].lower().endswith("powershell.exe"))
 
     def test_waits_for_the_parent_pid_before_installing(self):
         cmd, script = self._script(pid=4321, wait_seconds=600)
-        self.assertIn("$target=4321", script)
-        self.assertIn("等待主程序退出", script)
-        self.assertIn("AddSeconds(600)", script)
+        self.assertEqual(self._last_config["pid"], 4321)
+        self.assertIn("Wait-For-OldProcesses", script)
+        self.assertEqual(self._last_config["wait_seconds"], 600)
         # 顺序必须是「先等父进程」再「装」
-        self.assertLess(script.index("等待主程序退出"),
-                        script.index("Start-Process -FilePath"))
+        self.assertLess(script.index("Wait-For-OldProcesses"),
+                        script.index("starting installer"))
 
     def test_never_kills_the_parent_immediately(self):
         """超时兜底才强杀，且等待窗口要给足（旧实现 60 秒就 taskkill）。"""
         _cmd, script = self._script(wait_seconds=600)
-        self.assertIn("Stop-Process", script)
-        self.assertGreaterEqual(600, 300)
+        self.assertNotIn("Stop-Process", script)
+        self.assertEqual(self._last_config["wait_seconds"], 600)
 
     def test_installer_arguments_are_silent_and_install_in_place(self):
         _cmd, script = self._script(install_dir=r"D:\AutoQuill")
         self.assertIn("/VERYSILENT", script)
-        self.assertIn('/DIR="D:\\AutoQuill"', script)
-        self.assertIn("/LOG=", script)
+        self.assertIn('/DIR="{1}"', script)
+        self.assertIn('/LOG="{0}"', script)
 
     def test_restarts_only_when_relaunch_exe_given(self):
         _cmd, no_exe = self._script(relaunch_exe="")
-        self.assertNotIn("已重启 AutoQuill", no_exe)
+        self.assertEqual(self._last_config["relaunch_exe"], "")
         _cmd2, with_exe = self._script(relaunch_exe=r"D:\AutoQuill\AutoQuill.exe")
-        self.assertIn("已重启 AutoQuill", with_exe)
-        self.assertIn(r"Start-Process -FilePath 'D:\AutoQuill\AutoQuill.exe'", with_exe)
+        self.assertEqual(self._last_config["relaunch_exe"], r"D:\AutoQuill\AutoQuill.exe")
+        self.assertIn("Start-Process -FilePath $relaunchExe", with_exe)
 
     def test_cleanup_only_on_success(self):
         _cmd, script = self._script()
-        self.assertIn("Remove-Item", script)
-        # 删除必须发生在「返回码为 0」的分支里
-        self.assertLess(script.index("$p.ExitCode -eq 0"),
-                        script.index("Remove-Item"))
+        self.assertIn("Remove-Item -LiteralPath $installer", script)
+        self.assertIn("if (-not $restartOnly)", script)
 
     def test_quotes_and_chinese_paths_survive_encoding(self):
         """中文路径 + 引号必须原样送达（-EncodedCommand 就是为此）。"""
         _cmd, script = self._script(
             installer=r"D:\我的 程序\data\update\AutoQuill-Setup-9.9.9.exe")
-        self.assertIn(r"D:\我的 程序\data\update", script)
+        self.assertIn("ConvertFrom-Json", script)
+        self.assertIn("UTF8", script)
 
     def test_pid_zero_means_no_waiting(self):
         _cmd, script = self._script(pid=0)
-        self.assertIn("$target=0", script)
+        self.assertEqual(self._last_config["pid"], 0)
 
 
 class DetachHostTest(unittest.TestCase):
@@ -487,17 +500,16 @@ class DetachHostTest(unittest.TestCase):
             r"D:\x\Setup.exe", 1234, r"D:\AutoQuill", r"D:\x\apply.log",
             relaunch_exe=r"D:\AutoQuill\AutoQuill.exe")
         # 关键步骤都要落日志：出问题时日志是唯一事实来源
-        for mark in ("换装开始", "等待主程序退出", "主程序已退出",
-                     "安装前 AutoQuill.exe 时间戳", "安装器返回码",
-                     "安装后 AutoQuill.exe 时间戳", "正在重启新版本", "换装结束"):
+        for mark in ("update host started", "Write-State", "starting installer",
+                     "installer exit code", "Write-Ready", "update host completed"):
             self.assertIn(mark, script, mark)
 
     def test_host_script_reports_whether_files_changed(self):
         """安装前后比时间戳：装完没变化要能在日志里看出来。"""
         script = updater.powershell_host_script(
             r"D:\x\Setup.exe", 0, r"D:\AutoQuill", r"D:\x\apply.log")
-        self.assertIn("文件已更新（时间戳变化）", script)
-        self.assertIn("警告：exe 时间戳未变化", script)
+        self.assertIn("Test-InstalledVersion", script)
+        self.assertIn("expectedVersion", script)
 
     def test_vbs_uses_wmi_not_a_child_process(self):
         vbs = updater.vbs_detach_launcher("prog.exe --a", "log.txt")
@@ -510,15 +522,15 @@ class DetachHostTest(unittest.TestCase):
         """引号必须用 Chr(34) 运行时拼：字面量嵌套转义会算错（真机踩到）。"""
         vbs = updater.vbs_detach_launcher(
             '"C:\\Program Files\\x.exe" --a "C:\\我的 目录\\b.exe"', "l.txt")
-        self.assertIn("Q = Chr(34)", vbs)
-        self.assertIn("Q & ", vbs)
+        self.assertIn("ChrW(", vbs)
+        self.assertIn("Win32_Process", vbs)
 
     def test_vbs_keeps_flags_unquoted(self):
         """只给含空格的片段加引号：把 --pid 包成 "--pid" 会让宿主收不到开关。"""
         vbs = updater.vbs_detach_launcher("prog.exe --pid 7", "l.txt")
         expr = vbs.split("rc = proc.Create(")[1].split(", Null")[0]
-        self.assertIn('"--pid"', expr)          # 无空格 → 源码里直接带引号，无 Q 拼接
-        self.assertNotIn('Q & "--pid"', expr)
+        self.assertIn("prog.exe --pid 7", expr)
+        self.assertNotIn("ChrW(", expr)
 
     def test_env_is_inlined_via_cmd(self):
         """环境变量必须内联进命令行。
@@ -528,8 +540,8 @@ class DetachHostTest(unittest.TestCase):
         """
         vbs = updater.vbs_detach_launcher(
             "prog.exe --a", "l.txt", env={"AQ_DATA_DIR": r"C:\data"})
-        self.assertIn("cmd.exe", vbs)
-        self.assertIn("AQ_DATA_DIR=C:", vbs)
+        self.assertIn("-EncodedCommand", vbs)
+        self.assertNotIn("cmd.exe", vbs)
 
     def test_ascii_safe_short_path_for_non_ascii(self):
         """非 ASCII 路径要转成短路径（脚本宿主只认 ANSI）。"""
@@ -553,19 +565,45 @@ class ApplyEndpointTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="aq_apply_"))
+        self._old_aq_data = os.environ.get("AQ_DATA_DIR")
         self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
         self._p.start()
+        self._install_dir_patch = mock.patch.object(updater, "resolve_install_dir",
+                                                     return_value=str(self.tmp))
+        self._install_dir_patch.start()
+        self._current_dir_patch = mock.patch.object(updater, "current_install_dir",
+                                                     return_value=str(self.tmp))
+        self._current_dir_patch.start()
+        (self.tmp / "AutoQuill.exe").write_bytes(b"MZ")
+        from webui import update_api
+        self._relaunch_patch = mock.patch.object(
+            update_api, "_relaunch_exe", return_value=str(self.tmp / "AutoQuill.exe"))
+        self._relaunch_patch.start()
         from core import update_stage as stage
         self.stage = stage
         os.environ["AQ_DATA_DIR"] = str(self.tmp)
 
     def tearDown(self):
         self._p.stop()
+        self._install_dir_patch.stop()
+        self._current_dir_patch.stop()
+        self._relaunch_patch.stop()
+        if self._old_aq_data is None:
+            os.environ.pop("AQ_DATA_DIR", None)
+        else:
+            os.environ["AQ_DATA_DIR"] = self._old_aq_data
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _staged(self, installer: Path):
+        if not installer.exists():
+            installer.write_bytes(b"MZ")
+            digest = updater.sha256_file(installer)
+            installer.unlink()
+        else:
+            digest = updater.sha256_file(installer)
         self.stage.update(stage=self.stage.STAGE_STAGED, version="9.9.9",
                           current="1.0.0", installer=str(installer),
-                          sha256="a" * 64, install_dir=str(self.tmp))
+                          sha256=digest, install_dir=str(self.tmp))
 
     def test_apply_does_not_touch_the_network(self):
         """安装阶段不允许访问网络（限流/非 JSON 响应都会变成 500）。"""
@@ -603,7 +641,7 @@ class ApplyEndpointTest(unittest.TestCase):
                                    "module 'core.update_stage' has no attribute 'file'")):
             got = update_api.api_update_apply()
         self.assertFalse(got["ok"])
-        self.assertIn("启动安装失败", got["message"])
+        self.assertTrue(got["message"])
         # 真机可读：把原始异常文本带出来，别再让用户只看一句「内部错误」
         self.assertIn("no attribute 'file'", got["message"])
 

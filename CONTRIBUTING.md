@@ -94,8 +94,9 @@
 |---|---|
 | `AutoQuill-Setup-<VERSION>.exe` | 必须。Windows x64 安装包 |
 | `AutoQuill-Setup-<VERSION>.exe.sha256` | 必须。应用内更新的双源校验依赖它 |
+| `AutoQuill-Install-<VERSION>.zip` | 必须。包含安装包、SHA256 校验文件和专用 Temp 安装入口，供默认 Temp 路径不可用的用户下载 |
 
-- 不额外上传构建产物、文档、调试文件；
+- 安装 ZIP 仅包含上述 exe、sha256 和 `Install-AutoQuill-<VERSION>.cmd` 三个文件；不额外上传其它构建产物、文档、调试文件；
 - 发布说明写在 Release 正文里，不作为文件上传；
 - 其余由 GitHub 自动附加的 `Source code (zip/tar.gz)` 无需处理。
 

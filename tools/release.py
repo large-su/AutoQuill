@@ -85,6 +85,8 @@ def main():
     if not notes.exists():
         sys.exit("✗ 发布说明不存在：%s" % notes)
     exe = ROOT / "release" / ("AutoQuill-Setup-%s.exe" % ver)
+    sha_file = exe.with_suffix(exe.suffix + ".sha256")
+    install_bundle = ROOT / "release" / ("AutoQuill-Install-%s.zip" % ver)
     if not args.skip_build and not (ROOT / "dist").exists():
         print("（dist 不存在，稍后会由构建脚本生成）")
 
@@ -129,8 +131,10 @@ def main():
                  "-c", "user.email=autoquill@local",
                  "commit", "-q", "-m", "chore: 安装器版本号同步 %s" % tag])
 
-    if not exe.exists():
-        sys.exit("✗ 安装包不存在：%s" % exe)
+    assets = (exe, sha_file, install_bundle)
+    missing = [str(path) for path in assets if not path.is_file()]
+    if missing:
+        sys.exit("✗ 发布资产不存在：%s" % ", ".join(missing))
 
     # ④ 打 tag + 推送
     step("④ 打 tag 并推送")
@@ -140,7 +144,7 @@ def main():
     run(["git", "push", "origin", "main"])
     run(["git", "push", "origin", tag])
 
-    # ⑤ 建 Release（两个资产）
+    # ⑤ 建 Release（三个资产）
     step("⑤ 创建 GitHub Release")
     existing = out(["gh", "release", "view", tag, "--json", "tagName"])
     if existing:
@@ -148,7 +152,7 @@ def main():
     run(["gh", "release", "create", tag,
          "--title", "AutoQuill %s" % tag,
          "--notes-file", str(notes),
-         str(exe), str(exe) + ".sha256"])
+         str(exe), str(sha_file), str(install_bundle)])
     print("✓ Release：https://github.com/%s/releases/tag/%s" % (REPO, tag))
 
     # ⑥ 回下载校验（三源一致才敢说"能一键更新"）

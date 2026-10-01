@@ -6,6 +6,7 @@
   python tools/build_release.py --skip-test  # 跳过全量测试（危险，仅紧急修复用）
   python tools/build_release.py --skip-build # 只跑门禁与测试
   python tools/build_release.py --skip-browser # 测试走 tests/run_all.py 统一入口（自动跳过真实浏览器用例）
+  python tools/build_release.py --local --skip-browser # 本地验证未提交修复，不发布
 
 门禁（不满足直接失败退出）：
   1. git 工作区干净（未提交改动不发布）
@@ -26,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,7 +112,10 @@ def _sync_iss_version():
 def main():
     skip_test = "--skip-test" in sys.argv
     skip_build = "--skip-build" in sys.argv
-    gate()
+    if "--local" in sys.argv:
+        print("本地验证构建：包含当前工作区修改，不执行发布、不要求 main/干净工作区。")
+    else:
+        gate()
     _sync_iss_version()
 
     if not skip_test:
@@ -128,6 +133,7 @@ def main():
 
     print("\n--- PyInstaller 构建 ---")
     _run([sys.executable, "-m", "PyInstaller", "build/AutoQuill.spec", "--noconfirm"])
+    write_build_info()
 
     print("\n--- Inno Setup 安装包 ---")
     if not ISCC.exists():
@@ -153,13 +159,86 @@ def main():
     sha_file.write_text(digest, encoding="utf-8")
     print(f"✓ {digest}")
 
+    helper = write_install_helper(exe)
+    install_bundle = write_install_bundle(exe, helper)
+
     print("\n构建完成。")
     print(f"  {exe}")
     print(f"  {sha_file}")
+    print(f"  {helper}")
+    print(f"  {install_bundle}")
     print("下一步：git tag V<新版本> + gh release create")
     print("提醒：Release 说明请附 SmartScreen 提示——安装包未做代码签名，"
           "下载时点「更多信息」→「仍要运行」即可（详见 README FAQ）。")
     return 0
+
+
+def write_install_helper(exe=None):
+    """Write a local interactive installer launcher beside the setup executable."""
+    ver = version()
+    exe = Path(exe) if exe is not None else RELEASE / f"AutoQuill-Setup-{ver}.exe"
+    helper = exe.parent / f"Install-AutoQuill-{ver}.cmd"
+    setup_name = exe.name
+    log_name = f"install-{ver}.log"
+    content = (
+        "@echo off\r\n"
+        "setlocal\r\n"
+        f"set \"EXE=%~dp0{setup_name}\"\r\n"
+        "set \"INSTALL_TEMP=%~dp0installer-temp\"\r\n"
+        f"set \"LOG=%INSTALL_TEMP%\\{log_name}\"\r\n"
+        "if not exist \"%EXE%\" (\r\n"
+        "  echo Installation failed: setup executable was not found.\r\n"
+        "  echo Expected: \"%EXE%\"\r\n"
+        "  echo Log: \"%LOG%\"\r\n"
+        "  pause\r\n"
+        "  endlocal & exit /b 2\r\n"
+        ")\r\n"
+        "if not exist \"%INSTALL_TEMP%\" mkdir \"%INSTALL_TEMP%\"\r\n"
+        "if not exist \"%INSTALL_TEMP%\" (\r\n"
+        "  echo Installation failed: could not create the private installer temp directory.\r\n"
+        "  echo Log: \"%LOG%\"\r\n"
+        "  pause\r\n"
+        "  endlocal & exit /b 3\r\n"
+        ")\r\n"
+        "set \"TEMP=%INSTALL_TEMP%\"\r\n"
+        "set \"TMP=%INSTALL_TEMP%\"\r\n"
+        "\"%EXE%\" /LOG=\"%LOG%\"\r\n"
+        "set \"EXIT_CODE=%ERRORLEVEL%\"\r\n"
+        "if not \"%EXIT_CODE%\"==\"0\" (\r\n"
+        "  echo Installation failed with exit code %EXIT_CODE%.\r\n"
+        "  echo Log: \"%LOG%\"\r\n"
+        "  pause\r\n"
+        ")\r\n"
+        "endlocal & exit /b %EXIT_CODE%\r\n"
+    )
+    helper.write_text(content, encoding="ascii", newline="")
+    print(f"✓ 安装器 helper：{helper}")
+    return helper
+
+
+def write_install_bundle(exe, helper):
+    """Write the downloadable installer bundle containing the three release files."""
+    exe = Path(exe)
+    helper = Path(helper)
+    sha_file = exe.with_suffix(exe.suffix + ".sha256")
+    assets = (exe, sha_file, helper)
+    missing = [str(path) for path in assets if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("安装包缺少文件：" + ", ".join(missing))
+    bundle = exe.parent / f"AutoQuill-Install-{version()}.zip"
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
+        for path in assets:
+            archive.write(path, arcname=path.name)
+    print(f"✓ 安装 ZIP：{bundle}")
+    return bundle
+
+
+def write_build_info():
+    """Installer and worker verify this against the new service's actual VERSION."""
+    import json
+    dest = DIST / "_internal" / "build_info.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps({"version": version()}, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

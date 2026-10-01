@@ -12,23 +12,27 @@
 # ============================================================
 
 import logging
+import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter
 
 from core import update_stage as stage
 from core import updater
+from core import paths
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
 _dl = {"running": False, "bytes": 0, "total": 0, "error": "", "version": ""}
 _dl_lock = threading.Lock()
+_apply_lock = threading.Lock()
 
 
 def _friendly(exc):
@@ -160,12 +164,34 @@ def api_update_status():
       不能让用户"点了更新却什么都没发生"（2026-09-29 事故后加的交代）。
     """
     state = stage.load()
-    if state.get("stage") == stage.STAGE_APPLYING:
+    from core.version import VERSION
+    install_dir = updater.current_install_dir()
+    host_alive = _process_alive(state.get("host_pid"))
+    # A manual bootstrap can finish an old broken update. Verify the running
+    # installed copy before reporting an obsolete failure from the old updater.
+    if (install_dir and state.get("install_dir")
+            and Path(install_dir).resolve() == Path(state["install_dir"]).resolve()
+            and not host_alive and state.get("operation") == "update"
+            and state.get("stage") in (stage.STAGE_STAGED, stage.STAGE_APPLYING, stage.STAGE_FAILED)
+            and state.get("version")
+            and (state["version"] == VERSION or updater.is_newer(VERSION, state["version"]))):
+        state = stage.update(stage=stage.STAGE_DONE, phase="verified_existing",
+                             installed_version=VERSION, error="")
+    from datetime import datetime
+    try:
+        starting_age = (datetime.now() - datetime.fromisoformat(state.get("updated_at") or "")).total_seconds()
+    except ValueError:
+        starting_age = 60
+    if (state.get("stage") == stage.STAGE_APPLYING
+            and not host_alive
+            and (state.get("host_pid") or starting_age > 30)):
         stage.mark_failed(
             "上次自动更新没有完成（换装进程可能被中断）。"
             "安装包已保留，可手动安装。")
         state = stage.load()
     info = dict(state)
+    info.update(running_version=VERSION, running_pid=os.getpid(),
+                running_install_dir=install_dir or "")
     info["stage_text"] = stage.STAGE_TEXT.get(state.get("stage"), "")
     installer = Path(state.get("installer") or "")
     info["installer_exists"] = bool(state.get("installer") and installer.exists())
@@ -227,7 +253,12 @@ def api_update_apply(dry_run: bool = False):
       一旦返回纯文本 500，用户看到的是一句毫无意义的 JSON 解析错误。
     """
     try:
-        return _apply_impl(dry_run=dry_run)
+        if not _apply_lock.acquire(blocking=False):
+            return {"ok": False, "message": "正在准备更新，请稍候"}
+        try:
+            return _apply_impl(dry_run=dry_run)
+        finally:
+            _apply_lock.release()
     except Exception as exc:                # noqa: BLE001
         log.exception("更新：启动安装失败")
         stage.mark_failed("启动安装失败：%s" % exc)
@@ -246,14 +277,28 @@ def _apply_impl(dry_run=False):
         return {"ok": False, "message": "安装包不见了，请重新下载"}
 
     install_dir = str(state.get("install_dir") or "")
+    checked = updater.verify(installer, state.get("sha256"))
+    if not checked.get("ok"):
+        stage.mark_failed(checked.get("error") or "安装包校验失败")
+        return {"ok": False, "message": "安装包校验失败，请重新下载"}
+    exe = _relaunch_exe(install_dir)
+    if not dry_run and (not install_dir or not exe):
+        return {"ok": False, "message": "无法确定已安装程序的位置，不能自动安装和重启"}
+    actual_dir = updater.current_install_dir()
+    if actual_dir and Path(actual_dir).resolve() != Path(install_dir).resolve():
+        return {"ok": False, "message": "安装包暂存的目录与当前程序不一致，请重新下载"}
+    from core.ports import WEB_PORT
     cmd = updater.powershell_apply_command(
         installer, _current_pid(), install_dir, stage.log_file(),
-        relaunch_exe=_relaunch_exe(install_dir))
-    if dry_run:
-        # 演练：不等待、不安装（宿主只记日志），用于验证命令行拼装
-        cmd = updater.powershell_apply_command(
-            installer, 0, install_dir, stage.log_file(), relaunch_exe="")
-
+        relaunch_exe=exe, stage_path=stage.stage_file(),
+        expected_sha256=checked["sha256"], expected_version=state.get("version") or "",
+        extra_pids=_launcher_pids(), dry_run=dry_run,
+        runtime_url="http://127.0.0.1:%d/api/update/status" % WEB_PORT)
+    # Persist before spawning: the worker may finish a dry run before this API returns.
+    state.update(stage=stage.STAGE_APPLYING, error="", host_pid=0,
+                 attempt_id=uuid.uuid4().hex, phase="starting", operation="update")
+    if not stage.save(state):
+        return {"ok": False, "message": "无法保存更新状态，程序保持运行，请检查磁盘空间和权限"}
     ok, detail = _spawn_detached_host(cmd, stage.log_file(), dry_run=dry_run)
     if not ok:
         stage.mark_failed("拉起换装宿主失败：%s" % detail)
@@ -261,9 +306,10 @@ def _apply_impl(dry_run=False):
                 "message": "拉起换装宿主失败（%s）。已保留安装包，"
                            "请手动运行安装包完成更新。" % detail}
 
-    stage.update(stage=stage.STAGE_APPLYING, error="")
     if not dry_run:
-        _request_app_quit()
+        if not _request_app_quit():
+            stage.mark_failed("无法请求程序退出，已取消本次安装")
+            return {"ok": False, "message": "无法请求程序退出，已取消本次安装"}
     log.info("更新：已拉起换装宿主（已脱离主程序进程树，dry_run=%s），已请求退出", dry_run)
     return {"ok": True, "dry_run": bool(dry_run),
             "message": ("演练：宿主已就绪（不会安装）" if dry_run
@@ -271,53 +317,43 @@ def _apply_impl(dry_run=False):
 
 
 def _spawn_detached_host(cmd, log_path, dry_run=False):
-    """拉起换装宿主，并让它**脱离本进程的进程树**。
-
-    ★★ 这是整个功能最关键的一步（2026-10-01 线上事故的根因）：
-      用 `subprocess.Popen` 起的宿主是**本进程的子进程**，本进程退出时会被
-      一起结束。真机表现：「点了重启，程序关了，更新没装，也没重启」，
-      apply.log 停在「等待主程序退出 pid=…」之后再无一行。
-      正确做法：用 WMI（`Win32_Process.Create`）创建 —— 宿主挂到 WMI 服务
-      （WmiPrvSE.exe）名下，**不在本进程树里**。实测：父进程被强杀后，
-      宿主仍继续存活并写满日志。
-      这里用系统自带的 wscript.exe 跑一小段 VBScript 来调用 WMI
-      （比在本进程里加载 WMI COM 简单，也不必依赖 pywin32/pythonnet）。
-
-    返回 (ok, detail)。
-    """
+    """Detach through WMI, then require a unique receipt from the actual host."""
     # 启动脚本放在更新目录（由 stage 模块统一决定位置，别自己拼路径）
-    script_path = Path(stage.stage_file()).parent / "spawn_host.vbs"
+    token = uuid.uuid4().hex
+    update_root = Path(stage.stage_file()).parent
+    script_path = update_root / "spawn_host.vbs"
+    ready_path = update_root / ("ready_%s.json" % token)
     try:
         script_path.parent.mkdir(parents=True, exist_ok=True)
-        # VBScript 交给 Windows 的是命令行字符串：首段含空格要加引号
-        head = str(cmd[0])
-        quoted = '"%s"' % head if " " in head else head
-        full = quoted + " " + " ".join(str(c) for c in cmd[1:])
+        full = subprocess.list2cmdline([str(arg) for arg in cmd])
+        env = _host_env()
+        env.update(AQ_UPDATE_TOKEN=token, AQ_UPDATE_READY_FILE=str(ready_path))
         vbs = updater.vbs_detach_launcher(full, str(log_path),
-                                          env=_host_env())
-        # ★ 必须以 ANSI 写：wscript 是 ANSI 引擎，UTF-8 的 .vbs 会把路径读成乱码，
-        #   表现为「WMI 报 rc=0 但宿主根本没跑」（真机踩到）。
-        #   上面的 vbs_detach_launcher 已保证脚本只含 ASCII。
-        script_path.write_text(vbs, encoding="ascii", errors="replace")
+                                          env=env)
+        script_path.write_text(vbs, encoding="ascii")
     except Exception as exc:                # noqa: BLE001
         return False, "无法写入宿主启动脚本：%s" % exc
 
     try:
         # wscript 自身很快退出；真正的宿主由 WMI 创建，不受本进程退出影响
-        subprocess.Popen(
-            ["wscript.exe", "//B", "//Nologo", str(script_path)],
+        spawn = subprocess.Popen(
+            [str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wscript.exe"),
+             "//B", "//Nologo", str(script_path)],
             close_fds=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        rc = spawn.wait(timeout=12)
+        if isinstance(rc, int) and rc != 0:
+            return False, "WMI 无法创建更新进程（退出码 %s），详见更新日志" % rc
     except Exception as exc:                # noqa: BLE001
         return False, "wscript 启动失败：%s" % exc
 
-    if dry_run:
-        return True, "dry_run"
-    # 确认宿主真的起来了（它启动后第一件事就是写日志）
-    if _wait_host_started(log_path):
-        return True, "ok"
-    return False, "宿主未在预期时间内写入日志"
+    try:
+        if _wait_host_started(ready_path, token=token):
+            return True, "ok"
+        return False, stage.load().get("error") or "更新进程没有接手，程序保持运行"
+    finally:
+        ready_path.unlink(missing_ok=True)
 
 
 def _host_env():
@@ -327,35 +363,27 @@ def _host_env():
       靠 `os.environ` 传递会失效 —— 宿主会去读默认数据目录，拿到空的更新状态，
       报「期望的校验和无效」。AQ_DATA_DIR 决定它去哪儿读 stage.json / 写日志。
     """
-    env = {}
+    env = {"AQ_DATA_DIR": str(paths.DATA_ROOT)}
     for key in ("AQ_DATA_DIR", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
-                "USERPROFILE", "SystemRoot", "windir", "ProgramData"):
+                "USERPROFILE", "SystemRoot", "windir", "ProgramData", "AQ_WEB_PORT"):
         val = os.environ.get(key)
         if val:
             env[key] = val
     return env
 
 
-def _wait_host_started(log_path, timeout=12.0):
-    """确认换装宿主真的起来了：它启动后第一件事就是写日志。
-
-    ★ 起不来就要**如实报错**，不能让界面报「成功」而实际什么都没发生
-      （2026-09-29 的教训：标志位冲突让 PowerShell 起不来，接口照样返回成功）。
-    """
-    import time as _time
-    path = Path(log_path)
-    try:
-        before = path.stat().st_mtime if path.exists() else 0.0
-    except OSError:
-        before = 0.0
-    deadline = _time.time() + timeout
-    while _time.time() < deadline:
+def _wait_host_started(ready_path, timeout=12.0, token=""):
+    """Only the actual worker can acknowledge this attempt's random token."""
+    path = Path(ready_path)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
-            if path.exists() and path.stat().st_mtime > before:
+            receipt = json.loads(path.read_text(encoding="utf-8-sig"))
+            if receipt.get("token") == token and int(receipt.get("pid") or 0) > 0:
                 return True
-        except OSError:
+        except (OSError, ValueError, TypeError):
             pass
-        _time.sleep(0.3)
+        time.sleep(0.1)
     return False
 
 
@@ -390,26 +418,92 @@ def _current_pid():
     return os.getpid()
 
 
+def _launcher_pids():
+    try:
+        raw = json.loads(Path(paths.data("config", "launcher_instance.json"))
+                         .read_text(encoding="utf-8"))
+        pid = int(raw.get("pid") or 0)
+        return [pid] if pid > 0 and pid != os.getpid() else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _process_alive(pid):
+    try:
+        pid = int(pid or 0)
+        if pid <= 0:
+            return False
+        if os.name != "nt":
+            os.kill(pid, 0)
+            return True
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259)
+        finally:
+            kernel.CloseHandle(handle)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 @router.post("/api/update/restart")
 def api_update_restart():
+    if not _apply_lock.acquire(blocking=False):
+        return {"ok": False, "message": "正在准备更新或重启，请稍候"}
+    try:
+        return _restart_impl()
+    finally:
+        _apply_lock.release()
+
+
+def _restart_impl():
     """只重启（更新完但没自动起来时的兜底，或用户手动要求重启）。"""
     if not getattr(sys, "frozen", False):
         return {"ok": False, "message": "源码态不支持自动重启"}
     exe = Path(sys.executable)
     try:
-        subprocess.Popen([str(exe)], cwd=str(exe.parent),
-                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        from core.version import VERSION
+        from core.ports import WEB_PORT
+        cmd = updater.powershell_apply_command(
+            "", os.getpid(), exe.parent, stage.log_file(), relaunch_exe=str(exe),
+            stage_path=stage.stage_file(), extra_pids=_launcher_pids(), restart_only=True,
+            expected_version=VERSION,
+            runtime_url="http://127.0.0.1:%d/api/update/status" % WEB_PORT)
+        state = stage.load()
+        if state.get("stage") in (stage.STAGE_APPLYING, stage.STAGE_DOWNLOADING):
+            return {"ok": False, "message": "正在更新，请等待完成"}
+        state.update(stage=stage.STAGE_APPLYING, host_pid=0, phase="starting",
+                     attempt_id=uuid.uuid4().hex, operation="restart", error="")
+        if not stage.save(state):
+            return {"ok": False, "message": "无法保存重启状态，程序保持运行"}
+        ok, detail = _spawn_detached_host(cmd, stage.log_file())
+        if not ok:
+            stage.mark_failed("重启失败：%s" % detail)
+            return {"ok": False, "message": "重启失败：%s" % detail}
+        if not _request_app_quit():
+            stage.mark_failed("无法请求程序退出，已取消重启")
+            return {"ok": False, "message": "无法请求程序退出，已取消重启"}
     except Exception as exc:                # noqa: BLE001
         return {"ok": False, "message": "重启失败：%s" % exc}
-    time.sleep(0.3)
     return {"ok": True, "message": "正在重启…"}
 
 
 @router.post("/api/update/cleanup")
 def api_update_cleanup():
     """手动清理暂存的安装包（用户改主意不更新了）。"""
-    removed = stage.clear_download_artifacts(keep_installer=False)
     state = stage.load()
+    if state.get("stage") in (stage.STAGE_APPLYING, stage.STAGE_DOWNLOADING):
+        return {"ok": False, "message": "正在更新，请等待完成"}
+    removed = stage.clear_download_artifacts(keep_installer=False)
     if state.get("stage") in (stage.STAGE_STAGED, stage.STAGE_FAILED):
         stage.update(stage=stage.STAGE_IDLE, error="", bytes=0)
     return {"ok": True, "removed": removed,
