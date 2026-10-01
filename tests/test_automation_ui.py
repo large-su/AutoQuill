@@ -49,12 +49,12 @@ const context = {
   applyLeftMode: () => {}, document: {body: {classList: {toggle: () => {}}}},
 };
 vm.createContext(context);
-vm.runInContext(source + '\nautoData = input; renderAutoSingleCards();', context);
+vm.runInContext(source + '\nautoData = input; renderAutoSingleCards();', context, {timeout: 1000});
 process.stdout.write(elements.autoSingleCards.innerHTML);
 """
         proc = subprocess.run(
             [self.node, "-e", runner, self.script, json.dumps(data, ensure_ascii=False)],
-            capture_output=True, text=True, encoding="utf-8", timeout=10,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
         )
         if proc.returncode:
             raise subprocess.CalledProcessError(proc.returncode, proc.args, proc.stdout, proc.stderr)

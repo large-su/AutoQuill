@@ -79,15 +79,16 @@ def _fetch_release_payload(timeout=10):
         return None
 
 
-def _download_worker(plan):
-    """后台线程：下载 → 取期望校验和 → 校验 → 落 staged 状态。"""
+def _download_worker(plan, auto_install=False):
+    """下载并校验；用户已确认完整升级时，后台接续安装与重启。"""
     try:
         stage.update(stage=stage.STAGE_DOWNLOADING, version=plan.version,
                      current=plan.current, installer=plan.dest,
                      size=plan.installer_size, bytes=0, error="",
                      sha_sources=list(plan.sha_sources), notes=plan.notes,
                      page_url=plan.page_url,
-                     install_dir=updater.resolve_install_dir() or "")
+                     install_dir=updater.resolve_install_dir() or "",
+                     auto_install=bool(auto_install), operation="update")
 
         def on_progress(read, total):
             with _dl_lock:
@@ -126,9 +127,15 @@ def _download_worker(plan):
                      sha_sources=sources, error="",
                      size=plan.installer_size or got.get("bytes") or 0,
                      bytes=got.get("bytes") or 0)
-        log.info("更新：%s 已下载并通过校验，等待用户确认安装", plan.version)
+        log.info("更新：%s 已下载并通过校验", plan.version)
+        if auto_install:
+            with _dl_lock:
+                _dl["running"] = False
+            applied = api_update_apply()
+            if not applied.get("ok"):
+                raise RuntimeError(applied.get("message") or "无法开始自动安装")
     except Exception as exc:                # noqa: BLE001
-        log.warning("更新下载失败：%s", exc)
+        log.warning("更新失败：%s", exc)
         stage.update(stage=stage.STAGE_FAILED, error=_friendly(exc))
         with _dl_lock:
             _dl["error"] = _friendly(exc)
@@ -203,8 +210,12 @@ def api_update_status():
 
 
 @router.post("/api/update/download")
-def api_update_download():
-    """下载最新版并校验（P1：下载完成后由用户点「重启并安装」）。"""
+def api_update_download(auto_install: bool = False):
+    """下载最新版；auto_install 表示用户已确认下载、安装和重启。"""
+    if auto_install and not updater.resolve_install_dir():
+        return {"ok": False, "message": "当前运行方式不支持自动安装，请从发布页下载安装包"}
+    if _apply_lock.locked() or stage.load().get("stage") == stage.STAGE_APPLYING:
+        return {"ok": False, "message": "正在安装或重启，请等待完成"}
     with _dl_lock:
         if _dl["running"]:
             return {"ok": False, "message": "正在下载中，请稍候"}
@@ -228,11 +239,13 @@ def api_update_download():
     plan.notes = plan.notes or checked.get("notes") or ""
     plan.page_url = plan.page_url or checked.get("url") or ""
 
-    stage.clear_download_artifacts(keep_installer=True)
     with _dl_lock:
+        if _dl["running"]:
+            return {"ok": False, "message": "正在下载中，请稍候"}
+        stage.clear_download_artifacts(keep_installer=True)
         _dl.update(running=True, bytes=0, total=plan.installer_size,
                    error="", version=plan.version)
-    threading.Thread(target=_download_worker, args=(plan,), daemon=True).start()
+    threading.Thread(target=_download_worker, args=(plan, bool(auto_install)), daemon=True).start()
     return {"ok": True, "version": plan.version,
             "size": plan.installer_size,
             "message": "开始下载 %s（%.1f MB）" % (plan.version,

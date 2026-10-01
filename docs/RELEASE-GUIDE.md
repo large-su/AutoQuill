@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| **适用版本** | v5.0.4 |
+| **适用版本** | v5.0.6 之后的发布流程 |
 | **最后更新** | 2026-10-01 |
 | **状态** | 活跃 |
 | **说明** | Release 说明与 CHANGELOG 的写作规范、发布流程 |
@@ -36,7 +36,7 @@
 ## 3. 格式模板
 
 ````markdown
-# v5.0.4
+# v<版本>
 
 一句话说明这个版本的性质（常规迭代 / 紧急修复 / 校验版）。
 
@@ -58,8 +58,8 @@
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | 978 passed, 2 skipped |
-| CI | passed |
+| 单元测试 | 填写本次实际通过/跳过数量与验证范围 |
+| CI | 填写实际状态：进行中 / passed / failed |
 | SHA256 一致性 | 安装包 / `.sha256` / GitHub API digest 三处一致 |
 ````
 
@@ -70,7 +70,7 @@
 - 「修复 X。原因是 Y，现改为 Z。」
 - 「`/api/update/apply` 使用了不存在的方法名 `stage.file()`（正确为
   `stage.stage_file()`），接口抛出 `AttributeError`。」
-- 「单元测试 978 passed, 2 skipped。」
+- 「更新专项测试 77 passed。」（填写本次实际结果）
 
 **不要这样写**：
 
@@ -81,9 +81,10 @@
 
 ## 5. 标题规范
 
-- Release 标题：`AutoQuill v5.0.4`
-- Release 正文首行：`# v5.0.4`
-- tag 名：`v5.0.4`（与 `core/version.py` 严格一致）
+- 发布提交：`v5.0.7: 一次确认后自动完成更新`（版本号在最前）
+- Release 标题：`v5.0.7 — AutoQuill`
+- Release 正文首行：`# v5.0.7`
+- tag 名：`v5.0.7`（与 `core/version.py` 严格一致）
 
 ## 6. CHANGELOG 与 Release 的关系
 
@@ -96,17 +97,43 @@
 CHANGELOG 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## 7. 发布流程
+## 7. 固定发布流程
 
-```bash
-# 1) 同步版本号（CHANGELOG、README 一并改）
-#    core/version.py 是唯一事实来源
-# 2) 写 release/release_notes_<VERSION>.md
-# 3) 一键发版（测试 → 提交 → 打包 → tag → 推送 → Release → 校验）
-.venv/Scripts/python tools/release.py \
-    --notes release/release_notes_5.0.4.md \
-    --message-file /path/to/commit-message.txt
+1. 修改 `core/version.py`，在 `CHANGELOG.md` 添加本版变更。
+2. 写 `release/release_notes_<版本>.md` 和 UTF-8 提交说明文件。提交说明首行写本版摘要，脚本自动补 `v<版本>:`。
+3. 查看 `git status --short`、`git diff --stat`，运行下面的预览命令核对文件范围与测试选择。
+4. 执行发布命令。脚本自动同步 README/安装器版本、运行一次相关测试与语法检查、提交一次、构建一次，再推送 main 和本次 tag。
+5. 脚本创建 Release 并校验资产，返回发布链接。main 的 Windows/Linux 完整 CI 在后台执行一次；tag 不重复触发。
+
+```powershell
+.venv\Scripts\python.exe tools\release.py --plan
+.venv\Scripts\python.exe tools\release.py --message-file logs\release-commit.txt
 ```
 
-`tools/release.py` 会校验 sha256 三源一致，不一致直接失败。
-发布前检查清单见 `docs/QA-PLAYBOOK.md`。
+发布说明默认读取 `release/release_notes_<版本>.md`，可用 `--notes` 指定。
+未来 Release 仅包含 `AutoQuill-Setup-<版本>.exe` 与对应 `.sha256`。
+Inno Setup 已压缩安装包，无需再制作备用安装 ZIP；GitHub 自动提供的源码 ZIP 不受影响。
+
+默认校验本地安装包 SHA、GitHub 对上传 EXE 计算的 digest/大小，并下载小型 `.sha256` 文件核对内容。
+通常不回下载完整 EXE，也不另建旧版副本做安装演练。
+
+## 8. 什么时候追加验证
+
+| 改动 | 发布前验证 |
+|---|---|
+| 文档、版本元数据 | 查看差异；文档调整本身无需安装包与新 Release |
+| 普通界面或独立模块 | 自动选择相关测试，检查改动 Python/JS 的语法 |
+| 新增或无法映射的运行时模块、大范围改动、公共依赖 | 完整回归：`--full-test`；未知 Python 模块自动回退完整回归 |
+| 下载、校验、更新编排 | 更新专项回归；改变下载通道时可加 `--verify-download` |
+| 安装器、外部更新宿主、启动器、进程退出/重启 | 生命周期与 Windows 宿主专项回归，并按影响做一次隔离安装演练 |
+
+`--skip-test` 仅用于复用本次已经通过的测试和语法检查；`--skip-build` 仅用于复用版本与当前提交一致的构建。
+普通发布不使用这些开关。已有 tag 会直接停止，不删除、不强推覆盖。
+失败时先定位失败步骤，复用已确认的结果，仅对失败或新改动追加验证。
+
+## 9. 执行与输出约定
+
+- 固定任务交给脚本执行，不每次重读整份源码、重新编写发布命令或临时验证脚本。
+- 输出每个阶段的耗时、测试结论、发布链接；只有失败时展开对应日志。
+- 本地测试不与 CI 重复等待；正常小版本以发布资产完成校验作为发布步骤完成的标志，CI 状态单独如实报告。
+- 改动需要专项演练时，演练一次后复用结果，不因版本号改变再次运行。

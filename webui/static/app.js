@@ -2464,6 +2464,7 @@ async function readApiJson(r) {
 
 async function checkUpdate() {
   const btn = $("btnUpdate");
+  if (btn.disabled) return;
   if (btn.dataset.staged === "1") { applyUpdate(); return; }
   btn.disabled = true;
   const orig = btn.textContent;
@@ -2484,25 +2485,45 @@ async function checkUpdate() {
       return;
     }
     if (d.has_update) {
-      btn.textContent = "有新版本";
+      showAvailableUpdate(d);
       // 一键更新：确认后自动下载 → 校验 → 换装 → 重启 → 清理（P1）
       if (confirm(`发现新版本 ${d.latest}（当前 ${d.current}）\n\n`
         + `点击「确定」自动完成升级：下载 → 校验 → 安装 → 重启，安装包自动删除。\n`
         + `你的数据（登录态、草稿、计划）会全部保留。`)) {
-        startAutoUpdate(d.latest);
+        await startAutoUpdate(d.latest);
         return;
       }
-      btn.textContent = orig;
       return;
     }
     btn.textContent = "已是最新版本";
-    setTimeout(() => { btn.textContent = orig; }, 3000);
+    btn.classList.remove("update-available");
+    setTimeout(() => { btn.textContent = "检查更新"; }, 3000);
   } catch (e) {
     btn.textContent = orig;
     alert("检查更新失败：" + e.message);
   } finally {
-    btn.disabled = false;
+    if (!_updTimer) btn.disabled = false;
   }
+}
+
+function showAvailableUpdate(info) {
+  const btn = $("btnUpdate");
+  btn.textContent = "发现 v" + info.latest;
+  btn.title = "当前版本 v" + info.current + "，点击确认更新至 v" + info.latest;
+  btn.classList.add("update-available");
+}
+
+let _startupUpdateChecked = false;
+async function checkUpdateOnStartup() {
+  if (_startupUpdateChecked) return;
+  _startupUpdateChecked = true;
+  try {
+    const info = await readApiJson(await fetch("/api/update/check"));
+    const btn = $("btnUpdate");
+    if (info.has_update && !info.error && !btn.disabled && !btn.dataset.staged && !_updTimer) {
+      showAvailableUpdate(info);
+    }
+  } catch (e) { /* 后台检查失败保持静默，用户仍可手动检查。 */ }
 }
 
 /* ---------- 一键更新：下载 → 校验 → 安装 → 重启 ---------- */
@@ -2516,9 +2537,10 @@ function fmtMB(n) {
 async function startAutoUpdate(version) {
   const btn = $("btnUpdate");
   btn.disabled = true;
+  btn.classList.remove("update-available");
   btn.textContent = "准备下载…";
   try {
-    const r = await fetch("/api/update/download", { method: "POST" });
+    const r = await fetch("/api/update/download?auto_install=true", { method: "POST" });
     const d = await readApiJson(r);
     if (!d.ok) { alert("无法开始更新：" + (d.message || "未知原因")); 
       btn.textContent = "检查更新"; btn.disabled = false; return; }
@@ -2533,6 +2555,7 @@ async function startAutoUpdate(version) {
 function pollUpdateStatus(version) {
   if (_updTimer) clearInterval(_updTimer);
   const btn = $("btnUpdate");
+  btn.disabled = true;
   const tick = async () => {
     let st;
     try {
@@ -2547,16 +2570,15 @@ function pollUpdateStatus(version) {
       return;
     }
     if (st.stage === "staged") {
+      if (st.auto_install) {
+        btn.disabled = true;
+        btn.textContent = "准备安装并重启…";
+        return;
+      }
       clearInterval(_updTimer); _updTimer = null;
       btn.disabled = false;
       btn.dataset.staged = "1";
       btn.textContent = "重启并安装";
-      const ok = confirm(
-        `v${st.version} 已下载并通过校验。\n\n`
-        + `点击「确定」立即安装：程序会自动退出 → 静默安装 → 自动重启，`
-        + `安装包随后自动删除。\n\n你的数据不会受影响。`);
-      if (!ok) { btn.textContent = "稍后安装"; return; }
-      applyUpdate();
       return;
     }
     if (st.stage === "failed") {
@@ -2642,8 +2664,12 @@ async function restoreUpdateStatus() {
     if (st.stage === "applying" || st.stage === "downloading") {
       pollUpdateStatus(st.version);
     } else if (st.stage === "staged") {
-      btn.dataset.staged = "1";
-      btn.textContent = "安装 v" + st.version + " 并重启";
+      if (st.auto_install) {
+        pollUpdateStatus(st.version);
+      } else {
+        btn.dataset.staged = "1";
+        btn.textContent = "安装 v" + st.version + " 并重启";
+      }
     } else if (st.stage === "done") {
       btn.textContent = (st.operation === "restart" ? "已重启 v" : "已更新至 v") + st.running_version;
     } else if (st.stage === "failed") {
@@ -2991,7 +3017,7 @@ $("modalMask").addEventListener("click", (e) => {
   loadLogHistory().then(() => { window.__logHistoryLoaded = true; });  // 页面加载即回放最近日志；标记防首次运行重复回放
   fillSetupProviders();
   loadSetupStatus();  // 首启引导（未配置时弹出遮罩）
-  restoreUpdateStatus();
+  restoreUpdateStatus().then(checkUpdateOnStartup);
   try {
     const r = await fetch("/api/status");
     const st = await r.json();

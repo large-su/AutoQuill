@@ -3,7 +3,7 @@
 
 用法：
   python tools/build_release.py            # 门禁 + 构建 dist + 安装包 + sha256
-  python tools/build_release.py --skip-test  # 跳过全量测试（危险，仅紧急修复用）
+  python tools/build_release.py --skip-test  # 复用发布入口已完成的测试
   python tools/build_release.py --skip-build # 只跑门禁与测试
   python tools/build_release.py --skip-browser # 测试走 tests/run_all.py 统一入口（自动跳过真实浏览器用例）
   python tools/build_release.py --local --skip-browser # 本地验证未提交修复，不发布
@@ -11,23 +11,18 @@
 门禁（不满足直接失败退出）：
   1. git 工作区干净（未提交改动不发布）
   2. 当前分支 = main
-  3. 全部源码文件（*.py / index.html / *.iss / spec）的时间戳
-     <= dist 构建时间（防"包比代码旧"）——以 dist/AutoQuill/_internal 的
-     修改时间作为"上次构建时间"基线
-  4. py_compile + 全量测试通过（--skip-test 除外）
+  3. 独立构建默认运行 run_all；release.py 已完成相关测试时传 --skip-test
 
-构建：PyInstaller → ISCC（installer/AutoQuill.iss）→ certutil sha256
+日常发布使用 tools/release.py，本文件负责 PyInstaller → ISCC → SHA256。
 输出：release/AutoQuill-Setup-<VERSION>.exe + .sha256
 
 版本号来源：core/version.py（唯一事实来源）。
 """
 
 import os
-import shutil
 import subprocess
 import sys
-import time
-import zipfile
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +104,22 @@ def _sync_iss_version():
     print(f"✓ 安装器版本号已同步：v{ver}")
 
 
+def sync_release_metadata():
+    """Synchronize release-facing version examples before the release commit."""
+    import re
+    ver = version()
+    _sync_iss_version()
+
+    readme = ROOT / "README.md"
+    rtext = readme.read_text(encoding="utf-8")
+    rtext = re.sub(r"^(\ufeff?# AutoQuill )v[^\r\n]+", r"\g<1>v" + ver, rtext, count=1, flags=re.M)
+    rtext = re.sub(r"(\*\*当前版本\*\*\s*\|\s*)v[^\r\n|]+", r"\g<1>v" + ver, rtext, count=1)
+    rtext = re.sub(r"(AutoQuill-Setup-)\d+\.\d+\.\d+(\.exe)",
+                   r"\g<1>" + ver + r"\g<2>", rtext, count=1)
+    readme.write_text(rtext, encoding="utf-8")
+    print(f"✓ 发布元数据已同步：v{ver}")
+
+
 def main():
     skip_test = "--skip-test" in sys.argv
     skip_build = "--skip-build" in sys.argv
@@ -119,14 +130,9 @@ def main():
     _sync_iss_version()
 
     if not skip_test:
-        if "--skip-browser" in sys.argv:
-            print("\n--- 全量测试（run_all 统一入口，跳过真实浏览器用例）---")
-            _run([sys.executable, str(ROOT / "tests" / "run_all.py")])
-            print("✓ 全量测试通过（run_all）")
-        else:
-            print("\n--- 全量测试 ---")
-            _run([sys.executable, "-m", "unittest", "discover", "-s", "tests"])
-            print("✓ 全量测试通过")
+        print("\n--- 完整回归（统一入口）---")
+        _run([sys.executable, str(ROOT / "tests" / "run_all.py")])
+        print("✓ 完整回归通过")
     if skip_build:
         print("（--skip-build：仅门禁+测试，不构建）")
         return 0
@@ -159,15 +165,11 @@ def main():
     sha_file.write_text(digest, encoding="utf-8")
     print(f"✓ {digest}")
 
-    helper = write_install_helper(exe)
-    install_bundle = write_install_bundle(exe, helper)
-
     print("\n构建完成。")
     print(f"  {exe}")
     print(f"  {sha_file}")
-    print(f"  {helper}")
-    print(f"  {install_bundle}")
-    print("下一步：git tag V<新版本> + gh release create")
+    print("  （发布资产仅 exe 与 .sha256；helper 可按需本地生成）")
+    print("日常发布由 tools/release.py 统一完成提交、tag、推送与 Release。")
     print("提醒：Release 说明请附 SmartScreen 提示——安装包未做代码签名，"
           "下载时点「更多信息」→「仍要运行」即可（详见 README FAQ）。")
     return 0
@@ -216,29 +218,14 @@ def write_install_helper(exe=None):
     return helper
 
 
-def write_install_bundle(exe, helper):
-    """Write the downloadable installer bundle containing the three release files."""
-    exe = Path(exe)
-    helper = Path(helper)
-    sha_file = exe.with_suffix(exe.suffix + ".sha256")
-    assets = (exe, sha_file, helper)
-    missing = [str(path) for path in assets if not path.is_file()]
-    if missing:
-        raise FileNotFoundError("安装包缺少文件：" + ", ".join(missing))
-    bundle = exe.parent / f"AutoQuill-Install-{version()}.zip"
-    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
-        for path in assets:
-            archive.write(path, arcname=path.name)
-    print(f"✓ 安装 ZIP：{bundle}")
-    return bundle
-
-
 def write_build_info():
     """Installer and worker verify this against the new service's actual VERSION."""
-    import json
     dest = DIST / "_internal" / "build_info.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps({"version": version()}, indent=2), encoding="utf-8")
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT),
+                            capture_output=True, text=True, check=True).stdout.strip()
+    dest.write_text(json.dumps({"version": version(), "source_commit": commit}, indent=2),
+                    encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| **适用版本** | v5.0.4 |
+| **适用版本** | v5.0.6 之后的验证与发布流程 |
 | **最后更新** | 2026-10-01 |
 | **状态** | 活跃 |
 | **说明** | 测试、校验、打包脚本清单与发布前检查清单 |
@@ -13,10 +13,11 @@
 
 | 脚本 | 用途 | 什么时候用 | 示例 |
 |---|---|---|---|
-| `tests/run_all.py` | 全量单元测试（618 例；自动跳过需要真实浏览器/登录态的用例） | 每次改动后端后、提交前、CI 必跑 | `python tests/run_all.py` |
+| `tests/run_all.py` | 完整回归，自动跳过真实浏览器/登录态用例 | main CI 后台必跑；大范围或公共模块改动时本地运行 | `python tests/run_all.py` |
 | `tools/auto_test.py` | 自动回归测试：后端单测 + Python/app.js 语法 + 前端 Playwright 全流程 + 服务端日志检查 | 改完前端/后端后，模拟“人工测试员”跑一遍；`--quick` 只跑后端+语法（CI 友好） | `python tools/auto_test.py`<br>`python tools/auto_test.py --quick` |
 | `tools/ai_flavor_check.py` | AI 味检测（0-100）：检查生成稿的机器味，与真人基准对比 | 生成效果前后对比、发布前自查 | `python tools/ai_flavor_check.py output`<br>`python tools/ai_flavor_check.py --zhihu data/published_answers_.json` |
-| `tools/build_release.py` | 正式发版：门禁（git 干净/分支 main）→ 全量测试 → PyInstaller → Inno Setup 安装包 → SHA256；**版本号自动从 core/version.py 注入** | 发新版本时 | `python tools/build_release.py` |
+| `tools/release.py` | 相关测试与语法 → 元数据同步 → 一次提交与构建 → main/tag 原子推送 → Release → 资产校验 | 统一发布入口，详见发布指南 | `python tools/release.py --plan` |
+| `tools/build_release.py` | 门禁、PyInstaller、Inno Setup、SHA256；由发布入口复用已有测试结果 | 单独调试构建，日常发版由 release.py 调用 | `python tools/build_release.py --local --skip-test` |
 | `tests/test_*.py` | 专项单测（草稿箱/快照/评分回退/并行窗口/大模型筛选/launcher/自动化/启动器设置等） | 定位具体模块问题时单独跑 | `python -m unittest tests.test_drafts` |
 | `tools/archive/probes/` | 历史一次性探查脚本（已归档，只读参考）。其中 `probe_markdown_rebuild.py` 是逐块重建 markdown 的**合成 DOM 真机验证**（不登录不联网，改 walker 后跑一次）；`spike_tray.py` 是 M4 托盘常驻的真机验证（**直接跑生产代码** `launcher.TrayController` + 本地假 API，15 项检查） | 浏览器 DOM / 托盘排查时的历史参考 | `python tools/archive/probes/probe_markdown_rebuild.py`<br>`python tools/archive/probes/spike_tray.py` |
 
@@ -28,14 +29,15 @@
 python -m py_compile webui/server.py
 node --check webui/static/app.js        # 前端 JS
 
-# 快速自检 = 全量单测 + 语法
-python tools/auto_test.py --quick
+# 检查受影响模块，例如更新编排和界面
+python -m unittest tests.test_updater tests.test_update_ui
 ```
 
-### 提交前（完整回归）
+### 大范围或公共模块改动（完整回归）
 ```bash
-python tests/run_all.py                 # 514 例
-python tools/auto_test.py               # 含前端 Playwright 全流程 + 日志检查
+python tests/run_all.py
+# 前端交互大改时按需运行 Playwright 全流程
+python tools/auto_test.py
 ```
 
 ### 前端单独回归（改样式/JS 后）
@@ -93,32 +95,25 @@ python tools/ai_flavor_check.py --zhihu data/published_answers_2026-08-23.json  
 python tools/ai_flavor_check.py output/story_x.md # 单篇
 ```
 
-### 发新版本（一键，2026-09-19 实跑校准）
+### 发新版本（统一入口）
 ```bash
-# 1. 改版本号（唯一入口）
-#    core/version.py  →  VERSION = "x.y.z"
-# 2. 先提交：门禁要求工作区干净（未提交改动会直接拒绝构建）
-#    git add -A && git commit -m "vx.y.z: ..."
-# 3. 打包（自动：门禁+全量测试+PyInstaller+安装包+SHA256，并自动把版本号写入 iss）
-#    --skip-browser = 测试走 tests/run_all.py（跳过需要真实浏览器/登录态的用例）
-python tools/build_release.py --skip-browser
-# 4. 提交构建脚本回写的 iss 版本号（此时工作区会多出这一处改动）
-#    git add installer/AutoQuill.iss && git commit -m "chore: 安装器版本号同步 vx.y.z"
-# 5. 打 tag + 推送 + 建 Release（两个资产：安装包 + sha256）
-#    git tag vx.y.z && git push origin main --tags
-#    gh release create vx.y.z --title "AutoQuill vx.y.z" \
-#        --notes-file release/release_notes_x.y.z.md \
-#        release/AutoQuill-Setup-x.y.z.exe release/AutoQuill-Setup-x.y.z.exe.sha256
+# 先修改 core/version.py、CHANGELOG，并写 release/release_notes_<版本>.md
+# 用 UTF-8 文件写发布提交摘要，核对计划后执行
+python tools/release.py --plan
+python tools/release.py --message-file logs/release-commit.txt
 ```
 
 发布说明的惯例：正文用 `CHANGELOG.md` 对应版本段 + 「测试」+「安装提示（SmartScreen / 数据保留 / sha256 校验）」；
 发完把同一份说明存一份到 `release/release_notes_x.y.z.md`（`release/` 不入库，仅本机留档）。
-发布后回下载一次安装包比对 sha256（`gh release download` + `certutil -hashfile ... SHA256`），并确认 CI 变绿。
+默认核对本地 SHA、GitHub API digest 与线上 SHA 文件；完整 EXE 回下载使用 `--verify-download`。
+相关测试仅执行一次。CI 在 main 推送后后台完整回归，tag 不重复触发；无需等待两份同一提交的 CI。
+隔离安装演练用于安装器、外部宿主或退出/重启生命周期变更，普通界面小改无需重复。
+固定步骤和验证分级见 [发布指南](RELEASE-GUIDE.md)。
 
 ## 三、关键说明
 
 - **版本号唯一入口**：`core/version.py`。`build_release.py` 构建时自动把版本号注入 `installer/AutoQuill.iss`（手工改 iss 会被覆盖）。
-- **CI**：`.github/workflows/test.yml` 每次 push/PR 自动跑 `tests/run_all.py`（浏览器依赖用例自动排除）。
+- **CI**：`.github/workflows/test.yml` 在 main 推送或手动触发时运行 `tests/run_all.py`，Windows/Linux 各一项；tag 不重复运行。
 - **产物不入库**：dist/、release/、build/ 永远不提交，发版产物在 `release/` 下。
 - **官网安装包未签名**：用户下载时可能见 SmartScreen 提示，点「更多信息 → 仍要运行」即可（README FAQ 有说明）。
 
@@ -129,5 +124,5 @@ python tools/build_release.py --skip-browser
 | `python tools/auto_test.py` 前端项失败 | 看测试输出定位到具体检查点；测试服务日志在临时目录 server.log，页面 console 错误会汇总在「页面无 console 错误」项 |
 | 单元测试报导入错误 | 确认在项目根执行；`tests/run_all.py` 已自动把项目根加入 sys.path |
 | 双击启动无窗口 | 查看 `logs/launcher.log` 最近一次双击的时间戳与内容；多为启动早期崩溃 |
-| build_release 门禁失败「工作区有未提交改动」 | 先 `git add -A && git commit` |
+| build_release 门禁失败「工作区有未提交改动」 | 日常发布使用 release.py，由统一入口同步元数据并提交；单独构建调试使用 --local |
 | AI 味检测分数对比不明显 | 确认采样的是同一数据源；检测器为规则启发式，配合评分日志的「自然度」维度交叉看 |

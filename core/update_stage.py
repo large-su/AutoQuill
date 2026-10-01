@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 STAGE_IDLE = "idle"
 STAGE_DOWNLOADING = "downloading"
-STAGE_STAGED = "staged"          # 已下载并校验通过，等用户点「重启并安装」
+STAGE_STAGED = "staged"          # 已下载并校验通过，即将自动安装或等待手动安装
 STAGE_APPLYING = "applying"
 STAGE_DONE = "done"
 STAGE_FAILED = "failed"
@@ -44,7 +44,7 @@ STAGE_TEXT = {
 _FIELDS = ("stage", "version", "current", "installer", "sha256", "sha_sources",
            "size", "bytes", "at", "updated_at", "error", "install_dir",
            "log", "notes", "page_url", "attempts", "host_pid", "phase",
-           "attempt_id", "installed_version", "restarted_pid", "operation")
+           "attempt_id", "installed_version", "restarted_pid", "operation", "auto_install")
 
 
 def stage_file() -> Path:
@@ -65,7 +65,8 @@ def blank():
             "at": "", "updated_at": "", "error": "", "install_dir": "",
             "log": str(log_file()), "notes": "", "page_url": "", "attempts": 0,
             "host_pid": 0, "phase": "", "attempt_id": "",
-            "installed_version": "", "restarted_pid": 0, "operation": "update"}
+            "installed_version": "", "restarted_pid": 0, "operation": "update",
+            "auto_install": False}
 
 
 def load() -> dict:

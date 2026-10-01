@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""一键发版：测试 → 提交 → 打包 → 打 tag → 推送 → 建 Release → 校验 sha256。
-
-为什么要有它（用户 2026-09-29 反馈「最终测试和发布太慢」）：
-  原来一次发版要我在会话里手动编排十来条命令，其中
-    · 全量测试跑两遍（我先跑一遍，build_release.py 里又跑一遍）；
-    · 提交信息含中文/引号，用命令行传会被 PowerShell 打断，只能写临时文件；
-    · 打 tag、推送、建 Release、回下载校验各一条命令，还经常漏步。
-  现在收敛成一条命令，并且**测试只跑一次**（结果传给构建脚本复用）。
-
-用法：
-  python tools/release.py --notes release/release_notes_4.9.17.md -m "v4.9.17: ..."
-  python tools/release.py --notes ... -m "..." --skip-test   # 紧急情况（自己先跑过）
-
-退出码非 0 表示中途失败（哪一步失败会打印得很清楚，不会留下半成品 tag）。
-"""
-
+"""Prepare, build, tag, and publish a two-file AutoQuill release."""
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,166 +16,275 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO = "large-su/AutoQuill"
 
 
-def run(cmd, **kw):
-    """跑一条命令；失败直接退出（带上下文），不吞错误。"""
-    printable = " ".join(str(c) for c in cmd)
-    print("$ %s" % printable)
-    r = subprocess.run([str(c) for c in cmd], cwd=str(ROOT), **kw)
-    if r.returncode != 0:
-        sys.exit("✗ 命令失败（exit %d）：%s" % (r.returncode, printable))
-    return r
+def capture(cmd):
+    return subprocess.run([str(c) for c in cmd], cwd=str(ROOT),
+                          capture_output=True, text=True, encoding="utf-8")
 
+
+def timed(label, action):
+    started = time.monotonic()
+    print(label, flush=True)
+    result = action()
+    print(f"✓ {label}（{time.monotonic() - started:.1f}s）", flush=True)
+    return result
+
+def run(cmd, **kw):
+    print("$ " + " ".join(map(str, cmd)))
+    result = subprocess.run([str(c) for c in cmd], cwd=str(ROOT), **kw)
+    if result.returncode:
+        raise RuntimeError(f"命令失败（exit {result.returncode}）：{' '.join(map(str, cmd))}")
+    return result
 
 def out(cmd):
-    r = subprocess.run([str(c) for c in cmd], cwd=str(ROOT),
-                       capture_output=True, text=True)
-    return (r.stdout or "").strip()
-
+    result = capture(cmd)
+    if result.returncode:
+        raise RuntimeError(f"命令失败：{' '.join(map(str, cmd))}")
+    return (result.stdout or "").strip()
 
 def version():
     sys.path.insert(0, str(ROOT))
     import core.version
     return core.version.VERSION
 
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
-def step(msg):
-    print("\n" + "=" * 62)
-    print("  " + msg)
-    print("=" * 62)
+def changed_paths():
+    # Include committed changes since the last ancestor release and current edits.
+    paths = set(filter(None, out(["git", "diff", "--name-only", "HEAD"]).splitlines()))
+    tag = capture(["git", "describe", "--tags", "--match", "v*", "--abbrev=0", "HEAD"])
+    if tag.returncode == 0:
+        paths.update(filter(None, out(["git", "diff", "--name-only", tag.stdout.strip(), "HEAD"]).splitlines()))
+    elif tag.returncode != 128:
+        raise RuntimeError("无法确定上一发布 tag")
+    paths.update(filter(None, out(["git", "ls-files", "--others", "--exclude-standard"]).splitlines()))
+    return sorted(paths)
+
+def select_tests(paths, full=False):
+    if full:
+        return ["tests"]
+    selected, unknown = set(), False
+    for raw in paths:
+        path = raw.replace("\\", "/")
+        name = Path(path).name
+        if path == "requirements.txt":
+            unknown = True
+            continue
+        if path.startswith("tests/test_") and path.endswith(".py"):
+            if (ROOT / path).is_file():
+                selected.add(path[:-3].replace("/", "."))
+            continue
+        if path in {"core/update_host.ps1", "launcher.py", "tools/apply_update.py"} or path.startswith("installer/") or path.endswith(".spec"):
+            selected.update(("tests.test_updater", "tests.test_update_host_integration", "tests.test_update_lifecycle"))
+            continue
+        if path.endswith(".py"):
+            stem = Path(path).stem
+            if stem in {"update_api", "update_stage", "updater"}:
+                selected.add("tests.test_updater")
+            elif path == "core/version.py" or path.startswith("docs/"):
+                continue
+            elif stem in {"release", "build_release"}:
+                selected.add("tests.test_release_flow")
+            elif (ROOT / "tests" / f"test_{stem}.py").is_file():
+                selected.add(f"tests.test_{stem}")
+            else:
+                unknown = True
+        elif path.endswith(".js"):
+            if path.endswith("webui/static/app.js") or name == "automation.js":
+                selected.add("tests.test_update_ui" if name == "app.js" else "tests.test_automation_ui")
+                if name == "automation.js":
+                    selected.add("tests.test_checkin")
+            else:
+                unknown = True
+        elif path == "webui/static/index.html":
+            selected.add("tests.test_update_ui")
+        elif path.endswith(".json") and not path.startswith("docs/"):
+            unknown = True
+    return ["tests"] if unknown else sorted(selected)
+
+def normalize_message(message, ver):
+    lines = message.strip().splitlines() or ["release"]
+    first = lines[0].strip()
+    prefix = r"^(?:v?\d+(?:\.\d+){1,3}\s*[:：-]\s*|(?:feat|fix|chore|docs|refactor|build|release|test|perf)(?:\([^)]*\))?\s*:\s*)"
+    for _ in range(2):
+        first = re.sub(prefix, "", first, flags=re.I)
+    lines[0] = f"v{ver}: {first or 'release'}"
+    return "\n".join(lines)
+
+def _preflight(tag, plan=False):
+    if out(["git", "branch", "--show-current"]) != "main":
+        raise RuntimeError("发布必须在 main 分支")
+    if out(["git", "tag", "-l", tag]):
+        raise RuntimeError(f"目标 tag 已存在：{tag}（不会删除既有 tag；先设置新版本）")
+    if plan:
+        return
+    remote = capture(["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"])
+    if remote.returncode:
+        raise RuntimeError("无法检查远程 tag，未开始发布")
+    if remote.stdout.strip():
+        raise RuntimeError(f"远程目标 tag 已存在：{tag}（不会删除既有 tag）")
+    identity = [capture(["git", "config", "--get", field]) for field in ("user.name", "user.email")]
+    if any(result.returncode or not result.stdout.strip() for result in identity):
+        raise RuntimeError("未配置 Git 身份，请设置 git config user.name 与 user.email")
+
+def _validate_manifest():
+    info = ROOT / "dist" / "AutoQuill" / "_internal" / "build_info.json"
+    if not info.is_file():
+        raise RuntimeError("--skip-build 要求存在 build_info.json")
+    data = json.loads(info.read_text(encoding="utf-8"))
+    if data.get("version") != version() or data.get("source_commit") != out(["git", "rev-parse", "HEAD"]):
+        raise RuntimeError("构建 manifest 的 version/source_commit 与当前 HEAD 不一致")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--notes", required=True, help="Release 说明文件（markdown）")
-    ap.add_argument("-m", "--message", default="", help="提交信息（可多行）")
-    ap.add_argument("--message-file", default="",
-                    help="从文件读提交信息（**推荐**）：中文经命令行传输会被控制台"
-                         "编码转成乱码，真机上踩到过提交记录变乱码")
-    ap.add_argument("--skip-test", action="store_true",
-                    help="跳过全量测试（仅在你已单独跑过时用）")
-    ap.add_argument("--skip-build", action="store_true",
-                    help="只提交/推送，不打包（用于纯文档改动）")
-    args = ap.parse_args()
+def validate_local_assets(exe, sha):
+    if not exe.is_file() or not sha.is_file():
+        raise RuntimeError("本地发布资产缺失")
+    if _sha256(exe) != sha.read_text(encoding="utf-8").strip():
+        raise RuntimeError("本地发布资产 sha256 不匹配")
 
-    # ★ 中文提交信息一律按 UTF-8 读文件，绕开控制台编码（PowerShell 管道会转码）
-    if args.message_file:
-        message = Path(args.message_file).read_text(encoding="utf-8")
-    else:
-        message = args.message
-    if not message.strip():
-        sys.exit("✗ 提交信息为空：用 --message-file（推荐）或 -m 给一段说明")
+def validate_published_assets(tag, exe, sha, verify_download=False):
+    """Check release API metadata and the tiny sidecar without downloading the exe."""
+    validate_local_assets(exe, sha)
+    payload = json.loads(out(["gh", "api", f"repos/{REPO}/releases/tags/{tag}"]))
+    assets = {item["name"]: item for item in payload.get("assets", [])}
+    expected = {exe.name: exe, sha.name: sha}
+    if set(assets) != set(expected):
+        raise RuntimeError("Release 必须恰好包含 exe 与 .sha256 两个资产")
+    exe_asset = assets[exe.name]
+    if exe_asset.get("size") != exe.stat().st_size or exe_asset.get("digest", "").removeprefix("sha256:") != _sha256(exe):
+        raise RuntimeError("发布 exe 的 size/digest 与本地构建产物不一致")
+    sidecar = assets[sha.name]
+    if sidecar.get("size") != sha.stat().st_size:
+        raise RuntimeError("发布 .sha256 的 size 与本地资产不一致")
+    published_sha = out(["gh", "api", f"repos/{REPO}/releases/assets/{sidecar['id']}", "--header", "Accept: application/octet-stream"]).strip()
+    if published_sha != sha.read_text(encoding="utf-8").strip():
+        raise RuntimeError("发布 .sha256 内容与本地资产不一致")
+    if verify_download:
+        with tempfile.TemporaryDirectory(prefix="aq-release-check-") as directory:
+            run(["gh", "release", "download", tag, "--pattern", exe.name, "--dir", directory])
+            if _sha256(Path(directory) / exe.name) != _sha256(exe):
+                raise RuntimeError("回下载的安装包 sha256 不匹配")
 
+def run_tests(command):
+    """Keep routine test output in a log; surface the result or failure context."""
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
+    result = subprocess.run(command, cwd=str(ROOT), env=environment,
+                            capture_output=True, text=True, encoding="utf-8")
+    output = (result.stdout or "") + (result.stderr or "")
+    log = ROOT / "logs" / f"release-checks-{version()}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(output, encoding="utf-8")
+    if result.returncode:
+        raise RuntimeError("测试失败，日志：%s\n%s" % (log, "\n".join(output.splitlines()[-40:])))
+    summary = [line for line in (result.stderr or "").splitlines()
+               if line.startswith(("Ran ", "OK", "共执行"))]
+    print("；".join(summary) or "相关测试通过")
+
+
+def run_checks(paths, tests):
+    if tests == ["tests"]:
+        run_tests([sys.executable, str(ROOT / "tests" / "run_all.py")])
+    elif tests:
+        run_tests([sys.executable, "-m", "unittest", "-q", *tests])
+    python_files = [path for path in paths if path.endswith(".py") and (ROOT / path).is_file()]
+    if python_files:
+        run([sys.executable, "-m", "py_compile", *python_files])
+    javascript = [path for path in paths if path.endswith(".js") and (ROOT / path).is_file()]
+    if javascript and not shutil.which("node"):
+        raise RuntimeError("修改了 JavaScript，需要安装 Node 以完成语法检查")
+    for path in javascript:
+        run(["node", "--check", path])
+    run(["git", "diff", "--check"])
+
+
+def commit_release(message, ver):
+    run(["git", "add", "-A"])
+    dirty = bool(out(["git", "status", "--porcelain"]))
+    if not dirty and out(["git", "log", "-1", "--format=%s"]).startswith(f"v{ver}:"):
+        return
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+        handle.write(normalize_message(message, ver))
+        msgfile = handle.name
+    try:
+        command = ["git", "commit", "-F", msgfile]
+        if not dirty:
+            command.append("--allow-empty")
+        run(command)
+    finally:
+        os.unlink(msgfile)
+
+
+def release_assets(ver):
+    exe = ROOT / "release" / f"AutoQuill-Setup-{ver}.exe"
+    return exe, exe.with_suffix(exe.suffix + ".sha256")
+
+
+def create_release(tag, notes, assets):
+    run(["gh", "release", "create", tag, "--verify-tag", "--title",
+         f"{tag} — AutoQuill", "--notes-file", str(notes), *map(str, assets)])
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--notes", default="", help="默认 release/release_notes_<版本>.md")
+    ap.add_argument("-m", "--message", default="", help="提交摘要，脚本自动加版本前缀")
+    ap.add_argument("--message-file", default="", help="UTF-8 提交信息文件")
+    ap.add_argument("--skip-test", action="store_true", help="复用已完成的测试与语法检查")
+    ap.add_argument("--full-test", action="store_true", help="执行 run_all 完整回归")
+    ap.add_argument("--skip-build", action="store_true", help="复用 manifest 与当前 HEAD 一致的构建")
+    ap.add_argument("--plan", action="store_true", help="只显示计划，不写文件或访问网络")
+    ap.add_argument("--verify-download", action="store_true", help="额外回下载完整 EXE 校验")
+    args = ap.parse_args(argv)
     ver = version()
     tag = "v" + ver
-    notes = ROOT / args.notes
-    if not notes.exists():
-        sys.exit("✗ 发布说明不存在：%s" % notes)
-    exe = ROOT / "release" / ("AutoQuill-Setup-%s.exe" % ver)
-    sha_file = exe.with_suffix(exe.suffix + ".sha256")
-    install_bundle = ROOT / "release" / ("AutoQuill-Install-%s.zip" % ver)
-    if not args.skip_build and not (ROOT / "dist").exists():
-        print("（dist 不存在，稍后会由构建脚本生成）")
-
-    # ① 全量测试（**只跑这一次**，构建脚本用 --skip-test 复用结果）
+    paths = changed_paths()
+    tests = select_tests(paths, args.full_test)
+    assets = release_assets(ver)
+    print(f"版本：{tag}\n提交前缀：{tag}:\n资产：{', '.join(path.name for path in assets)}")
+    print("改动文件：" + (", ".join(paths) or "无"))
+    print("测试：" + (", ".join(tests) if tests else "文档/版本调整，无运行时单测"))
+    if args.plan:
+        existing = out(["git", "tag", "-l", tag])
+        if existing:
+            print(f"目标 {tag} 已存在，实际发布前需设置新版本号")
+        return 0
+    message = (Path(args.message_file).read_text(encoding="utf-8-sig")
+               if args.message_file else args.message)
+    notes = ROOT / (args.notes or f"release/release_notes_{ver}.md")
+    if not message.strip():
+        raise RuntimeError("提交信息为空：用 --message-file 或 -m")
+    if not notes.is_file():
+        raise RuntimeError(f"发布说明不存在：{notes}")
+    timed("1. 发布前检查", lambda: _preflight(tag))
+    if not args.skip_build:
+        from tools.build_release import sync_release_metadata
+        timed("2. 同步版本元数据", sync_release_metadata)
     if not args.skip_test:
-        step("① 全量测试")
-        t0 = time.time()
-        run([sys.executable, str(ROOT / "tests" / "run_all.py")])
-        print("✓ 测试通过（%.0fs）" % (time.time() - t0))
-
-    # ② 提交（先提交再构建：构建门禁要求工作区干净）
-    step("② 提交代码")
-    run(["git", "add", "-A"])
-    dirty = out(["git", "status", "--porcelain"])
-    if dirty:
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                         encoding="utf-8") as f:
-            f.write(message)
-            msgfile = f.name
-        try:
-            run(["git", "-c", "user.name=AutoQuill",
-                 "-c", "user.email=autoquill@local",
-                 "commit", "-q", "-F", msgfile])
-        finally:
-            os.unlink(msgfile)
-        print("✓ 已提交")
-    else:
-        print("（无改动，跳过提交）")
-
-    # ③ 构建（安装包 + sha256）。构建脚本会回写 iss 版本号，再补一次提交。
+        timed("3. 相关测试与语法检查", lambda: run_checks(paths, tests))
+    timed("4. 提交代码", lambda: commit_release(message, ver))
     if args.skip_build:
-        step("③ 跳过构建（--skip-build）")
+        _validate_manifest()
     else:
-        step("③ 打包（PyInstaller + Inno Setup）")
-        t0 = time.time()
-        run([sys.executable, str(ROOT / "tools" / "build_release.py"),
-             "--skip-test"])
-        print("✓ 打包完成（%.0fs）" % (time.time() - t0))
-        run(["git", "add", "-A"])
-        if out(["git", "status", "--porcelain"]):
-            run(["git", "-c", "user.name=AutoQuill",
-                 "-c", "user.email=autoquill@local",
-                 "commit", "-q", "-m", "chore: 安装器版本号同步 %s" % tag])
-
-    assets = (exe, sha_file, install_bundle)
-    missing = [str(path) for path in assets if not path.is_file()]
-    if missing:
-        sys.exit("✗ 发布资产不存在：%s" % ", ".join(missing))
-
-    # ④ 打 tag + 推送
-    step("④ 打 tag 并推送")
-    if out(["git", "tag", "-l", tag]):
-        run(["git", "tag", "-d", tag])
+        timed("5. 构建安装包", lambda: run([sys.executable, str(ROOT / "tools" / "build_release.py"), "--skip-test"]))
+    validate_local_assets(*assets)
     run(["git", "tag", tag])
-    run(["git", "push", "origin", "main"])
-    run(["git", "push", "origin", tag])
-
-    # ⑤ 建 Release（三个资产）
-    step("⑤ 创建 GitHub Release")
-    existing = out(["gh", "release", "view", tag, "--json", "tagName"])
-    if existing:
-        run(["gh", "release", "delete", tag, "--yes"])
-    run(["gh", "release", "create", tag,
-         "--title", "AutoQuill %s" % tag,
-         "--notes-file", str(notes),
-         str(exe), str(sha_file), str(install_bundle)])
-    print("✓ Release：https://github.com/%s/releases/tag/%s" % (REPO, tag))
-
-    # ⑥ 回下载校验（三源一致才敢说"能一键更新"）
-    step("⑥ 回下载校验 sha256")
-    tmp = Path(tempfile.mkdtemp(prefix="aq_rel_"))
-    try:
-        run(["gh", "release", "download", tag, "--dir", str(tmp),
-             "--pattern", "*.exe"])
-        got = _sha256(tmp / exe.name)
-        want = (exe.with_suffix(exe.suffix + ".sha256")
-                .read_text(encoding="utf-8").strip())
-        api = out(["gh", "api", "repos/%s/releases/latest" % REPO,
-                   "--jq", '.assets[] | select(.name | endswith(".exe")) | .digest'])
-        api = api.replace("sha256:", "").strip()
-        print("下载包 : %s" % got)
-        print("侧车   : %s" % want)
-        print("API    : %s" % api)
-        if not (got == want == api):
-            sys.exit("✗ 三源 sha256 不一致——一键更新会被拒绝，请检查")
-        print("✓ 三源一致")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    step("完成")
-    print("  %s" % exe)
-    print("  https://github.com/%s/releases/tag/%s" % (REPO, tag))
-    print("  （CI 在后台跑，稍后 `gh run list` 看结果）")
+    timed("6. 推送 main 和 tag", lambda: run(["git", "push", "--atomic", "origin", "main", tag]))
+    timed("7. 创建 Release", lambda: create_release(tag, notes, assets))
+    timed("8. 校验发布资产", lambda: validate_published_assets(tag, *assets, args.verify_download))
+    print(f"发布完成：https://github.com/{REPO}/releases/tag/{tag}")
+    print("main 的完整 CI 已在后台触发；安装演练与完整回下载按改动需要执行。")
     return 0
 
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RuntimeError as exc:
+        sys.exit(f"✗ {exc}")

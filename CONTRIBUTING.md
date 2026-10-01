@@ -61,7 +61,14 @@
 
 ## 5. 提交信息规范
 
-遵循 Conventional Commits：
+发布提交必须以版本号开头，tag 与安装包使用相同版本：
+
+```text
+v5.0.7: 确认一次后自动完成更新
+```
+
+Release 标题为 `v5.0.7 — AutoQuill`，tag 为 `v5.0.7`。
+`tools/release.py` 自动添加版本前缀；日常不发版的开发提交可使用 Conventional Commits：
 
 ```
 <type>: <一句话说明>
@@ -94,9 +101,8 @@
 |---|---|
 | `AutoQuill-Setup-<VERSION>.exe` | 必须。Windows x64 安装包 |
 | `AutoQuill-Setup-<VERSION>.exe.sha256` | 必须。应用内更新的双源校验依赖它 |
-| `AutoQuill-Install-<VERSION>.zip` | 必须。包含安装包、SHA256 校验文件和专用 Temp 安装入口，供默认 Temp 路径不可用的用户下载 |
 
-- 安装 ZIP 仅包含上述 exe、sha256 和 `Install-AutoQuill-<VERSION>.cmd` 三个文件；不额外上传其它构建产物、文档、调试文件；
+- 发布仅上传 exe 与 sha256 两个资产，不制作备用安装 ZIP；
 - 发布说明写在 Release 正文里，不作为文件上传；
 - 其余由 GitHub 自动附加的 `Source code (zip/tar.gz)` 无需处理。
 
@@ -104,5 +110,14 @@
 
 - `core/version.py` 是**唯一事实来源**，tag 为 `v<VERSION>`；
 - 遵循语义化版本：修复 `PATCH`、新增向后兼容功能 `MINOR`、不兼容变更 `MAJOR`；
-- `README.md`、`installer/AutoQuill.iss` 的版本号由 `tools/build_release.py`
-  自动同步，不手工改。
+- `README.md`、`installer/AutoQuill.iss` 的版本号由 `tools/release.py`
+  在提交前自动同步，不再为构建后的版本回写另做提交。
+
+## 8. Git 与发布操作
+
+- 发布前查看 `git status --short`、`git diff --stat` 和 `tools/release.py --plan`，确认本次提交范围。
+- 使用配置好的 Git 身份，不在命令里临时改作者；中文或多行提交说明使用 UTF-8 文件。
+- 通过统一发布入口做一次版本提交；`main` 和本次 tag 一起原子推送，不推送所有历史 tag。
+- 不自动删除或移动已发布 tag，不删除既有 Release 后重建。
+- 文档调整只提交代码；普通小版本执行相关测试，完整回归由 main 的 CI 在后台跑一次。
+- 固定步骤与加测条件见 [发布指南](docs/RELEASE-GUIDE.md)。

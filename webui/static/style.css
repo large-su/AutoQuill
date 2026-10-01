@@ -53,6 +53,7 @@
     -webkit-text-fill-color: transparent;
   }
   .top-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .btn.update-available { color: var(--amber); border-color: var(--amber); }
   .status-pill {
     display: flex; align-items: center; gap: 8px;
     padding: 5px 14px; border-radius: 999px;

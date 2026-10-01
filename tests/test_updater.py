@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from core import paths, update_stage as stage, updater
@@ -724,6 +725,133 @@ class QuitRequestTest(unittest.TestCase):
         self.assertIn("_request_app_quit", src)
         helper = inspect.getsource(update_api._request_app_quit)
         self.assertIn("request_quit", helper)
+
+
+class AutoInstallDownloadTest(unittest.TestCase):
+    """The download endpoint owns the single automatic-install decision."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_download_"))
+        self._paths = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._paths.start()
+        self._dir = mock.patch.object(updater, "resolve_install_dir",
+                                      return_value=str(self.tmp))
+        self._dir.start()
+        from webui import update_api
+        self.api = update_api
+        self.api._dl.update(running=False, bytes=0, total=0, error="", version="")
+        self.addCleanup(self._dir.stop)
+        self.addCleanup(self._paths.stop)
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def _plan(self):
+        return SimpleNamespace(
+            version="9.9.9", current="9.9.8", error="",
+            installer_url="http://example/setup.exe", installer_size=3,
+            dest=str(self.tmp / "setup.exe"), sha256="", sha_sources=(),
+            release_info={}, notes="", page_url="")
+
+    def test_query_flag_is_forwarded_to_worker(self):
+        plan = self._plan()
+        with mock.patch.object(self.api, "_current_release",
+                               return_value={"current": "9.9.8",
+                                             "latest": "9.9.9",
+                                             "has_update": True}), \
+                mock.patch.object(self.api, "_fetch_release_payload",
+                                  return_value={"tag_name": "v9.9.9",
+                                                "assets": [{"name": "AutoQuill-Setup-9.9.9.exe",
+                                                            "browser_download_url": "http://x"}]}), \
+                mock.patch.object(updater, "build_plan", return_value=plan), \
+                mock.patch.object(stage, "clear_download_artifacts"), \
+                mock.patch.object(self.api.threading, "Thread") as thread:
+            got = self.api.api_update_download(auto_install=True)
+        self.assertTrue(got["ok"])
+        thread.assert_called_once()
+        self.assertIs(thread.call_args.kwargs["args"][0], plan)
+        self.assertEqual(thread.call_args.kwargs["args"][1], True)
+
+    def test_auto_install_refuses_unsupported_install_directory(self):
+        with mock.patch.object(updater, "resolve_install_dir", return_value=None), \
+                mock.patch.object(self.api, "_current_release") as release:
+            got = self.api.api_update_download(auto_install=True)
+        self.assertFalse(got["ok"])
+        self.assertIn("不支持自动安装", got["message"])
+        release.assert_not_called()
+
+    def test_auto_install_refuses_when_an_install_is_applying(self):
+        with mock.patch.object(stage, "load",
+                               return_value={"stage": stage.STAGE_APPLYING}), \
+                mock.patch.object(self.api, "_current_release") as release:
+            got = self.api.api_update_download(auto_install=True)
+        self.assertFalse(got["ok"])
+        self.assertIn("正在安装", got["message"])
+        release.assert_not_called()
+
+    def test_worker_applies_once_only_after_real_hash_verification(self):
+        plan = self._plan()
+        package = Path(plan.dest)
+        package.write_bytes(b"abc")
+        plan.sha256 = updater.sha256_file(package)
+        with mock.patch.object(updater, "download",
+                               return_value={"ok": True, "bytes": 3}), \
+                mock.patch.object(self.api, "api_update_apply",
+                                  return_value={"ok": True}) as apply:
+            self.api._download_worker(plan, auto_install=True)
+        self.assertEqual(apply.call_count, 1)
+        self.assertEqual(stage.load()["stage"], stage.STAGE_STAGED)
+
+    def test_worker_hash_failure_never_applies_and_marks_failed(self):
+        plan = self._plan()
+        package = Path(plan.dest)
+        package.write_bytes(b"abc")
+        plan.sha256 = "0" * 64
+        with mock.patch.object(updater, "download",
+                               return_value={"ok": True, "bytes": 3}), \
+                mock.patch.object(self.api, "api_update_apply") as apply:
+            self.api._download_worker(plan, auto_install=True)
+        apply.assert_not_called()
+        self.assertEqual(stage.load()["stage"], stage.STAGE_FAILED)
+
+    def test_download_only_never_installs_without_explicit_intent(self):
+        plan = self._plan()
+        Path(plan.dest).write_bytes(b"abc")
+        plan.sha256 = updater.sha256_file(plan.dest)
+        with mock.patch.object(updater, "download", return_value={"ok": True, "bytes": 3}), \
+                mock.patch.object(self.api, "api_update_apply") as apply:
+            self.api._download_worker(plan)
+        apply.assert_not_called()
+        self.assertEqual(stage.load()["stage"], stage.STAGE_STAGED)
+        self.assertFalse(stage.load()["auto_install"])
+
+    def test_install_refusal_retains_package_and_reason(self):
+        plan = self._plan()
+        package = Path(plan.dest)
+        package.write_bytes(b"abc")
+        plan.sha256 = updater.sha256_file(package)
+        with mock.patch.object(updater, "download", return_value={"ok": True, "bytes": 3}), \
+                mock.patch.object(self.api, "api_update_apply",
+                                  return_value={"ok": False, "message": "宿主无法启动"}):
+            self.api._download_worker(plan, auto_install=True)
+        state = stage.load()
+        self.assertEqual(state["stage"], stage.STAGE_FAILED)
+        self.assertIn("宿主无法启动", state["error"])
+        self.assertTrue(package.exists())
+
+    def test_http_auto_install_query_is_parsed_as_boolean(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        app = FastAPI()
+        app.include_router(self.api.router)
+        with mock.patch.object(self.api, "_current_release", return_value={
+                "has_update": True, "latest": "9.9.9", "current": "9.9.8"}), \
+                mock.patch.object(self.api, "_fetch_release_payload", return_value={}), \
+                mock.patch.object(self.api, "_release_payload_for", return_value={}), \
+                mock.patch.object(updater, "build_plan", return_value=self._plan()), \
+                mock.patch.object(updater, "parse_release", return_value={}), \
+                mock.patch.object(self.api, "threading") as threads:
+            response = TestClient(app).post("/api/update/download?auto_install=true")
+        self.assertTrue(response.json()["ok"])
+        self.assertIs(threads.Thread.call_args.kwargs["args"][1], True)
 
 
 if __name__ == "__main__":

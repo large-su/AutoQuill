@@ -3,9 +3,7 @@ name: test
 on:
   push:
     branches: [main]
-    tags: ["v*"]
-  # 去掉 pull_request 触发：本仓库的流程是直接推 main，
-  # 每次推 main + 打 tag 会触发两次完全相同的测试（用户 2026-09-29 反馈 CI 慢）。
+  # main 与发布 tag 指向同一提交，仅 main 触发一次完整回归。
   workflow_dispatch:
 
 # 同一 ref 连推时只保留最新一次，避免排队白等
