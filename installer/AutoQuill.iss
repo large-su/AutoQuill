@@ -13,7 +13,7 @@
 ; ============================================================
 
 #define MyAppName "AutoQuill"
-#define MyAppVersion "5.0.2"
+#define MyAppVersion "5.0.3"
 #define MyAppPublisher "AutoQuill"
 #define MyAppExeName "AutoQuill.exe"
 
