@@ -541,6 +541,123 @@ class DetachHostTest(unittest.TestCase):
         self.assertEqual(got, ["prog.exe", "C:\\a b\\c.exe", "--pid", "7"])
 
 
+class ApplyEndpointTest(unittest.TestCase):
+    """`/api/update/apply` 真正跑一遍（不碰网络、不装东西）。
+
+    ★ 2026-10-01 线上事故：这一步里写错了方法名（`stage.file()`，
+      正确是 `stage.stage_file()`）→ 接口 500 → 界面拿到纯文本
+      「Internal Server Error」→ 弹出「Unexpected token 'I' ... is not valid JSON」。
+      当时的测试只覆盖了纯函数，**没有真正调用这条路径**，所以没抓到。
+      这组用例就是补这个缺口。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_apply_"))
+        self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._p.start()
+        from core import update_stage as stage
+        self.stage = stage
+        os.environ["AQ_DATA_DIR"] = str(self.tmp)
+
+    def tearDown(self):
+        self._p.stop()
+
+    def _staged(self, installer: Path):
+        self.stage.update(stage=self.stage.STAGE_STAGED, version="9.9.9",
+                          current="1.0.0", installer=str(installer),
+                          sha256="a" * 64, install_dir=str(self.tmp))
+
+    def test_apply_does_not_touch_the_network(self):
+        """安装阶段不允许访问网络（限流/非 JSON 响应都会变成 500）。"""
+        import inspect
+        from webui import update_api
+        src = inspect.getsource(update_api.api_update_apply)
+        src += inspect.getsource(update_api._apply_impl)
+        for bad in ("_fetch_release_payload", "requests.", "urlopen"):
+            self.assertNotIn(bad, src, bad)
+
+    def test_spawn_path_runs_without_attribute_error(self):
+        """真正执行 _spawn_detached_host（方法名打错会在这里炸）。"""
+        from webui import update_api
+        with mock.patch.object(update_api, "_wait_host_started",
+                               return_value=True), \
+                mock.patch("subprocess.Popen") as popen:
+            ok, detail = update_api._spawn_detached_host(
+                ["powershell.exe", "-NoProfile", "-EncodedCommand", "AAA"],
+                str(self.stage.log_file()))
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "ok")
+        popen.assert_called_once()
+        # 启动脚本必须真的写到更新目录
+        self.assertTrue((Path(self.stage.stage_file()).parent
+                         / "spawn_host.vbs").exists())
+
+    def test_apply_returns_json_on_internal_error(self):
+        """内部异常必须转成 JSON，绝不能把 500 抛给界面。"""
+        from webui import update_api
+        installer = self.tmp / "setup.exe"
+        installer.write_bytes(b"MZ")
+        self._staged(installer)
+        with mock.patch.object(update_api, "_spawn_detached_host",
+                               side_effect=AttributeError(
+                                   "module 'core.update_stage' has no attribute 'file'")):
+            got = update_api.api_update_apply()
+        self.assertFalse(got["ok"])
+        self.assertIn("启动安装失败", got["message"])
+        # 真机可读：把原始异常文本带出来，别再让用户只看一句「内部错误」
+        self.assertIn("no attribute 'file'", got["message"])
+
+    def test_apply_refuses_when_nothing_staged(self):
+        from webui import update_api
+        got = update_api.api_update_apply()
+        self.assertFalse(got["ok"])
+        self.assertIn("先下载", got["message"])
+
+    def test_apply_reports_missing_installer(self):
+        from webui import update_api
+        self._staged(self.tmp / "gone.exe")
+        got = update_api.api_update_apply()
+        self.assertFalse(got["ok"])
+        self.assertIn("安装包不见了", got["message"])
+
+    def test_apply_dry_run_skips_quit_request(self):
+        from webui import update_api
+        installer = self.tmp / "setup.exe"
+        installer.write_bytes(b"MZ")
+        self._staged(installer)
+        with mock.patch.object(update_api, "_wait_host_started",
+                               return_value=True), \
+                mock.patch("subprocess.Popen"), \
+                mock.patch.object(update_api, "_request_app_quit") as quit_mock:
+            got = update_api.api_update_apply(dry_run=True)
+        self.assertTrue(got["ok"], got)
+        quit_mock.assert_not_called()           # 演练不该把程序关掉
+
+    def test_never_writes_quit_flag_into_a_live_config(self):
+        """测试绝不能把「退出请求」写进真实配置。
+
+        ★ 这条是被自己坑出来的：apply 的正常路径会调用真正的
+          `launcher_config.request_quit()`；测试若没隔离数据目录，就会往
+          用户在用的 launcher.json 里写退出标记 —— 用户软件下次启动会
+          「刚起来就自己退」。这里把 `_request_app_quit` 换掉，
+          并断言真实配置里没有被写入。
+        """
+        from webui import update_api
+        from core import launcher_config
+        installer = self.tmp / "setup.exe"
+        installer.write_bytes(b"MZ")
+        self._staged(installer)
+        with mock.patch.object(update_api, "_wait_host_started",
+                               return_value=True), \
+                mock.patch("subprocess.Popen"), \
+                mock.patch.object(update_api, "_request_app_quit") as quit_mock:
+            got = update_api.api_update_apply()
+        self.assertTrue(got["ok"], got)
+        quit_mock.assert_called_once()
+        self.assertFalse(launcher_config.load().get("quit_requested_at"),
+                         "退出标记泄漏到真实配置了")
+
+
 class QuitRequestTest(unittest.TestCase):
     """更新时必须**真正请求退出**（否则主程序不退、宿主白等、更新卡死）。"""
 
@@ -557,10 +674,15 @@ class QuitRequestTest(unittest.TestCase):
             self.assertFalse(launcher_config.load().get("quit_requested_at"))
 
     def test_apply_endpoint_requests_quit(self):
-        """apply 接口必须调用退出请求（源码级契约，防回归）。"""
+        """apply 接口必须调用退出请求（源码级契约，防回归）。
+
+        注：退出请求在 `_apply_impl` 里（apply 只是异常包装层），
+        所以两处源码合起来看。
+        """
         import inspect
         from webui import update_api
-        src = inspect.getsource(update_api.api_update_apply)
+        src = (inspect.getsource(update_api.api_update_apply)
+               + inspect.getsource(update_api._apply_impl))
         self.assertIn("_request_app_quit", src)
         helper = inspect.getsource(update_api._request_app_quit)
         self.assertIn("request_quit", helper)

@@ -2445,6 +2445,23 @@ $("mcWeb").addEventListener("click", () => {
 
 /* ---------- 检查更新 ---------- */
 
+/** 解析接口响应：服务端异常时返回的是纯文本（不是 JSON），不能直接 r.json()。
+ *  ★ 2026-10-01 实测：apply 接口 500 时界面弹出
+ *    「Unexpected token 'I', "Internal S"... is not valid JSON」——
+ *    用户完全看不懂。这里统一转成人话。 */
+async function readApiJson(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    if (!r.ok) {
+      throw new Error("服务端返回 " + r.status + "（内部错误）；"
+        + "请查看日志 %APPDATA%\\AutoQuill\\logs\\launcher.log");
+    }
+    throw new Error("服务端返回格式异常：" + String(text).slice(0, 120));
+  }
+}
+
 async function checkUpdate() {
   const btn = $("btnUpdate");
   btn.disabled = true;
@@ -2452,7 +2469,7 @@ async function checkUpdate() {
   btn.textContent = "检查中…";
   try {
     const r = await fetch("/api/update/check");
-    const d = await r.json();
+    const d = await readApiJson(r);
     if (d.error) {
       btn.textContent = orig;
       // 失败也要给出路：说清原因 + 上次已知结果 + 一键打开发布页
@@ -2501,7 +2518,7 @@ async function startAutoUpdate(version) {
   btn.textContent = "准备下载…";
   try {
     const r = await fetch("/api/update/download", { method: "POST" });
-    const d = await r.json();
+    const d = await readApiJson(r);
     if (!d.ok) { alert("无法开始更新：" + (d.message || "未知原因")); 
       btn.textContent = "检查更新"; btn.disabled = false; return; }
     pollUpdateStatus(version);
@@ -2518,7 +2535,7 @@ function pollUpdateStatus(version) {
   const tick = async () => {
     let st;
     try {
-      st = await (await fetch("/api/update/status")).json();
+      st = await readApiJson(await fetch("/api/update/status"));
     } catch (e) { return; }               // 网络抖动：下一轮再试
     const dl = st.download || {};
     if (st.stage === "downloading" || dl.running) {
@@ -2567,7 +2584,7 @@ async function applyUpdate() {
   btn.textContent = "正在安装…";
   try {
     const r = await fetch("/api/update/apply", { method: "POST" });
-    const d = await r.json();
+    const d = await readApiJson(r);
     if (!d.ok) {
       alert("无法开始安装：" + (d.message || "未知原因"));
       btn.disabled = false;
@@ -2575,9 +2592,9 @@ async function applyUpdate() {
       return;
     }
     btn.textContent = "即将重启…";
-    // 换装子进程会结束本程序并重启新版本；这里不必再做什么
+    // 换装宿主会结束本程序并重启新版本；这里不必再做什么
   } catch (e) {
-    alert("无法开始安装：" + e.message);
+    alert("无法开始安装：" + (e && e.message ? e.message : e));
     btn.disabled = false;
     btn.textContent = "重启并安装";
   }

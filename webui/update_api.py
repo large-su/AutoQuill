@@ -217,15 +217,26 @@ def api_update_download():
 def api_update_apply(dry_run: bool = False):
     """拉起隐藏的换装宿主，并**真正请求本程序退出**，由宿主装完重启。
 
-    ★ 2026-09-29 线上事故的两个根因（都在这一个函数里）：
-      1. 换装进程曾经是 `AutoQuill.exe --apply-update` —— 但冻结态入口是
-         **launcher**（先接管并开窗口），于是它把这次调用当成「正常启动」：
-         开窗口 → 抢单实例 → 失败退出，黑框不停弹；主程序却一直没退出。
-         → 现在换装宿主是 **PowerShell**（CREATE_NO_WINDOW 隐藏），绝不自我循环。
-      2. 这里只 spawn 了子进程，**从来没请求退出**——而本程序的退出要由启动器做
-         （`/api/launcher/quit` 写标志、启动器 5 秒轮询到才退）。
-         → 现在 spawn 之后**立刻写退出请求**，启动器随即退出，宿主才开始安装。
+    ★ 这一步绝不访问网络：安装所需的一切（安装包路径、校验和、安装目录）在
+      下载阶段就已存进 stage.json。这里再请求一次 GitHub 只会引入新的失败点
+      （限流 / 非 JSON 响应），并把 500 传给界面。
+      （2026-10-01 实测：这一步曾因 GitHub 403 限流叠加一个方法名打错而 500，
+        界面只看到一句「Unexpected token 'I', "Internal S"... is not valid JSON」。）
+
+    ★ 任何异常都必须转成 JSON 返回：界面用 `r.json()` 解析响应，
+      一旦返回纯文本 500，用户看到的是一句毫无意义的 JSON 解析错误。
     """
+    try:
+        return _apply_impl(dry_run=dry_run)
+    except Exception as exc:                # noqa: BLE001
+        log.exception("更新：启动安装失败")
+        stage.mark_failed("启动安装失败：%s" % exc)
+        return {"ok": False,
+                "message": "启动安装失败：%s。已保留安装包，可手动运行安装包完成更新。"
+                           % exc}
+
+
+def _apply_impl(dry_run=False):
     state = stage.load()
     if state.get("stage") != stage.STAGE_STAGED:
         return {"ok": False, "message": "还没有可安装的版本（先下载并通过校验）"}
@@ -274,7 +285,8 @@ def _spawn_detached_host(cmd, log_path, dry_run=False):
 
     返回 (ok, detail)。
     """
-    script_path = Path(stage.file()).parent / "spawn_host.vbs"
+    # 启动脚本放在更新目录（由 stage 模块统一决定位置，别自己拼路径）
+    script_path = Path(stage.stage_file()).parent / "spawn_host.vbs"
     try:
         script_path.parent.mkdir(parents=True, exist_ok=True)
         # VBScript 交给 Windows 的是命令行字符串：首段含空格要加引号

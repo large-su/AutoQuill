@@ -4,6 +4,31 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号以 `core/version.py` 为唯一事实来源（发布 tag 为 `v<VERSION>`）。
 
+## v5.0.3 — 2026-10-01
+
+### Fixed
+
+- **应用内安装失败（HTTP 500）。** `/api/update/apply` 中使用了不存在的方法名
+  `stage.file()`（正确为 `stage.stage_file()`），接口抛出 `AttributeError`，
+  界面收到纯文本 500 后以 `r.json()` 解析，仅显示
+  `Unexpected token 'I', "Internal S"... is not valid JSON`。已更正方法名。
+- **安装阶段不再访问网络。** 安装所需的安装包路径、校验和与安装目录在下载阶段
+  已写入 `stage.json`，安装接口不再请求 GitHub API（此前叠加 API 限流会失败）。
+- **接口异常统一返回 JSON。** `api_update_apply()` 增加异常包装，内部错误转为
+  含原因的可读消息，避免向界面返回纯文本错误页。
+- **界面错误提示。** 新增 `readApiJson()`：响应非 JSON 时提示 HTTP 状态码并给出
+  日志路径，替代原来的 JSON 解析报错。
+
+### Added
+
+- 新增 6 例测试覆盖 `/api/update/apply` 真实调用路径（此前只覆盖纯函数，
+  因此未捕获上述方法名错误）：正常路径、内部异常转 JSON、未暂存时拒绝、
+  安装包缺失、演练模式不请求退出、测试不得写入真实配置。
+
+### Notes
+
+- 平台支持：Windows 10/11（x64）。
+- 单元测试 978 passed, 2 skipped。
 ## v5.0.2 — 2026-10-01
 
 发布校验版（release validation build），用于验证应用内一键更新全链路。
