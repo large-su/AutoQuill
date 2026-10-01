@@ -4,6 +4,45 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号以 `core/version.py` 为唯一事实来源（发布 tag 为 `v<VERSION>`）。
 
+## v5.0.4 — 2026-10-01
+
+仓库与文档规范化，无功能变更。
+
+### Changed
+
+- **移除第三方 AI 工具包。** `.claude/skills/`（`superpowers`、`code-review-skill`）
+  共 245 个文件移出版本控制并加入 `.gitignore`。这些文件属于第三方工具，
+  含其自身的 README、计划与测试，此前占仓库文件总数的 47% 并显示在仓库首页。
+  本地文件保留，不影响工具使用。
+- **README 重写。** 结构规范化为「元信息表 → 功能 → 系统要求 → 安装 → 首次使用 →
+  使用指南 → 生成通道 → 数据与隐私 → 常见问题 → 卸载 → 版本历史 → 开发」；
+  版本历史由 40 余条超长条目收敛为「版本 / 日期 / 一句话」表，完整记录指向 CHANGELOG。
+  篇幅由 341 行降至 243 行。
+- **历史文档归档。** `REVIEW-2026-08-30.md`、`REVIEW-2026-08-versions.md`、
+  `REVIEW-perf-2026-09-23.md`、`IMPROVEMENT-PLAN-2026-08.md` 及
+  `guidance/AutoQuill_change_request_01.md` 移入 `docs/archive/`，
+  文档头状态标记为「已归档」，正文不改动。
+- 根目录散落脚本归位：`count_code.py`、`visualize_usage.py`、`feedback.py`
+  移入 `tools/`，并修正移动后的路径假设（仓库根定位、`sys.path` 引导）。
+- `tools/count_code.py` 增加目录排除规则：`.claude`、`.venv`、`build`、`dist`、
+  `release` 不再计入统计（此前第三方包会带偏结果）。
+- `tools/visualize_usage.py` 的 matplotlib 改为显式可选依赖，缺失时输出安装指引。
+
+### Added
+
+- `CONTRIBUTING.md`：目录职责、文档头格式、文档生命周期、提交信息类型与
+  发布资产范围。
+- `docs/RELEASE-GUIDE.md`：Release 说明与 CHANGELOG 的写作规范、章节顺序、
+  用词约定与发布流程。
+- `archive/README.md`、`tools/archive/README.md`：说明两个归档目录的内容与
+  「只读、不再维护」约定。
+- 全部自有文档增加统一文档头（适用版本 / 最后更新 / 状态 / 说明），共 14 份。
+
+### Notes
+
+- 平台支持：Windows 10/11（x64）。
+- 本版无功能变更，可用应用内更新直接升级。
+- 单元测试 978 passed, 2 skipped。
 ## v5.0.3 — 2026-10-01
 
 ### Fixed

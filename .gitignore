@@ -69,3 +69,9 @@ AutoQuill.exe
 
 # 一键更新的运行时产物（安装包/状态/日志）——不属于源码
 data/update/
+
+# ── 第三方 AI 工具包（vendored，仅本机） ──────────────────────
+# .claude/skills/ 下是第三方 skill 包（superpowers、code-review-skill），
+# 含它们自己的 README/计划/测试，与本项目无关，不应进版本库
+# （2026-10-01：此前 245 个文件被提交，占了仓库文件数的 47%，全排在首页）。
+.claude/skills/
