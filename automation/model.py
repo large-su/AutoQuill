@@ -44,6 +44,9 @@ TASK_TYPES = {
         "default_window": {"start": "20:30", "end": "22:30"},
         "desc": "读当期打卡页；关注/赞同还没达成时补做（含取关再关注兜底）",
         "params": {},
+        # 用户口径（2026-10-01）：打卡**本身只有一次** —— 次数固定为 1，
+        # 设置页不显示「每日 N 项 / 最小间隔」输入框（只显示一句说明）。
+        "cap_fixed": True,
     },
     "reply_comment": {
         "label": "回复评论",
@@ -59,6 +62,8 @@ TASK_TYPES = {
         "desc": "挑最友善的读者评论回复（默认演练：只生成不发送）",
         # dry_run 默认 True：用户要求先演练两天，语气确认后再切自动
         "params": {"dry_run": True},
+        # 用户口径（2026-10-01）：评论是**一次性回复** —— 只设条数，不设间隔。
+        # （一天一班把该回的都回完，所以"同类最小间隔"对它没有意义。）
     },
     "publish_drafts": {
         "label": "发布草稿",
@@ -143,10 +148,18 @@ def _norm_task(task_type, raw):
     if isinstance(raw.get("params"), dict):
         params.update(raw["params"])
     enabled = bool(raw.get("enabled", task_type in DEFAULT_ENABLED))
+    # 间隔：一天一班的单次任务（job_mode=single：打卡、回复评论）不设间隔——
+    # 用户口径 2026-10-01：「打卡只有一次，不需要次数也不需要间隔；
+    # 评论只需要次数，不需要间隔，因为评论都是一次性回复的」。
+    if meta.get("job_mode") == "single":
+        gap = 0
+    else:
+        gap = raw.get("min_gap_minutes")                 # None = 用计划全局值
     return {
         "enabled": enabled,
-        "daily_cap": cap,
-        "min_gap_minutes": raw.get("min_gap_minutes"),   # None = 用计划全局值
+        # 每天只有一次的项（打卡）：次数固定 1、不可配
+        "daily_cap": 1 if meta.get("cap_fixed") else cap,
+        "min_gap_minutes": gap,
         # None = 用计划全局值；任务类型自带默认时段时用它的（如打卡巡检在晚上）
         "window": raw.get("window") or meta.get("default_window"),
         "params": params,

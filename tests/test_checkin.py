@@ -476,6 +476,80 @@ class CommentFallbackTest(unittest.TestCase):
         self.assertFalse(r['sent'], r)
 
 
+class CheckinLedgerHealTest(unittest.TestCase):
+    '''评论发出去了，打卡「发布评论」必须显示达成。
+
+    用户反馈（2026-10-01）：评论发出去了、打卡其实已经完成，界面却一直显示
+    「发布评论✗」。根因有二：
+      ① 回复评论成功后**本地从没记账**，✓ 完全依赖读打卡页；
+      ② 打卡页有自己的统计延迟，刚发完就读往往还是「去评论」，而旧的
+         update_tasks 会用页面数据**覆盖**掉本地认知。
+    修法：回复成功即记账 + 台账追溯补记 + update_tasks 只升不降。
+    '''
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='aq_heal_')
+        self._orig_root = paths.DATA_ROOT
+        paths.DATA_ROOT = self.tmp
+
+    def tearDown(self):
+        paths.DATA_ROOT = self._orig_root
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_heal_marks_comment_done_from_sent_reply(self):
+        ck.append_reply({'reply': '说得对，我改。', 'sent': True})
+        st = ck.fresh_state()
+        self.assertTrue(ck.needs(st, 'comment'))
+        healed = ck.heal_from_ledger(st)
+        self.assertEqual(healed, ['comment'])
+        self.assertFalse(ck.needs(st, 'comment'))
+        self.assertIn('发布评论✓', ck.summary(st)['line'])
+
+    def test_heal_ignores_dry_run_replies(self):
+        '''演练（dry_run）没真的发出去，绝不能算达成。'''
+        ck.append_reply({'reply': '演练内容', 'sent': True, 'dry_run': True})
+        st = ck.fresh_state()
+        self.assertEqual(ck.heal_from_ledger(st), [])
+        self.assertTrue(ck.needs(st, 'comment'))
+
+    def test_heal_ignores_unsent_replies(self):
+        ck.append_reply({'reply': '没发出去', 'sent': False})
+        st = ck.fresh_state()
+        self.assertEqual(ck.heal_from_ledger(st), [])
+
+    def test_heal_is_idempotent(self):
+        ck.append_reply({'reply': '发出去了', 'sent': True})
+        st = ck.fresh_state()
+        self.assertEqual(ck.heal_from_ledger(st), ['comment'])
+        self.assertEqual(ck.heal_from_ledger(st), [])   # 第二次不重复补
+
+    def test_page_read_never_downgrades_local_done(self):
+        '''打卡页统计滞后（还显示「去评论」）不能抹掉本地达成。'''
+        st = ck.fresh_state()
+        ck.mark_done(st, 'comment', detail='回复读者评论 1 条')
+        stale_page = {'comment': {'title': '发布 1 条评论',
+                                  'action': '去评论', 'done': False}}
+        ck.update_tasks(st, stale_page)
+        self.assertFalse(ck.needs(st, 'comment'))
+        self.assertIn('发布评论✓', ck.summary(st)['line'])
+        self.assertTrue(st['tasks']['comment'].get('stale_page'))
+
+    def test_page_read_can_still_upgrade_to_done(self):
+        st = ck.fresh_state()
+        ck.update_tasks(st, {'comment': {'done': False}})
+        self.assertTrue(ck.needs(st, 'comment'))
+        ck.update_tasks(st, {'comment': {'done': True}})
+        self.assertFalse(ck.needs(st, 'comment'))
+
+    def test_reply_task_marks_comment_done_on_success(self):
+        '''源码级契约：回复成功后必须记账（防回归到「从不记账」）。'''
+        import inspect
+        from applications.zhihu_story import reply_task
+        src = inspect.getsource(reply_task)
+        self.assertIn('checkin.mark_done', src)
+        self.assertIn("'comment'", src)
+
+
 if __name__ == '__main__':
     unittest.main()
 

@@ -559,10 +559,21 @@ def _single_axis_payload(day, day_data, plan=None):
 
 
 def _checkin_detail():
-    """打卡详情（读 core.checkin 的当日快照；读不到就返回空壳）。"""
+    """打卡详情（读 core.checkin 的当日快照；读不到就返回空壳）。
+
+    ★ 读之前先做一次**台账追溯**：今天真的发出去了的评论，即使打卡页统计还没
+      跟上，也要显示成达成（2026-10-01 用户反馈的显示 bug）。只补不删，
+      补上了立刻落盘，避免每次刷新都重算。
+    """
     try:
         from core import checkin
         state = checkin.load_state()
+        healed = checkin.heal_from_ledger(state)
+        if healed:
+            summary = checkin.summary(state)
+            checkin.set_result(state, summary["ok"], summary["line"])
+            checkin.save_state(state)
+            log.info("打卡台账追溯补记：%s", healed)
         return {
             "date": state.get("date") or "",
             "campaign": state.get("campaign_title") or "",

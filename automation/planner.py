@@ -82,6 +82,12 @@ def feasible_count(window_minutes, min_gap_minutes):
         (N - 1) * G ≤ W   →   N ≤ floor(W / G) + 1
     例：08:00–23:30 = 930 分钟，G = 60 → floor(930/60) + 1 = 16 个。
     G ≤ 0（不限制间隔）时退化为「按分钟铺」——上限取时段分钟数。
+
+    ★ 但**第一个作业也必须放得下**：W < G 时一个都排不下（上限 0）。
+      旧实现返回 floor(W/G)+1 = 1，等于承诺一个放不进去的作业——
+      于是排班先排出它、再在「避让同刻任务」阶段把它降级成跳过，
+      界面上同一件事报两遍（「配额排不下」+「避让后越出时段」），
+      而且真的会把作业排到时段之外。真机在 22:40 启动时看到过这个组合。
     """
     try:
         w = float(window_minutes)
@@ -92,6 +98,8 @@ def feasible_count(window_minutes, min_gap_minutes):
         return 1
     if g <= 0:
         return max(1, int(w))
+    if w < g:
+        return 0                      # 连一个最小间隔都放不下
     return max(1, int(w // g) + 1)
 
 
@@ -243,6 +251,11 @@ def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
                          % (cap, meta["unit"], window_minutes, min_gap, limit,
                             meta["unit"])),
             })
+        if limit <= 0:
+            # 一个都排不下：上面的说明已经把原因讲清楚了。
+            # 若继续往下走，时刻表为空 → 碰撞阶段会**再补一条**
+            # 「避让同刻任务后越出运行时段」，同一件事报两遍（真机看到的就是这种刷屏）。
+            continue
         times = spread_times(eff_start, win_end, min(remaining, limit), min_gap, rng,
                              jitter_minutes=jitter, spread=spread)
         for i, when in enumerate(times):
@@ -605,7 +618,13 @@ def summarize(now, plan, day_data):
         pending = len([j for j in jobs if j.get("status") == STATUS_PLANNED])
         skipped = len([j for j in jobs if j.get("status") == STATUS_SKIPPED])
         win = cfg.get("window") or plan.get("window") or {}
-        min_gap = int(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
+        # 间隔取值：显式写在任务配置里的（含 0）优先——打卡/回复评论是单次任务，
+        # 间隔按 0（不设间隔）。原来用 `or` 会把 0 当成「没配」而退回全局 60，
+        # 界面上就会出现一个对单次任务毫无意义的「最小间隔 60 分钟」。
+        if cfg.get("min_gap_minutes") is not None:
+            min_gap = int(cfg.get("min_gap_minutes") or 0)
+        else:
+            min_gap = int(plan.get("min_gap_minutes") or 60)
         start_t = parse_hhmm(win.get("start"), parse_hhmm("08:00"))
         end_t = parse_hhmm(win.get("end"), parse_hhmm("23:30"))
         win_minutes = ((end_t.hour * 60 + end_t.minute)
@@ -616,18 +635,26 @@ def summarize(now, plan, day_data):
             "lane": meta["lane"],
             "implemented": meta["implemented"],
             "enabled": bool(cfg.get("enabled")),
-            "cap": int(cfg.get("daily_cap") or 0),
+            # 每天只有一次的项（打卡）：次数恒为 1，不参与「时段÷间隔」的推算
+            "cap": 1 if meta.get("cap_fixed") else int(cfg.get("daily_cap") or 0),
             "window": win,
             "min_gap_minutes": min_gap,
             # ★ 上限 = floor(时段分钟 / 最小间隔) + 1：设置页据此提示「最多能排几个」
             "window_minutes": win_minutes,
-            "max_per_day": feasible_count(win_minutes, min_gap),
+            "max_per_day": 1 if meta.get("cap_fixed") or meta.get("job_mode") == "single"
+                           else feasible_count(win_minutes, min_gap),
             "done": done, "pending": pending, "failed": failed, "skipped": skipped,
             "desc": meta["desc"],
             # 单次任务（axis=single）不画在主时间轴上，改画「单次任务轴」
             "axis": meta.get("axis") or "",
             "single_stage": meta.get("single_stage") or 0,
             "job_mode": meta.get("job_mode") or "",
+            # 设置页据此决定显示哪些输入框（用户口径 2026-10-01）：
+            #   打卡：只有一次 → 不显示次数、不显示间隔
+            #   回复评论：只显示条数，不显示间隔（一天一班一次回完）
+            "cap_fixed": bool(meta.get("cap_fixed")),
+            "show_interval": meta.get("job_mode") != "single",
+            "once_a_day": meta.get("job_mode") == "single",
         }
     # 倒计时/进度只算主时间轴上的任务（单次任务有自己的轴，混在一起会误导）
     nxt = next_job(now, day_data)

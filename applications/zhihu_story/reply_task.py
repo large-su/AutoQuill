@@ -346,8 +346,27 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
             else:
                 skipped.append(record)
                 details.append('发送失败：%s' % (sent.get('detail') or ''))
+        # ★ 评论真的发出去了 → 立刻在**本地记账**里把打卡「发布评论」置为达成
+        #   （2026-10-01 用户反馈：评论发出去了，界面还显示打卡未完成）。
+        #   根因是这里从来没记过账，「发布评论✓」完全依赖读打卡页——而打卡页
+        #   有自己的统计延迟，刚发完就读往往还是「去评论」，于是那一格永远是 ✗。
+        #   注意：只认「真的发出去了」（ok 或 sent），失败/跳过绝不记账。
+        if done:
+            checkin.mark_done(
+                state, 'comment',
+                detail='回复读者评论 %d 条（%s）'
+                       % (len(done), done[0].get('author') or '读者'))
+            log.info('评论回复：已记账，打卡「发布评论」置为达成')
         # 顺带刷新打卡状态：评论任务在打卡页上算不算达成，一次页面就读得到
-        _refresh_checkin_after_reply(browser, state, progress)
+        # （本地已记账的项在 update_tasks 里只升不降，页面滞后也抹不掉）
+        summary = _refresh_checkin_after_reply(browser, state, progress)
+        if done and summary and not summary.get('ok'):
+            # 页面还没跟上（打卡页统计有延迟）：以本地记账为准重算一次摘要，
+            # 免得通知里又出现「发布评论✗」把用户搞糊涂。
+            fresh = checkin.summary(state)
+            checkin.set_result(state, fresh['ok'], fresh['line'])
+            checkin.save_state(state)
+            _say(progress, fresh['line'])
     finally:
         if driver is not None:
             try:
@@ -395,13 +414,17 @@ def _record_run(collected, candidates, drop_counts, picked, units, dry_run,
 
 
 def _refresh_checkin_after_reply(browser, state, progress=None):
-    '''回复完顺手读一次打卡页：把「发布 1 条评论」的达成情况记进当日快照。'''
+    '''回复完顺手读一次打卡页：把「发布 1 条评论」的达成情况记进当日快照。
+
+    返回最新摘要（读不到返回 None）。★ 页面读到什么**不会覆盖本地已记账的达成**
+    （core.checkin.update_tasks 只升不降）——打卡页有自己的统计延迟。
+    '''
     try:
         url = state.get('campaign_url') or ''
         if not url:
             found = browser.discover_campaign_url()
             if not found.get('ok'):
-                return
+                return None
             url = found['url']
             checkin.set_campaign(state, url, found.get('text') or '')
         info = browser.read_checkin_tasks(url)
@@ -409,9 +432,15 @@ def _refresh_checkin_after_reply(browser, state, progress=None):
             checkin.update_tasks(state, info['tasks'])
             if info.get('title'):
                 state['campaign_title'] = info['title']
+            # 台账追溯：已经发出去的评论补记达成（打卡页统计有延迟）
+            healed = checkin.heal_from_ledger(state)
+            if healed:
+                log.info('评论回复：台账追溯补记打卡项 %s', healed)
             summary = checkin.summary(state)
             checkin.set_result(state, summary['ok'], summary['line'])
             checkin.save_state(state)
             _say(progress, summary['line'])
+            return summary
     except Exception as exc:                     # noqa: BLE001
         log.debug('刷新打卡状态失败（不影响回复）：%s', exc)
+    return None

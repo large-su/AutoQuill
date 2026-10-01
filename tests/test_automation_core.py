@@ -44,6 +44,61 @@ def _plan(**tasks):
     return normalize_plan(raw)
 
 
+class TaskSettingsShapeTest(unittest.TestCase):
+    """任务设置的形状（用户口径 2026-10-01）：
+
+      打卡挑战：本身只有一次 → 不设次数、不设间隔；
+      评论    ：只需要次数，不需要间隔（都是一次性回复的）。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_shape_"))
+        self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._p.start()
+
+    def tearDown(self):
+        self._p.stop()
+
+    def test_checkin_is_once_with_fixed_cap_and_no_gap(self):
+        plan = normalize_plan({})
+        cfg = plan["tasks"]["checkin"]
+        self.assertEqual(cfg["daily_cap"], 1)
+        self.assertEqual(cfg["min_gap_minutes"], 0)
+
+    def test_checkin_cap_cannot_be_changed_by_user(self):
+        """用户手改 daily_cap 也无效：打卡就是一次。"""
+        plan = normalize_plan({"tasks": {"checkin": {"daily_cap": 7}}})
+        self.assertEqual(plan["tasks"]["checkin"]["daily_cap"], 1)
+
+    def test_reply_comment_keeps_count_but_has_no_gap(self):
+        plan = normalize_plan({"tasks": {"reply_comment": {"daily_cap": 5}}})
+        cfg = plan["tasks"]["reply_comment"]
+        self.assertEqual(cfg["daily_cap"], 5)        # 次数可配
+        self.assertEqual(cfg["min_gap_minutes"], 0)  # 但不需要间隔
+
+    def test_other_tasks_keep_the_global_gap(self):
+        """多班任务（发布草稿 / 全链路）必须保留全局最小间隔。"""
+        plan = normalize_plan({"min_gap_minutes": 60})
+        for t in ("publish_drafts", "full_chain"):
+            self.assertIsNone(plan["tasks"][t]["min_gap_minutes"])
+
+    def test_summary_flags_drive_the_ui(self):
+        now = datetime(2026, 10, 2, 6, 0, 0)
+        plan = normalize_plan({})
+        s = planner.summarize(now, plan, {"date": "2026-10-02", "schedule": []})
+        ck_in = s["per_type"]["checkin"]
+        self.assertTrue(ck_in["cap_fixed"])
+        self.assertFalse(ck_in["show_interval"])
+        self.assertEqual(ck_in["max_per_day"], 1)
+        rc = s["per_type"]["reply_comment"]
+        self.assertFalse(rc["cap_fixed"])
+        self.assertFalse(rc["show_interval"])        # 只显示次数
+        self.assertEqual(rc["max_per_day"], 1)       # 一天一班
+        fc = s["per_type"]["full_chain"]
+        self.assertTrue(fc["show_interval"])
+        self.assertGreater(fc["max_per_day"], 1)
+
+
 class StoreAtomicWriteTest(unittest.TestCase):
     """排班/计划落盘的原子写。
 
@@ -327,27 +382,35 @@ class PlannerTest(unittest.TestCase):
                                  j["planned_at"])
 
     def test_late_night_start_does_not_pile_up_past_jobs(self):
-        """复现线上场景：22:40 才改计划/启动，不能再从早上铺出十几条「已经过去的点」。"""
+        """复现线上场景：深夜才改计划/启动，不能再从早上铺出十几条「已经过去的点」。
+
+        ★ 断言只针对**本测试真正要守的东西**：不出现过去的点、不刷一屏跳过、
+          排不下的给一条说明。原来还断言「必须有 publish_drafts 排上」，
+          但深夜剩 50 分钟时**每一类最多 1 项**，两类会抢同一个时刻——
+          谁排上、谁退让是排班的公平性问题（另有测试覆盖），
+          与本测试的意图无关，不该在这里断言。
+        """
         plan = normalize_plan({"enabled": True, "tasks": {
             "publish_drafts": {"enabled": True, "daily_cap": 6},
             "full_chain": {"enabled": True, "daily_cap": 8},
-            # 隔离场景：新增的打卡/回复默认开启，这里显式关掉，
-            # 只验证「深夜启动不会把发布/撰写铺出一堆过去的点」
+            # 隔离场景：只验证「深夜启动不会把发布/撰写铺出一堆过去的点」
             "checkin": {"enabled": False},
             "reply_comment": {"enabled": False}}})
+        # 22:40 启动：只剩 50 分钟 < 最小间隔 60 分钟 → **一个都放不下**
+        # （feasible_count 现在正确返回 0，不再承诺一个放不进去的作业）。
+        # 于是每类只留**一条**说明，既不会有过去的点，也不会刷屏。
         late = datetime(2026, 9, 19, 22, 40, 0)
         day = planner.materialize_day(late, plan, {}, {})
         planned = [j for j in day["schedule"] if j["status"] == planner.STATUS_PLANNED]
         past = [j for j in planned
                 if datetime.fromisoformat(j["planned_at"]) < late]
         self.assertEqual(past, [], [j["planned_at"] for j in past])
-        # 剩余 50 分钟 + 最小间隔 60 分钟 → 每类最多 1 项（数学上限，见 feasible_count）
-        self.assertLessEqual(len(planned), 2)
-        self.assertTrue(any(j["type"] == "publish_drafts" for j in planned))
-        # 排不下的部分只留一条说明，不刷一屏跳过
+        self.assertEqual(planned, [], "50 分钟放不下 60 分钟的最小间隔：不该排任何作业")
         skipped = [j for j in day["schedule"] if j["status"] == planner.STATUS_SKIPPED]
-        self.assertLessEqual(len(skipped), 2)
-        self.assertTrue(any("排不下" in (j.get("note") or "") for j in skipped))
+        self.assertLessEqual(len(skipped), 2,
+                             [(j["type"], (j.get("note") or "")[:20]) for j in skipped])
+        self.assertTrue(all("排不下" in (j.get("note") or "") for j in skipped),
+                        "每类只留一条「排不下」说明，不再出现「避让同刻任务」的重复提示")
 
     def test_future_job_is_not_pushed_by_phantom_anchor(self):
         """还没到点的作业不该被「凭空 + 一个间隔」推走（线上把 22:50 的发布判死了）。"""
@@ -759,12 +822,14 @@ class CheckinScheduleTest(unittest.TestCase):
         self._p.stop()
 
     def test_checkin_is_single_job_per_day(self):
+        """一天只排一次班；★ 且次数恒为 1（用户口径 2026-10-01：
+        「打卡挑战本身只有一次，不需要设定次数」——即使配置文件里写了 3 也无效）。"""
         plan = _plan(checkin={"enabled": True, "daily_cap": 3})
         day = planner.materialize_day(self.now, plan, {}, {})
         jobs = [j for j in day["schedule"] if j["type"] == "checkin"]
         self.assertEqual(len(jobs), 1, "一天只排一次班，绝不摊成好几波")
-        self.assertEqual(jobs[0]["units"], 3, "一个作业扛全部配额")
-        self.assertEqual(jobs[0]["params"]["count"], 3)
+        self.assertEqual(jobs[0]["units"], 1, "打卡本身的配额恒为 1，不随配置变")
+        self.assertEqual(jobs[0]["params"]["count"], 1)
 
     def test_checkin_lands_in_its_own_evening_window(self):
         plan = _plan(checkin={"enabled": True, "daily_cap": 1})

@@ -186,19 +186,28 @@ class TestApplyDarkTitlebar(unittest.TestCase):
         self.assertEqual(dwm.call_args[0][0].value, 12345)
         diag.assert_not_called()
 
-    def test_shown_event_schedules_retry(self):
-        # 窗口显示事件后延迟补设一次（覆盖显示过程重置属性的竞态）
+    def test_shown_event_schedules_retries(self):
+        """窗口显示后要**多次**补设深色标题栏。
+
+        用户反馈（2026-10-01）：「软件上方又变成了白色」——原来只在显示后
+        0.3 秒补设一次，真机上（慢启动 / WebView2 首次合成）之后又被重置了。
+        现在按多档时间补设（幂等操作，重复设无副作用）。
+        """
         from tools.launcher import _apply_dark_titlebar
-        evt = _Evt()
         w = _Window(_Native(handle=42), events=_Events())
         with mock.patch("ctypes.windll.dwmapi.DwmSetWindowAttribute",
                         return_value=0), \
-             mock.patch("threading.Timer") as timer:
+                mock.patch("threading.Timer") as timer:
             _apply_dark_titlebar(w)
             self.assertEqual(len(w.events.shown._cbs), 1)
-            w.events.shown._cbs[0]()  # 触发窗口显示后的补设回调
-            timer.assert_called_once_with(0.3, mock.ANY)
-            self.assertEqual(timer.return_value.start.call_count, 1)
+            w.events.shown._cbs[0]()          # 触发窗口显示后的补设回调
+            delays = [c.args[0] for c in timer.call_args_list]
+            self.assertGreaterEqual(len(delays), 3, delays)
+            self.assertIn(0.3, delays)
+            self.assertTrue(any(d >= 3.0 for d in delays),
+                            "需要在若干秒后再补一次：慢启动时标题栏会被重置回白色")
+            # 每次 Timer 都要真的 start（否则补设不会发生）
+            self.assertEqual(timer.return_value.start.call_count, len(delays))
 
 
 class TestLogDiag(unittest.TestCase):

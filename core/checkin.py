@@ -31,6 +31,14 @@ TRACKED = ('follow', 'vote', 'comment')
 
 KIND_LABELS = {'follow': '关注知友', 'vote': '送出赞同', 'comment': '发布评论'}
 
+# 哪些项可以从本地台账追溯「其实已经做成了」（见 heal_from_ledger）。
+# 只放**有台账可查、且不可重复做**的项：评论发出去了就不可能再发一次，
+# 所以必须能从台账补记，不能干等打卡页。
+HEAL_RULES = {
+    'comment': {'flag': 'sent', 'exclude_dry': True,
+                'detail': '回复读者评论 %d 条（打卡页统计有延迟）'},
+}
+
 
 def _state_dir():
     from core import paths
@@ -136,9 +144,33 @@ def set_campaign(state, url, title=''):
 
 
 def update_tasks(state, tasks_by_key, now=None):
-    '''用打卡页解析结果刷新任务状态。'''
-    state['tasks'] = dict(tasks_by_key or {})
+    '''用打卡页解析结果刷新任务状态。
+
+    ★ 已达成**只升不降**（2026-10-01 用户反馈的显示 bug）：
+      打卡页有自己的统计延迟——刚发完评论就读，页面往往还是「去评论」。
+      以前这里直接覆盖，于是「本地明明做成了」被页面的旧状态抹掉，
+      界面上永远显示「发布评论✗」。现在只要页面本次读到 done=True 就置位，
+      而**已置位的绝不因为一次页面读回 False 而降级**（当天的达成事实不可否认）。
+    '''
+    new_tasks = dict(tasks_by_key or {})
+    old_map = {k: bool((v or {}).get('done'))
+               for k, v in (state.get('tasks') or {}).items()}
+    for key, task in new_tasks.items():
+        if not isinstance(task, dict):
+            continue
+        if old_map.get(key) and not task.get('done'):
+            task = dict(task)
+            task['done'] = True
+            task['stale_page'] = True      # 标记：这一项是本地记账的事实，页面还没跟上
+            new_tasks[key] = task
+    state['tasks'] = new_tasks
     state['checked_at'] = now_str(now)
+    for key in TRACKED:
+        if (state.get('done') or {}).get(key):
+            task = state['tasks'].get(key)
+            if isinstance(task, dict) and not task.get('done'):
+                task['done'] = True
+                task['stale_page'] = True
     return state
 
 
@@ -266,6 +298,35 @@ def summary(state, enabled_kinds=None):
 def set_result(state, ok, detail=''):
     state['result'] = {'ok': bool(ok), 'detail': detail or '', 'at': now_str()}
     return state
+
+
+def heal_from_ledger(state, now=None):
+    '''用**本地台账**把「已经做成但没记账」的项补上（返回补了哪几项）。
+
+    ★ 为什么需要（2026-10-01 用户反馈）：评论发出去了、打卡页却还没跟上，
+      而当时的代码没有本地记账，于是「发布评论」一直显示 ✗。
+      已经发出去的评论不可能再发一次，所以这里按台账**追溯**补记：
+      今天只要有一条真的发出去的评论（sent=True 且非演练），这一项就是达成的。
+
+    只读台账、只补不删；台账里没有就什么都不做。
+    '''
+    healed = []
+    try:
+        rows = replies_today(now=now)
+    except Exception:                       # noqa: BLE001 台账读不到不该影响主流程
+        return healed
+    for kind, rule in HEAL_RULES.items():
+        if (state.get('done') or {}).get(kind):
+            continue
+        hits = [r for r in rows
+                if r.get(rule['flag'])
+                and not (rule['exclude_dry'] and r.get('dry_run'))]
+        if not hits:
+            continue
+        mark_done(state, kind,
+                  detail='台账追溯：%s' % (rule['detail'] % len(hits)))
+        healed.append(kind)
+    return healed
 
 
 # ------------------------------------------------------------

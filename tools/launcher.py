@@ -340,13 +340,26 @@ def _apply_dark_titlebar(window):
             _log_diag(f"深色标题栏：{exc}")
 
     _apply()
-    # 窗口显示过程可能重置 DWM 属性（慢机器/冷启动上更明显），
-    # 显示后再补设一次，覆盖时序竞态
+    # 窗口显示过程可能重置 DWM 属性（慢机器/冷启动/WebView2 首次合成上更明显）。
+    # ★ 用户反馈（2026-10-01）：「软件上方又变成了白色」——说明单次补设在真机上
+    #   不够。改成**多档补设**（显示后 0.3s / 1.2s / 3s / 6s 各一次），
+    #   并只在日志里记失败，不打扰用户。幂等操作，重复设没有副作用。
+    def _retry(delay):
+        try:
+            threading.Timer(delay, _apply).start()
+        except Exception:                       # noqa: BLE001
+            pass
+
+    def _on_shown():
+        for delay in (0.3, 1.2, 3.0, 6.0):
+            _retry(delay)
+
     try:
-        window.events.shown += lambda: threading.Timer(
-            0.3, _apply).start()
+        window.events.shown += _on_shown
     except Exception:
         pass
+    # 兜底：万一没收到 shown 事件（个别 pywebview 后端不触发），按时间补设一次
+    _retry(4.0)
 
 
 def _window_icon():
@@ -431,19 +444,33 @@ def read_instance():
 
 
 def write_instance(port, pid=None):
-    """原子写实例文件；失败只记日志（单实例是增强，不该阻断启动）。"""
-    try:
-        path = instance_file_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(path) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"pid": int(pid or os.getpid()), "port": int(port),
-                       "started_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
-        os.replace(tmp, str(path))
-        return True
-    except Exception as exc:      # noqa: BLE001
-        _log_diag(f"实例文件写入失败：{exc!r}")
-        return False
+    """原子写实例文件；失败只记日志（单实例是增强，不该阻断启动）。
+
+    ★ 临时文件用**进程唯一名 + 退避重试**（2026-09-30 真机日志里出现过一次
+      `PermissionError(13)`：固定名 `.tmp` 被占用/被杀软扫描时直接写失败）。
+      失败也不阻断启动——第二实例检测靠互斥体，这个文件只是给"唤起已有窗口"用。
+    """
+    payload = {"pid": int(pid or os.getpid()), "port": int(port),
+               "started_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    path = instance_file_path()
+    for attempt in range(3):
+        tmp = "%s.%d.%d.tmp" % (path, os.getpid(), attempt)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, str(path))
+            return True
+        except Exception as exc:      # noqa: BLE001
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            if attempt == 2:
+                _log_diag(f"实例文件写入失败：{exc!r}")
+                return False
+            time.sleep(0.15 * (attempt + 1))
+    return False
 
 
 def clear_instance(port=None):

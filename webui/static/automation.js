@@ -528,21 +528,46 @@ function renderAutoTaskConfig() {
       + (m.implemented ? "" : " disabled") + "> " + esc(m.label) + "</label>"
       + "<span class=\"tag" + (m.implemented ? "" : " todo") + "\">"
       + (m.implemented ? "可用" : "待接入") + "</span></div>"
-      + "<div class=\"auto-task-desc\">" + esc(m.desc || "") + "</div>"
-      + "<div class=\"auto-task-ctl\">每日 <input type=\"number\" data-role=\"cap\" min=\"0\" max=\"99\" value=\""
-      + (cfg.daily_cap || 0) + "\"> " + esc(m.unit)
-      + "　最小间隔 <input type=\"number\" data-role=\"gap\" min=\"5\" max=\"720\" step=\"5\" value=\""
-      + (m.min_gap_minutes || 60) + "\"> 分钟</div>";
+      + "<div class=\"auto-task-desc\">" + esc(m.desc || "") + "</div>";
+    // 控制项按任务性质显示（用户口径 2026-10-01）：
+    //   打卡（cap_fixed）：本身只有一次 → 不设次数、不设间隔，只显示一句说明
+    //   回复评论（once_a_day）：一天一班一次回完 → 只设条数，不设间隔
+    const showCap = !m.cap_fixed;
+    const showGap = !!m.show_interval;
+    if (!showCap) {
+      html += "<div class=\"auto-task-ctl\">每天 <b>1</b> 次"
+        + "　<span class=\"auto-hint\">（本身只有一次，无需设置次数与间隔）</span></div>";
+    } else {
+      html += "<div class=\"auto-task-ctl\">每日 <input type=\"number\" data-role=\"cap\" min=\"0\" max=\"99\" value=\""
+        + (cfg.daily_cap || 0) + "\"> " + esc(m.unit);
+      if (showGap) {
+        html += "　最小间隔 <input type=\"number\" data-role=\"gap\" min=\"5\" max=\"720\" step=\"5\" value=\""
+          + (cfg.min_gap_minutes || m.min_gap_minutes || 60) + "\"> 分钟";
+      } else {
+        html += "　<span class=\"auto-hint\">（一天一班，一次做完，无需设置间隔）</span>";
+      }
+      html += "</div>";
+    }
     // 上限提示：N 个作业只有 N-1 个间隔 → 时段内最多 floor(时段/间隔)+1 个
     const cap = cfg.daily_cap || 0;
     const maxN = m.max_per_day || 0;
     const over = maxN > 0 && cap > maxN;
-    html += "<div class=\"auto-task-note" + (over ? " warn" : "") + "\">"
-      + "时段 " + (m.window_minutes || 0) + " 分钟 ÷ 间隔 " + (m.min_gap_minutes || 60)
-      + " 分钟 + 1 → 最多 <b>" + maxN + " " + esc(m.unit) + "</b>/天"
-      + (over ? "　⚠ 你设了 " + cap + " " + esc(m.unit) + "，多出的 " + (cap - maxN) + " "
-                + esc(m.unit) + " 排不下（按上限排班，时间轴上会标原因）" : "")
-      + "</div>";
+    var note;
+    if (!showCap) {
+      note = "每天只跑一次（时段 " + (m.window_minutes || 0) + " 分钟内择时）";
+    } else if (!showGap) {
+      note = "时段 " + (m.window_minutes || 0) + " 分钟内跑一班，一次最多 <b>"
+        + maxN + " " + esc(m.unit) + "</b>"
+        + (over ? "　⚠ 你设了 " + cap + " " + esc(m.unit) + "，多出的 "
+                  + (cap - maxN) + " " + esc(m.unit) + " 排不下" : "");
+    } else {
+      note = "时段 " + (m.window_minutes || 0) + " 分钟 ÷ 间隔 " + (m.min_gap_minutes || 60)
+        + " 分钟 + 1 → 最多 <b>" + maxN + " " + esc(m.unit) + "</b>/天"
+        + (over ? "　⚠ 你设了 " + cap + " " + esc(m.unit) + "，多出的 " + (cap - maxN) + " "
+                  + esc(m.unit) + " 排不下（按上限排班，时间轴上会标原因）" : "");
+    }
+    html += "<div class=\"auto-task-note" + (over && showCap && showGap ? " warn" : "") + "\">"
+      + note + "</div>";
     if (t === "full_chain") {
       const mode = ((cfg.params || {}).mode) || "single";
       html += "<div class=\"auto-task-ctl\">链路 <select data-role=\"mode\">"
