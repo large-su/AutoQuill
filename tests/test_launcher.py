@@ -235,7 +235,7 @@ class TestNoConsoleWindow(unittest.TestCase):
     """V4.2.1 正式版无黑框：windowed 打包 + 冻结态 stdout 重定向。"""
 
     def test_spec_is_windowed(self):
-        with open("build/AutoQuill.spec", encoding="utf-8") as f:
+        with open("installer/AutoQuill.spec", encoding="utf-8") as f:
             src = f.read()
         self.assertIn("console=False", src)
         self.assertNotIn("console=True", src)

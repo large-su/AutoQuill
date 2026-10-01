@@ -83,11 +83,11 @@ class DraftsDataLayerTest(unittest.TestCase):
         self.assertNotIn('.CreationCardContent-text span', js)
 
     def test_rel_to_date(self):
-        """相对时间 → 日期。
+        """相对时间 → 精确日期，覆盖日/月/年边界。
 
-        ★ 必须**冻结「现在」**：原来是先算 `now` 再调用 `_rel_to_date`，
-          跨午夜时两者不是同一天（CI 在 2026-10-01 00:0x 真的挂过：
-          `now` 算的是 09-30、调用时已是 10-01 → 期望 09-30 却得到 10-01）。
+        CI 曾在 UTC 2026-10-01 04:21 运行旧断言：它只要求「5 小时前」
+        仍属于当前月份，但生产函数返回 2026-09-30，这是跨日时的正确结果。
+        测试固定时钟并断言完整日期，避免依赖运行时区与当前时间。
         """
         fixed = datetime(2026, 10, 1, 12, 0, 0)
 
@@ -105,6 +105,21 @@ class DraftsDataLayerTest(unittest.TestCase):
             self.assertEqual(drafts._rel_to_date('2026-08-20 10:00'), '2026-08-20')
             self.assertEqual(drafts._rel_to_date(''), '')
             self.assertEqual(drafts._rel_to_date('无法识别'), '')
+
+        # 原 CI 触发条件：月初凌晨的 5 小时前属于上月。
+        fixed = datetime(2026, 10, 1, 4, 20, 0)
+        with mock.patch.object(drafts, "datetime", _FrozenDatetime):
+            self.assertEqual(drafts._rel_to_date('5 小时前'), '2026-09-30')
+
+        # 跨月：非闰年 3 月 1 日的前一小时属于 2 月。
+        fixed = datetime(2026, 3, 1, 0, 20, 0)
+        with mock.patch.object(drafts, "datetime", _FrozenDatetime):
+            self.assertEqual(drafts._rel_to_date('1 小时前'), '2026-02-28')
+
+        # 跨年：元旦前一小时属于上一年的 12 月 31 日。
+        fixed = datetime(2025, 1, 1, 0, 20, 0)
+        with mock.patch.object(drafts, "datetime", _FrozenDatetime):
+            self.assertEqual(drafts._rel_to_date('1 小时前'), '2024-12-31')
 
     def test_draft_html_text(self):
         self.assertEqual(drafts._draft_html_text('<p>你好</p><p>世界</p>'), '你好世界')

@@ -1,5 +1,5 @@
 # ============================================================
-# AutoQuill v3.0 — 统一入口
+# AutoQuill — 统一入口
 #
 # 用法：
 #   python main.py                 批量模式（默认）：收集素材 → 生成 → 发布
@@ -11,7 +11,7 @@
 #                               文风蒸馏 author_profiler）
 #   workflows/                → 工作流编排（知乎批量）
 #   core/                     → 核心领域（story_text 正文渲染、paths 路径）
-#   tools/                    → 开发期工具（不在运行时路径上）
+#   tools/                    → 启动器与开发工具
 #   web_drivers/              → LLM 网站驱动（DeepSeek DOM 驱动）
 #
 # 基础模块：
@@ -21,9 +21,8 @@
 #   llm_token_tracker.py → API 模式 Token 用量追踪
 #   config/              → 配置包（__init__ 框架配置 + story 业务参数 + JSON 运行时数据）
 #
-# 知识系统：
-#   kb_manager.py    → 知识库管理（配方积累、参考文章）
-#   archive/         → 归档模块（OCR/UIA 旧通道、meta_learner、image_gen 等）
+# 构建与呈现：
+#   installer/       → 冻结与安装器配置；退役实现从 Git 历史查阅
 #   rich_progress.py  → Rich 终端进度面板
 # ============================================================
 

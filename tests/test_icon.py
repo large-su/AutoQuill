@@ -71,7 +71,7 @@ class TestIconIntegration(unittest.TestCase):
     """图标接入点源码级断言：exe 资源 / 安装器 / 窗口 / 网页 favicon。"""
 
     def test_spec_embeds_icon_in_exe(self):
-        src = (ROOT / "build" / "AutoQuill.spec").read_text(encoding="utf-8")
+        src = (ROOT / "installer" / "AutoQuill.spec").read_text(encoding="utf-8")
         self.assertIn("icon='../assets/AutoQuill.ico'", src)
         # 打包态窗口图标走 datas（onedir 落在 exe 同目录 assets/）
         self.assertIn("('../assets/AutoQuill.ico', 'assets')", src)

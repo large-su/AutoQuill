@@ -11,7 +11,7 @@
 #   - playwright 驱动由 pyinstaller-hooks-contrib 的 hook 打包；
 #     浏览器本体用系统 Edge（browser_adapter 经 executable_path 直连）
 #
-# 构建：python -m PyInstaller build/AutoQuill.spec --noconfirm
+# 构建：python -m PyInstaller installer/AutoQuill.spec --noconfirm
 
 a = Analysis(
     ['../tools/launcher.py'],

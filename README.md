@@ -1,11 +1,11 @@
-﻿# AutoQuill v5.0.7
+﻿# AutoQuill v5.0.8
 
 本地的**知乎故事创作助手**：自动选题 → 学习指定作者的文风生成故事 → 写入知乎草稿。
 一键安装，无需 Python、无需命令行。
 
 | 项目 | 内容 |
 |---|---|
-| **当前版本** | v5.0.7|
+| **当前版本** | v5.0.8|
 | **平台** | Windows 10 / 11（x64） |
 | **发布页** | [Releases](https://github.com/large-su/AutoQuill/releases) |
 | **变更记录** | [CHANGELOG.md](CHANGELOG.md) |
@@ -81,7 +81,7 @@
 **校验安装包**（可选）：同目录的 `.sha256` 文件为安装包的 SHA256 值。
 
 ```powershell
-certutil -hashfile AutoQuill-Setup-5.0.7.exe SHA256
+certutil -hashfile AutoQuill-Setup-5.0.8.exe SHA256
 ```
 
 ---
@@ -213,6 +213,7 @@ certutil -hashfile AutoQuill-Setup-5.0.7.exe SHA256
 
 | 版本 | 日期 | 主要内容 |
 |---|---|---|
+| v5.0.8 | 2026-10-01 | 固定 Agent 发布规范；清理退役源码与过时文档；补充 CI 日期边界回归 |
 | v5.0.7 | 2026-10-01 | 更新只需一次确认；启动后静默提醒新版；精简发布流程与资产 |
 | v5.0.6 | 2026-10-01 | 修复打卡明细与完成汇总不一致；平台未同步时显示完成记录与提示 |
 | v5.0.5 | 2026-10-01 | 修复更新交接与完成判定；独立重启；真实 Windows 安装链路回归 |
@@ -239,7 +240,8 @@ certutil -hashfile AutoQuill-Setup-5.0.7.exe SHA256
 | 架构分层、运行方式、CLI、配置参考 | [docs/DEVELOPER.md](docs/DEVELOPER.md) |
 | 测试、校验、打包脚本与发布前检查 | [docs/QA-PLAYBOOK.md](docs/QA-PLAYBOOK.md) |
 | 目录职责、文档头、提交信息规范 | [CONTRIBUTING.md](CONTRIBUTING.md) |
-| Release 说明与 CHANGELOG 写作规范 | [docs/RELEASE-GUIDE.md](docs/RELEASE-GUIDE.md) |
+| 提交、打包、发布固定流程与验证分级 | [docs/RELEASE-GUIDE.md](docs/RELEASE-GUIDE.md) |
+| Agent 入口与仓库目录职责 | [AGENTS.md](AGENTS.md)、[docs/REPOSITORY-GUIDE.md](docs/REPOSITORY-GUIDE.md) |
 
 从源码运行：
 

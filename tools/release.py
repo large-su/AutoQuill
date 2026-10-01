@@ -202,6 +202,20 @@ def run_checks(paths, tests):
     run(["git", "diff", "--check"])
 
 
+def build_installer():
+    """Keep verbose packaging output off the normal release summary."""
+    log = ROOT / "logs" / f"release-build-{version()}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with log.open("w", encoding="utf-8") as stream:
+            run([sys.executable, str(ROOT / "tools" / "build_release.py"), "--skip-test"],
+                stdout=stream, stderr=subprocess.STDOUT)
+    except RuntimeError as exc:
+        tail = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
+        raise RuntimeError(f"构建失败，日志：{log}\n{tail}") from exc
+    print(f"构建日志：{log}")
+
+
 def commit_release(message, ver):
     run(["git", "add", "-A"])
     dirty = bool(out(["git", "status", "--porcelain"]))
@@ -230,6 +244,7 @@ def create_release(tag, notes, assets):
 
 
 def main(argv=None):
+    started = time.monotonic()
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -273,13 +288,14 @@ def main(argv=None):
     if args.skip_build:
         _validate_manifest()
     else:
-        timed("5. 构建安装包", lambda: run([sys.executable, str(ROOT / "tools" / "build_release.py"), "--skip-test"]))
+        timed("5. 构建安装包", build_installer)
     validate_local_assets(*assets)
     run(["git", "tag", tag])
     timed("6. 推送 main 和 tag", lambda: run(["git", "push", "--atomic", "origin", "main", tag]))
     timed("7. 创建 Release", lambda: create_release(tag, notes, assets))
     timed("8. 校验发布资产", lambda: validate_published_assets(tag, *assets, args.verify_download))
     print(f"发布完成：https://github.com/{REPO}/releases/tag/{tag}")
+    print(f"发布命令总用时：{time.monotonic() - started:.1f}s")
     print("main 的完整 CI 已在后台触发；安装演练与完整回下载按改动需要执行。")
     return 0
 

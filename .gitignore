@@ -41,6 +41,9 @@ data/cleanup/
 
 # 自动化模块运行状态（计划 / 当日排班 / 台账，属于本机运行数据）
 data/state/automation/
+# 本机选题去重与效果台账，生产代码会持续追加
+data/state/published_topics.jsonl
+data/state/story_performance.jsonl
 
 # Python
 __pycache__/

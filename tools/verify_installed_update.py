@@ -124,7 +124,7 @@ def build_old_fixture(snapshot: Path, build_root: Path, old_version: str) -> Pat
     say("building isolated old frozen fixture")
     dist_root = build_root / "dist"
     work_root = build_root / "work"
-    command = [sys.executable, "-m", "PyInstaller", "build/AutoQuill.spec", "--noconfirm",
+    command = [sys.executable, "-m", "PyInstaller", "installer/AutoQuill.spec", "--noconfirm",
                "--distpath", str(dist_root), "--workpath", str(work_root)]
     subprocess.run(command, cwd=snapshot, check=True)
     result = dist_root / "AutoQuill"

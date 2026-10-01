@@ -7,7 +7,7 @@
 
 | 目录 | 内容 | 是否进版本库 |
 |---|---|---|
-| `/` | 仅 `README.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`LICENSE`、`requirements.txt`、入口脚本与运行时目录 | 是 |
+| `/` | 用户文档、`AGENTS.md`、依赖声明、入口脚本与共享生成模块 | 是 |
 | `docs/` | 面向开发者与维护者的活跃文档 | 是 |
 | `docs/archive/` | 已完结的一次性记录（评审、复盘、历史需求）。**只读，不再更新** | 是 |
 | `.claude/` | 第三方 AI 工具包（`superpowers`、`code-review-skill`） | **否**（`.gitignore`） |
@@ -15,6 +15,8 @@
 
 规则：仓库首页只应出现使用者需要的东西。第三方工具的 README、计划、测试
 不属于本项目文档，一律不进版本库。
+
+详细目录归属与清理判定见 [目录职责](docs/REPOSITORY-GUIDE.md)。构建源文件在 `installer/`，`build/` 只放生成的缓存。
 
 ## 2. 文档头规范
 

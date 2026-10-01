@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| **适用版本** | v5.0.4 |
+| **适用版本** | v5.0.8 起 |
 | **最后更新** | 2026-10-01 |
 | **状态** | 活跃 |
 | **说明** | 架构分层、运行方式、CLI 命令、配置参考与扩展指南 |
@@ -14,7 +14,7 @@
 
 ## 1. 系统概览
 
-AutoQuill 是一套以 LLM 为认知中枢、以 **Playwright DOM 通道**为唯一浏览器交互方式的类人 Agent 框架（OCR/坐标时代代码已整体归档至 `archive/`）。当前成熟实例：知乎故事创作自动化（作者文风蒸馏 → 双层风格注入 → 批量生成发布）。
+AutoQuill 是一套以 LLM 为认知中枢、以 **Playwright DOM 通道**为浏览器交互方式的创作自动化框架。当前成熟实例：知乎故事创作自动化（作者文风蒸馏 → 双层风格注入 → 批量生成发布）。旧 OCR/坐标实现已退役，可从 Git 历史回溯。
 
 ### 1.1 四条核心原则
 
@@ -51,7 +51,6 @@ AutoQuill 是一套以 LLM 为认知中枢、以 **Playwright DOM 通道**为唯
 │   └ base.py          WebLLMDriver 基类            │
 │                      markdown 逐块重建（共用）      │
 │  llm_api.py    →  API LLM 调用 + 风格双层注入     │
-│  kb_manager.py →  知识库管理（默认停用）           │
 ├──────────────────────────────────────────────────┤
 │  Layer 2: Core Capabilities (核心能力)            │
 │  core/story_text.py  →  故事文本管线（清洗/断句/   │
@@ -104,7 +103,7 @@ python main.py --test-api            # 测试 LLM API 连通性
 python tools/launcher.py             # 一键启动器（源码态检查环境后拉起服务）
 ```
 
-旧坐标/OCR 时代命令（`--calibrate` / `--test-ocr` / `--debug-ocr-region` / `--probe-a11y` / `--resume` / `--image-gen`）已随对应代码归档移除，见 `archive/`。
+旧坐标/OCR 时代命令（`--calibrate` / `--test-ocr` / `--debug-ocr-region` / `--probe-a11y` / `--resume` / `--image-gen`）已随对应代码退役移除；目录归属与历史回溯见 [目录职责](REPOSITORY-GUIDE.md)。
 
 调试/探测脚本（需真实浏览器与登录态，选择器改版时先用它们实测 DOM）：
 
@@ -187,13 +186,13 @@ V4 起程序文件与用户数据分离：
 ### 5.1 PyInstaller 打包
 
 ```bash
-python -m PyInstaller build/AutoQuill.spec --noconfirm
+python -m PyInstaller installer/AutoQuill.spec --noconfirm
 # 产物：dist/AutoQuill/（onedir：AutoQuill.exe + _internal/）
 ```
 
 spec 要点：
 
-- datas：`webui/static/`、`config/llm_providers.example.json`、`config/model_pricing.json`、`images/`
+- datas：前端静态文件、示例配置、只读资源及独立更新宿主；完整清单以 `installer/AutoQuill.spec` 为准。
 - **排除**：`llm_providers.json`（真实 key）、`browser_state.json`（登录态）、`webui_model.json`、`data/`
 - hiddenimports：uvicorn 全部动态 import 子模块
 - 入口 `tools/launcher.py`：冻结态 `sys.executable --service` 自拉起服务进程
@@ -336,8 +335,7 @@ class NewSiteDriver(WebLLMDriver):
 
 ## 9. 安全与注意事项
 
-- **API Key 隔离**：真实 Key 只允许在 `config/llm_providers.json`（gitignored）；example 模板只允许占位符（`sk-your-*`）。pre-commit 钩子（`.githooks/pre-commit`）阻止含真实 Key 的提交，克隆后执行 `git config core.hooksPath .githooks` 启用
+- **API Key 隔离**：真实 Key 保存在 `config/llm_providers.json`（gitignored）；example 模板只使用占位符（`sk-your-*`），提交前核对文件范围。
 - **登录态等同账号凭证**：`config/browser_state.json`、`data/browser_profile/` 不入库、不打进安装包
 - 修改 Web 代码前**先探测 DOM**（feedback_web_dom_first）：不臆想页面结构
-- 运行中可将鼠标移到屏幕**左上角**触发 FailSafe 紧急停止（仅旧坐标通道）
 - 日志在 `logs/` 按时间戳命名；Web 服务日志 `logs/webui.log`

@@ -138,7 +138,7 @@ def main():
         return 0
 
     print("\n--- PyInstaller 构建 ---")
-    _run([sys.executable, "-m", "PyInstaller", "build/AutoQuill.spec", "--noconfirm"])
+    _run([sys.executable, "-m", "PyInstaller", "installer/AutoQuill.spec", "--noconfirm"])
     write_build_info()
 
     print("\n--- Inno Setup 安装包 ---")
