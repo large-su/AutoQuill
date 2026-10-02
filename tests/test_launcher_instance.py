@@ -389,6 +389,204 @@ class QuitWatcherTest(unittest.TestCase):
         self.assertNotIn("quit_requested_at", src)
 
 
+class TrayCleanupTest(unittest.TestCase):
+    class _Window:
+        native = None
+
+        def __init__(self):
+            self.hidden = 0
+            self.destroyed = 0
+
+        def hide(self):
+            self.hidden += 1
+
+        def destroy(self):
+            self.destroyed += 1
+
+    class _Form:
+        InvokeRequired = False
+        IsDisposed = False
+
+    class _Notify:
+        def __init__(self, fail_visible=False):
+            self._visible = True
+            self.fail_visible = fail_visible
+            self.dispose_calls = 0
+
+        @property
+        def Visible(self):
+            return self._visible
+
+        @Visible.setter
+        def Visible(self, value):
+            if self.fail_visible:
+                raise RuntimeError("visible failed")
+            self._visible = value
+
+        def Dispose(self):
+            self.dispose_calls += 1
+
+    def _tray(self, notify):
+        tray = launcher.TrayController(self._Window())
+        tray.form = self._Form()
+        tray.notify = notify
+        tray.available = True
+        tray._Action = lambda fn: fn
+        return tray
+
+    def test_cleanup_hides_disposes_and_is_idempotent(self):
+        notify = self._Notify()
+        tray = self._tray(notify)
+        tray.cleanup()
+        tray.dispose()
+        self.assertFalse(notify.Visible)
+        self.assertEqual(notify.dispose_calls, 1)
+
+    def test_cleanup_still_disposes_when_hiding_fails(self):
+        notify = self._Notify(fail_visible=True)
+        tray = self._tray(notify)
+        with mock.patch.object(launcher, "_log_diag") as diag:
+            tray.cleanup()
+        self.assertEqual(notify.dispose_calls, 1)
+        self.assertTrue(any("隐藏图标失败" in str(c) for c in diag.call_args_list))
+
+    def test_cleanup_invokes_on_live_form_ui_thread(self):
+        notify = self._Notify()
+        tray = self._tray(notify)
+        tray.form.InvokeRequired = True
+        invoked = []
+        tray.form.Invoke = lambda action: (invoked.append(True), action())[1]
+        tray.cleanup()
+        self.assertEqual(invoked, [True])
+        self.assertEqual(notify.dispose_calls, 1)
+
+    def test_close_to_tray_keeps_icon_and_does_not_cleanup(self):
+        notify = self._Notify()
+        tray = self._tray(notify)
+        cfg = mock.Mock()
+        cfg.load.return_value = {"close_to_tray": True}
+        with mock.patch.object(launcher, "launcher_config", cfg):
+            self.assertFalse(tray.on_closing())
+        self.assertEqual(notify.dispose_calls, 0)
+        self.assertEqual(tray.window.hidden, 1)
+
+    def test_quit_cleans_before_destroy(self):
+        notify = self._Notify()
+        tray = self._tray(notify)
+        with mock.patch.object(launcher, "api_call", return_value={"running": False}):
+            tray.quit()
+        self.assertEqual(notify.dispose_calls, 1)
+        self.assertEqual(tray.window.destroyed, 1)
+
+    def test_cleanup_before_attach_prevents_late_icon(self):
+        tray = launcher.TrayController(self._Window())
+        tray.cleanup()
+        with mock.patch.object(tray, "_build") as build:
+            self.assertFalse(tray.attach())
+        build.assert_not_called()
+
+    def test_cleanup_before_queued_build_prevents_icon_creation(self):
+        tray = launcher.TrayController(self._Window())
+        tray.cleanup()
+        factory = mock.Mock()
+        tray._ui = {"NotifyIcon": factory}
+        tray._build()
+        factory.assert_not_called()
+
+    def test_cleanup_during_icon_construction_disposes_late_icon(self):
+        notify = self._Notify()
+        notify.DoubleClick = mock.MagicMock()
+        tray = self._tray(None)
+        tray.form.Icon = object()
+
+        def construct():
+            tray.cleanup()
+            return notify
+
+        tray._ui = {
+            "NotifyIcon": construct,
+            "ContextMenuStrip": mock.MagicMock(),
+            "ToolStripMenuItem": mock.MagicMock(),
+            "ToolStripSeparator": mock.MagicMock(),
+        }
+        tray._build()
+        self.assertEqual(notify.dispose_calls, 1)
+        self.assertFalse(notify.Visible)
+        self.assertIsNone(tray.notify)
+        self.assertFalse(tray.available)
+
+    def test_open_window_cleans_on_normal_and_exception_exit(self):
+        class EventSlot:
+            def __init__(self):
+                self.callbacks = []
+
+            def __iadd__(self, fn):
+                self.callbacks.append(fn)
+                return self
+
+            def fire(self):
+                for callback in self.callbacks:
+                    callback()
+
+        class Events:
+            def __init__(self):
+                self.closed = EventSlot()
+                self.shown = EventSlot()
+
+        class Win:
+            def __init__(self):
+                self.events = Events()
+                self.native = None
+
+            def hide(self):
+                pass
+
+        class Webview:
+            def __init__(self, fail):
+                self.fail = fail
+                self.window = Win()
+
+            def create_window(self, *args, **kwargs):
+                return self.window
+
+            def start(self, callback, **kwargs):
+                callback()
+                if self.fail:
+                    raise RuntimeError("start failed")
+                self.window.events.closed.fire()
+
+        created = []
+
+        class Tray:
+            def __init__(self, window):
+                self.cleanup_calls = 0
+                created.append(self)
+
+            def wait_native(self, timeout):
+                return True
+
+            def attach(self):
+                return False
+
+            def cleanup(self, *_args):
+                self.cleanup_calls += 1
+
+        for fail in (False, True):
+            fake_webview = Webview(fail)
+            with mock.patch.dict(sys.modules, {"webview": fake_webview}), \
+                 mock.patch.object(launcher, "TrayController", Tray), \
+                 mock.patch.object(launcher, "launcher_config", None), \
+                 mock.patch.object(launcher, "_apply_dark_titlebar"), \
+                 mock.patch.object(launcher, "_log_diag"), \
+                 mock.patch.object(launcher, "_ACTIVE_WINDOW", None), \
+                 mock.patch.object(launcher, "_WINDOW_MODE", "starting"), \
+                 mock.patch.object(launcher.webbrowser, "open"):
+                result = launcher.open_window()
+            self.assertEqual(result, not fail)
+            # 正常关闭走 closed + finally；异常退出仍由 finally 清理。
+            self.assertEqual(created[-1].cleanup_calls, 1 if fail else 2)
+
+
 class WindowPendingShowTest(unittest.TestCase):
     def test_start_hidden_window_shows_when_pending(self):
         import inspect

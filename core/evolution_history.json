@@ -563,8 +563,8 @@
     {
       "version": "5.1.0",
       "tag": "v5.1.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "0d89721f6712ea9296e9b13c1479adcb80994e85",
+      "source_commit": "0d89721f6712ea9296e9b13c1479adcb80994e85",
       "parent": "25d569ff06fa79649370651e3c7e8cf454fd1994",
       "date": "2026-10-02",
       "summary": "v5.1.0: 新增演进记录与作品反馈观察",
@@ -602,6 +602,31 @@
         "webui/static/index.html",
         "workflows/base.py",
         "workflows/zhihu.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
+      "writing_code_id": "950ede0019286940683e4ba12a58d785f84db67a2d876c318195ffa8787c9a90",
+      "provenance": "git-tag"
+    },
+    {
+      "version": "5.1.1",
+      "tag": "v5.1.1",
+      "commit": null,
+      "source_commit": null,
+      "parent": "0d89721f6712ea9296e9b13c1479adcb80994e85",
+      "date": "2026-10-02",
+      "summary": "v5.1.1: 修复退出时托盘图标清理与退出竞态",
+      "summaries": [
+        "v5.1.1: 修复退出时托盘图标清理与退出竞态"
+      ],
+      "changed_file_count": 6,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "core/version.py",
+        "installer/AutoQuill.iss",
+        "tests/test_launcher_instance.py",
+        "tools/launcher.py"
       ],
       "change_kind": "engineering",
       "writing_files_changed": [],

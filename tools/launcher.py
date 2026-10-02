@@ -716,6 +716,7 @@ def open_window(start_hidden=False):
     start_hidden=True（开机自启带 --tray）时窗口只创建不显示，靠托盘图标唤出。
     阻塞直到窗口真正关闭；返回 True=独立窗口，False=回退浏览器（调用方需保持
     服务存活语义，等待服务进程退出）。"""
+    tray_holder = {}
     try:
         import inspect
         import webview
@@ -756,6 +757,11 @@ def open_window(start_hidden=False):
             _ACTIVE_WINDOW = window
             _WINDOW_MODE = "window"
             tray = TrayController(window)
+            tray_holder["tray"] = tray
+            try:
+                window.events.closed += tray.cleanup
+            except Exception as exc:      # noqa: BLE001
+                _log_diag(f"托盘：关闭清理钩子挂载失败（{exc!r}）")
             # 退出请求的监听与托盘可用性解耦：托盘挂了，控制台的退出按钮也得管用
             _start_quit_watcher(tray)
             # ★ 等窗口原生对象：start(func) 的回调早于窗口创建（详见 wait_native 注释）
@@ -789,6 +795,10 @@ def open_window(start_hidden=False):
         globals()["_WINDOW_MODE"] = "browser"
         webbrowser.open(BASE_URL)
         return False
+    finally:
+        tray = tray_holder.get("tray")
+        if tray is not None:
+            tray.cleanup()
 
 
 # ------------------------------------------------------------
@@ -849,6 +859,8 @@ class TrayController:
         self._stopped = threading.Event()
         self._Action = None
         self._ui = None
+        self._cleanup_lock = threading.Lock()
+        self._cleaned = False
 
     # ---------------- 生命周期 ----------------
 
@@ -873,6 +885,9 @@ class TrayController:
 
     def attach(self):
         """创建托盘图标；失败只写日志，绝不影响窗口本身。"""
+        with self._cleanup_lock:
+            if self._cleaned:
+                return False
         try:
             import webview.platforms.winforms  # noqa: F401  触发 pythonnet/.NET 装配
             import clr
@@ -926,6 +941,9 @@ class TrayController:
 
     def _build(self):
         """建图标与菜单（必须运行在 UI 线程）。"""
+        with self._cleanup_lock:
+            if self._cleaned:
+                return
         ui = self._ui
         try:
             icon = self.form.Icon
@@ -950,7 +968,13 @@ class TrayController:
             notify.ContextMenuStrip = menu
             notify.DoubleClick += lambda s, e: self._dispatch(self.show_window)
             notify.Visible = True
-            self.notify = notify
+            with self._cleanup_lock:
+                late_cleanup = self._cleaned
+                if not late_cleanup:
+                    self.notify = notify
+            if late_cleanup:
+                self._dispose_notify(notify)
+                return
         except Exception as exc:      # noqa: BLE001
             _log_diag(f"托盘：图标/菜单创建异常（{exc!r}）")
             self.notify = None
@@ -1032,12 +1056,45 @@ class TrayController:
             return
         self._quitting = True
         self._stopped.set()
-        try:
-            if self.notify is not None:
-                self.notify.Visible = False       # 先收图标，避免留下幽灵图标
-        except Exception:      # noqa: BLE001
-            pass
+        self.cleanup()
         self.window.destroy()
+
+    def cleanup(self, *_args):
+        """停止轮询并在 WinForms UI 线程释放托盘资源；可重复安全调用。"""
+        with self._cleanup_lock:
+            if self._cleaned:
+                return
+            self._cleaned = True
+            notify = self.notify
+            self.notify = None
+            self.available = False
+        self._stopped.set()
+        if notify is None:
+            return
+
+        form = self.form
+        try:
+            disposed = bool(getattr(form, "IsDisposed", False)) if form is not None else True
+            if form is not None and not disposed and bool(getattr(form, "InvokeRequired", False)):
+                form.Invoke(self._Action(lambda: self._dispose_notify(notify)))
+            else:
+                self._dispose_notify(notify)
+        except Exception as exc:  # noqa: BLE001
+            _log_diag(f"托盘：UI 线程清理失败（{exc!r}），尝试直接释放")
+            self._dispose_notify(notify)
+
+    @staticmethod
+    def _dispose_notify(notify):
+        try:
+            notify.Visible = False
+        except Exception as exc:  # noqa: BLE001
+            _log_diag(f"托盘：隐藏图标失败（{exc!r}）")
+        try:
+            notify.Dispose()
+        except Exception as exc:  # noqa: BLE001
+            _log_diag(f"托盘：释放图标失败（{exc!r}）")
+
+    dispose = cleanup
 
     # ---------------- 关窗行为 ----------------
 

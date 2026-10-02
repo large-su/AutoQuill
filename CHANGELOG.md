@@ -4,6 +4,21 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号以 `core/version.py` 为唯一事实来源（发布 tag 为 `v<VERSION>`）。
 
+## v5.1.1 — 2026-10-02
+
+### Fixed
+
+- 修复实际退出时托盘 `NotifyIcon` 未可靠清理的问题：显式隐藏并释放图标，窗口关闭和退出收尾路径统一清理，并以锁和幂等处理避免退出后排队或晚到的构建任务重新创建图标。
+- 需要时将托盘清理派发到 WinForms UI 线程；close-to-tray 仍保留托盘图标。
+
+### Notes
+
+- 从 v5.1.0 升级后，旧实例仍使用旧版退出代码；到达新版后正常退出并重新打开，即可观察新版清理逻辑。
+
+### Verification
+
+- `tests.test_launcher_instance`、`tests.test_launcher`、`tests.test_update_lifecycle` 共 73 项专项测试通过（2.132 秒，0 跳过）；改动 Python 语法检查通过。实际安装和托盘行为由用户升级后验证，尚未完成人工验证。
+
 ## v5.1.0 — 2026-10-02
 
 ### Added
