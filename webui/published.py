@@ -592,6 +592,12 @@ def scrape(progress=None, stop_flag=None):
             progress(f"已抓取 {len(dedup)} 条，已保存", 100)
         log.info("已发布内容抓取完成：%d 条 → %s", len(dedup), path)
         try:
+            from core import evolution
+            # 原始指标才能区分「缺失」与实测 0；看板归一后的旧字段已丢失这个区别。
+            evolution.ingest_snapshot(raw)
+        except Exception:
+            log.warning("演进记录：反馈观测保存失败（看板快照已保留）", exc_info=True)
+        try:
             from core import feedback_loop
             from config.story import FEEDBACK_LOOP_ENABLE
             if FEEDBACK_LOOP_ENABLE:

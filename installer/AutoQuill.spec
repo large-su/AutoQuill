@@ -28,6 +28,7 @@ a = Analysis(
         # 它不在 launcher 的静态分析图里，漏了会导致更新到"重启并安装"时失败。
         ('../tools/apply_update.py', 'tools'),
         ('../core/update_host.ps1', 'core'),
+        ('../core/evolution_history.json', 'core'),
     ],
     hiddenimports=[
         # web_drivers/__init__.py 用 importlib.import_module 动态加载驱动

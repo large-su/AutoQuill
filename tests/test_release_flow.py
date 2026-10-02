@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools import build_release, release
+from tools import build_release, evolution_history, release
 
 
 class ReleaseFlowTests(unittest.TestCase):
@@ -132,12 +132,15 @@ class ReleaseFlowTests(unittest.TestCase):
                     mock.patch.object(release, 'changed_paths', return_value=[]), \
                     mock.patch.object(release, '_preflight'), \
                     mock.patch.object(build_release, 'sync_release_metadata'), \
+                    mock.patch.object(evolution_history, 'refresh_history') as history, \
                     mock.patch.object(release, 'run_checks'), \
                     mock.patch.object(release, 'commit_release') as commit, \
                     mock.patch.object(release, 'validate_published_assets'), \
                     mock.patch.object(release, 'run') as run:
                 self.assertEqual(release.main(['-m', 'fix: new behavior']), 0)
             commit.assert_called_once_with('fix: new behavior', '5.0.7')
+            history.assert_called_once_with(root, current_version='5.0.7',
+                                            pending_summary='v5.0.7: new behavior')
             commands = [call.args[0] for call in run.call_args_list]
             self.assertEqual(sum('build_release.py' in str(part) for cmd in commands for part in cmd), 1)
             self.assertIn(['git', 'push', '--atomic', 'origin', 'main', 'v5.0.7'], commands)

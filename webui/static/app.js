@@ -885,6 +885,8 @@ const LEFT_MODES = [
     desc: "扩展模块：采集作者样本 → 提炼文风签名" },
   { id: "dashboard", name: "已发布内容看板",
     desc: "管理已发布内容：查看、刷新、筛选、搜索" },
+  { id: "evolution", name: "演进记录",
+    desc: "查看近期改动、写作方案与公开作品的反馈" },
   { id: "drafts", name: "草稿箱素材",
     desc: "预览/筛选/批量删除知乎草稿（不含发布）" },
 ];
@@ -912,8 +914,10 @@ function applyLeftMode(id) {
   });
   document.body.classList.toggle("dash-mode", id === "dashboard");
   document.body.classList.toggle("drafts-mode", id === "drafts");
+  document.body.classList.toggle("evolution-mode", id === "evolution");
   if (id === "dashboard") loadDashboard();
   if (id === "drafts") loadDrafts();
+  if (id === "evolution" && window.AutoQuillEvolution) window.AutoQuillEvolution.load();
 }
 
 /* ---------- 已发布内容看板 ---------- */

@@ -1,0 +1,61 @@
+/* 演进记录：独立视图与样式，复用控制台配色与离线 ECharts。 */
+body.evolution-mode main { grid-template-columns: minmax(0, 1fr); }
+body.evolution-mode .log-col, body.evolution-mode .right-col { display: none; }
+body.evolution-mode .left-col { min-width: 0; overflow-y: auto; padding-right: 4px; }
+#pane-evolution .evo-card { margin-bottom: 14px; padding: 18px; }
+.evo-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.evo-heading h2 { margin: 0 0 8px; font-size: 17px; }
+.evo-muted { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.evo-badge { color: var(--accent-2); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; font-size: 10px; vertical-align: middle; }
+.evo-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 18px 0 12px; }
+.evo-toolbar label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.evo-toolbar select, .evo-assignment { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 7px; border-radius: 6px; max-width: 230px; }
+.evo-note { border: 1px solid var(--border); border-left: 3px solid var(--amber); color: var(--muted); padding: 10px 12px; margin: 12px 0; font-size: 12px; line-height: 1.8; background: var(--panel-2); }
+.evo-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 18px; margin-top: 8px; }
+.evo-graph-wrap { min-width: 0; }
+#evoGraph { height: 350px; width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
+.evo-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; padding: 10px 0; }
+.evo-legend-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; }
+.evo-legend-dot.history { background: var(--accent); }
+.evo-legend-dot.runtime { background: var(--green); }
+.evo-node-list { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 4px; }
+.evo-node-list .btn { font-size: 11px; padding: 5px 9px; }
+.evo-node-list .btn.sel { border-color: var(--accent-2); color: var(--accent-2); }
+.evo-detail { border-left: 1px solid var(--border); padding-left: 18px; overflow-wrap: anywhere; min-width: 0; }
+.evo-detail h3 { font-size: 15px; margin: 5px 0 8px; }
+.evo-detail p { margin: 8px 0; line-height: 1.7; font-size: 12px; }
+.evo-detail dl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+.evo-detail dl div { padding: 10px; border-radius: 7px; background: var(--panel-2); }
+.evo-detail dt { font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+.evo-detail dd { font-size: 20px; font-variant-numeric: tabular-nums; }
+.evo-detail a, .evo-articles a { color: var(--accent-2); text-decoration: none; }
+.evo-detail a:hover, .evo-articles a:hover { text-decoration: underline; }
+.evo-release-link { display: inline-block; margin: 3px 8px 3px 0; font-size: 12px; }
+.evo-detail details { font-size: 12px; margin-top: 12px; line-height: 1.8; }
+.evo-detail details summary { cursor: pointer; color: var(--muted); }
+.evo-detail li { margin: 5px 0 5px 18px; }
+.evo-filter { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
+.evo-window-note { margin-top: 12px; }
+.evo-distribution { height: 230px; margin: 14px 0; }
+.evo-articles { overflow-x: auto; margin-top: 12px; max-height: 470px; overflow-y: auto; }
+.evo-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.evo-table th { text-align: left; position: sticky; top: 0; background: var(--panel-2); color: var(--muted); z-index: 1; font-weight: 500; }
+.evo-table th, .evo-table td { padding: 11px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.evo-table th:nth-child(1) { min-width: 230px; }
+.evo-table .evo-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.evo-table .evo-title { display: block; max-width: 360px; margin-bottom: 5px; }
+.evo-assignment-box { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.evo-assignment-box .btn { font-size: 11px; padding: 6px 9px; }
+.evo-state { font-size: 11px; color: var(--amber); white-space: nowrap; }
+.evo-state.confirmed { color: var(--green); }
+.evo-error { color: var(--red); }
+@media (max-width: 1050px) {
+  .evo-workspace { grid-template-columns: minmax(0, 1fr); }
+  .evo-detail { border-left: 0; border-top: 1px solid var(--border); padding: 12px 0 0; }
+  .evo-detail dl { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 650px) {
+  #pane-evolution .evo-card { padding: 12px; }
+  .evo-detail dl { grid-template-columns: 1fr 1fr; }
+  .evo-toolbar { gap: 8px; }
+}

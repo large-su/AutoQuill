@@ -213,6 +213,12 @@ def _publish_drafts(job, should_stop=None, progress=None):
             # 绝不记成「发布失败」而反复重试（也不该静默跳过）
             raise NeedHuman(r.get("detail") or LOGIN_EXPIRED_MSG)
         ok = bool(r.get("ok"))
+        if ok and not job.get("dry_run"):
+            try:
+                from core import evolution
+                evolution.record_publication(r)
+            except Exception:
+                log.warning("演进记录：公开发布回执保存失败（不影响发布结果）", exc_info=True)
         if not ok and r.get("reason") == "dry_run":
             # 演练：走完「找草稿 → 开编辑页 → 确认发布按钮」，绝不点发布。
             # 通过记跳过（不是发布成功，也不占配额）；未通过才是真问题。

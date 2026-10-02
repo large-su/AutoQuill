@@ -89,12 +89,18 @@ def select_tests(paths, full=False):
                 continue
             elif stem in {"release", "build_release"}:
                 selected.add("tests.test_release_flow")
+            elif stem in {"evolution", "evolution_api"}:
+                selected.add("tests.test_evolution")
+            elif stem == "evolution_history":
+                selected.add("tests.test_evolution_history")
             elif (ROOT / "tests" / f"test_{stem}.py").is_file():
                 selected.add(f"tests.test_{stem}")
             else:
                 unknown = True
         elif path.endswith(".js"):
-            if path.endswith("webui/static/app.js") or name == "automation.js":
+            if name == "evolution.js":
+                selected.add("tests.test_evolution")
+            elif path.endswith("webui/static/app.js") or name == "automation.js":
                 selected.add("tests.test_update_ui" if name == "app.js" else "tests.test_automation_ui")
                 if name == "automation.js":
                     selected.add("tests.test_checkin")
@@ -102,6 +108,8 @@ def select_tests(paths, full=False):
                 unknown = True
         elif path == "webui/static/index.html":
             selected.add("tests.test_update_ui")
+        elif path == "core/evolution_history.json":
+            selected.add("tests.test_evolution_history")
         elif path.endswith(".json") and not path.startswith("docs/"):
             unknown = True
     return ["tests"] if unknown else sorted(selected)
@@ -281,7 +289,14 @@ def main(argv=None):
     timed("1. 发布前检查", lambda: _preflight(tag))
     if not args.skip_build:
         from tools.build_release import sync_release_metadata
-        timed("2. 同步版本元数据", sync_release_metadata)
+        from tools.evolution_history import refresh_history
+
+        def sync_metadata():
+            sync_release_metadata()
+            refresh_history(ROOT, current_version=ver,
+                            pending_summary=normalize_message(message, ver).splitlines()[0])
+
+        timed("2. 同步版本元数据与演进历史", sync_metadata)
     if not args.skip_test:
         timed("3. 相关测试与语法检查", lambda: run_checks(paths, tests))
     timed("4. 提交代码", lambda: commit_release(message, ver))

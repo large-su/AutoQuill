@@ -1139,6 +1139,11 @@ class ZhihuWorkflow(WorkflowBase):
                 "编辑器写入后服务端草稿未在等待窗口内确认"
                 "（请打开浏览器人工确认草稿后手动发布）")
         log.info("  服务端草稿已确认（编辑器写入通道）")
+        try:
+            from core import evolution
+            evolution.record_draft(url, md_abs_path, title)
+        except Exception:
+            log.warning("演进记录：草稿关联保存失败（不影响草稿结果）", exc_info=True)
 
         # 不再收尾 reload：草稿已落盘，刷新只会制造一次多余的页面
         # 加载（对用户观感就是「又跳了一下」），且破坏验收时的编辑器态

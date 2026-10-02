@@ -33,6 +33,7 @@ class PublishedSnapshotTest(unittest.TestCase):
             mock.patch.object(published.time, "sleep", lambda s: None),
             mock.patch.object(feedback_loop, "_perf_path",
                               lambda: self.tmp / "story_performance.jsonl"),
+            mock.patch("core.evolution._path", lambda: self.tmp / "evolution.json"),
         ]
         for p in self._patches:
             p.start()
@@ -113,7 +114,10 @@ class PublishedSnapshotTest(unittest.TestCase):
             def _safe_evaluate(self, js):
                 if "scrollTo" in js: return True
                 if "querySelectorAll('.CreationManage-CreationCard').length" in js: return 2
-                if "CreationCardTitle-wrapper" in js: return _raw_rows()
+                if "CreationCardTitle-wrapper" in js:
+                    payload = _raw_rows()
+                    payload[0]["metrics"].pop("收藏", None)
+                    return payload
                 return True
 
         orig = ba.ZhihuBrowser
@@ -122,6 +126,8 @@ class PublishedSnapshotTest(unittest.TestCase):
             rows = published.scrape()
             self.assertEqual(len(rows), 2)
             self.assertEqual(len(list(self.tmp.glob("published_answers_*.json"))), 2)
+            state = json.loads((self.tmp / "evolution.json").read_text(encoding="utf-8"))
+            self.assertIsNone(state["articles"]["1"]["observations"][0]["collects"])
         finally:
             ba.ZhihuBrowser = orig
 

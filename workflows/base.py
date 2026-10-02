@@ -154,6 +154,11 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         md_path = os.path.join(output_dir, md_filename)
         with open(md_path, 'w', encoding='utf-8') as f:
             f.write(story)
+        try:
+            from core import evolution
+            evolution.record_generation(md_path, story)
+        except Exception:
+            log.warning("演进记录：未能记录稿件保存时的方案（不影响稿件保存）", exc_info=True)
         return os.path.abspath(md_path)
 
     # ============================================================

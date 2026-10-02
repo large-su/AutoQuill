@@ -517,6 +517,7 @@ class PublishDraftExecutorTest(unittest.TestCase):
     """草稿发布作业：结果归一 + 异常语义。"""
 
     def setUp(self):
+        self.receipt = mock.Mock()
         _ExecFakeBrowser.raise_exc = None
         _ExecFakeBrowser.result = {"ok": True, "qid": "333",
                                    "title": "第333篇", "url": ANSWER_URL,
@@ -525,6 +526,7 @@ class PublishDraftExecutorTest(unittest.TestCase):
             mock.patch("applications.zhihu_story.browser_adapter.ZhihuBrowser",
                        _ExecFakeBrowser),
             mock.patch("webui.browser_tasks.browser_busy", lambda: []),
+            mock.patch("core.evolution.record_publication", self.receipt),
         ]
         for p in self._patches:
             p.start()
@@ -542,6 +544,7 @@ class PublishDraftExecutorTest(unittest.TestCase):
         self.assertEqual(r["status"], planner.STATUS_DONE)
         self.assertIn("第333篇", r["message"])
         self.assertEqual(r["artifacts"], [ANSWER_URL])
+        self.receipt.assert_called_once_with(_ExecFakeBrowser.result)
         b = _ExecFakeBrowser.last
         self.assertTrue(b.headless)              # 排班任务只在无头下跑
         self.assertTrue(b.closed)                # 关掉，别占持久化 profile 锁
@@ -561,6 +564,7 @@ class PublishDraftExecutorTest(unittest.TestCase):
         self.assertEqual(r["units"], 0)
         self.assertEqual(r["status"], planner.STATUS_FAILED)
         self.assertIn("未确认", r["message"])
+        self.receipt.assert_not_called()
 
     def test_dry_run_job_is_forwarded_and_recorded_as_skip(self):
         _ExecFakeBrowser.result = {
@@ -572,6 +576,14 @@ class PublishDraftExecutorTest(unittest.TestCase):
         self.assertEqual(r["units"], 0)                        # 演练不占配额
         self.assertEqual(r["status"], planner.STATUS_SKIPPED)
         self.assertIn("演练通过", r["message"])
+        self.receipt.assert_not_called()
+
+    def test_receipt_record_failure_does_not_change_publication_result(self):
+        self.receipt.side_effect = OSError("record unavailable")
+        with self.assertLogs("automation.executor", level="WARNING"):
+            result = execute({"type": "publish_drafts", "params": {}})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["units"], 1)
 
     def test_dry_run_failure_is_a_real_failure(self):
         _ExecFakeBrowser.result = {

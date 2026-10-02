@@ -62,6 +62,7 @@ from .api_runs import router as runs_router
 from .api_settings import router as settings_router
 from .api_setup import router as setup_router
 from .api_feedback import router as feedback_router
+from .evolution_api import router as evolution_router
 from .automation_api import router as automation_router
 from .launcher_api import router as launcher_router
 from .run_manager import runner  # noqa: F401  (供存量扩展引用)
@@ -141,6 +142,20 @@ app.get("/style.css")(_static_css)
 app.get("/app.js")(_static_app_js)
 
 
+@app.get("/evolution.js")
+def _evolution_js():
+    return FileResponse(str(Path(__file__).resolve().parent / "static" / "evolution.js"),
+                        media_type="application/javascript",
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/evolution.css")
+def _evolution_css():
+    return FileResponse(str(Path(__file__).resolve().parent / "static" / "evolution.css"),
+                        media_type="text/css; charset=utf-8",
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.get("/automation.js")
 def _static_automation_js():
     """自动化模块前端（独立文件：时间轴渲染与调度交互，不挤进 app.js）。"""
@@ -160,6 +175,7 @@ app.include_router(setup_router)
 app.include_router(library_router)
 app.include_router(runs_router)
 app.include_router(feedback_router)
+app.include_router(evolution_router)
 app.include_router(automation_router)
 app.include_router(launcher_router)
 app.include_router(update_router)

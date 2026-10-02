@@ -44,6 +44,8 @@ data/state/automation/
 # 本机选题去重与效果台账，生产代码会持续追加
 data/state/published_topics.jsonl
 data/state/story_performance.jsonl
+data/state/evolution.json
+data/state/evolution.tmp
 
 # Python
 __pycache__/
