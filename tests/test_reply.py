@@ -6,6 +6,8 @@
 # ============================================================
 
 import unittest
+from datetime import datetime
+from unittest.mock import Mock, patch
 
 from applications.zhihu_story import reply_prompts as rp
 from applications.zhihu_story import reply_task as rt
@@ -252,6 +254,113 @@ class TestFriendlinessScore(unittest.TestCase):
     def test_very_long_penalised(self):
         self.assertLess(rt.friendliness_score('长' * 200),
                         rt.friendliness_score('长' * 30))
+
+
+class TestRunReplyJobDailyReaderCheck(unittest.TestCase):
+    """自有故事评论检查：当天去重、跨天重查、失败不留下假缓存。"""
+
+    NOW = datetime(2026, 10, 7, 9, 0, 0)
+
+    def setUp(self):
+        self.state = {'date': '2026-10-07', 'reader_comments': {},
+                      'done': {'comment': False}, 'tasks': {}}
+        self.browser = Mock()
+        self.runs = []
+
+    def _patches(self):
+        return patch.multiple(
+            rt.checkin,
+            load_state=Mock(return_value=self.state),
+            save_state=Mock(),
+            replied_keys=Mock(return_value=set()),
+            dryrun_keys=Mock(return_value=set()),
+            append_reply_run=Mock(side_effect=self.runs.append),
+        )
+
+    def test_prefilter_empty_records_and_caches_check(self):
+        self.browser.collect_manage_comments.return_value = {
+            'comments': [{'text': '看我主页', 'author': 'a', 'key': '1',
+                          'answer_url': 'u'}]}
+        with self._patches():
+            result = rt.run_reply_job(self.browser, now=self.NOW)
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.state['reader_comments']['outcome'], 'no_candidate')
+        self.assertEqual(len(self.runs), 1)
+
+    def test_same_day_cached_result_does_not_collect_again(self):
+        cached = {'ok': True, 'units': 0, 'detail': '没有可回复的新评论',
+                  'replies': [], 'dropped': []}
+        self.state['reader_comments'] = {
+            'checked_at': '2026-10-07T08:00:00', 'dry_run': True,
+            'outcome': 'no_candidate', 'result': cached}
+        with self._patches():
+            result = rt.run_reply_job(self.browser, now=self.NOW)
+        self.browser.collect_manage_comments.assert_not_called()
+        self.assertTrue(result['detail'].startswith('今日已检查自有故事评论：'))
+
+    def test_cross_day_and_mode_change_check_again(self):
+        self.state['reader_comments'] = {
+            'checked_at': '2026-10-06T08:00:00', 'dry_run': True,
+            'outcome': 'no_candidate', 'result': {'ok': True, 'units': 0,
+                'detail': '旧', 'replies': [], 'dropped': []}}
+        self.browser.collect_manage_comments.return_value = {'comments': []}
+        with self._patches():
+            rt.run_reply_job(self.browser, dry_run=True, now=self.NOW)
+            rt.run_reply_job(self.browser, dry_run=False, now=self.NOW)
+        self.assertEqual(self.browser.collect_manage_comments.call_count, 2)
+
+    def test_dry_run_does_not_mark_done(self):
+        card = {'text': '写得真好', 'author': 'a', 'key': '1',
+                'answer_url': 'u'}
+        self.browser.collect_manage_comments.return_value = {'comments': [card]}
+        driver = Mock()
+        with self._patches(), patch('web_drivers.get_driver', return_value=driver), \
+                patch.object(rt, 'ask_llm', return_value='1'), \
+                patch.object(rt, 'read_original', return_value={'title': 'q', 'answer': 'a'}), \
+                patch.object(rt, 'compose_reply', return_value={'ok': True, 'reply': '谢谢您看完，我继续写。', 'issues': []}), \
+                patch.object(rt, '_refresh_checkin_after_reply', return_value=None), \
+                patch.object(rt.checkin, 'append_reply', Mock()):
+            result = rt.run_reply_job(self.browser, dry_run=True, now=self.NOW)
+        self.assertEqual(result['units'], 1)
+        self.assertFalse(self.state['done']['comment'])
+
+    def test_collection_exception_is_not_cached(self):
+        self.browser.collect_manage_comments.side_effect = RuntimeError('offline')
+        with self._patches():
+            result = rt.run_reply_job(self.browser, now=self.NOW)
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.state['reader_comments'], {})
+
+    def test_empty_read_failure_is_not_cached(self):
+        self.browser.collect_manage_comments.return_value = {'ok': False, 'comments': []}
+        with self._patches():
+            rt.run_reply_job(self.browser, now=self.NOW)
+        self.assertEqual(self.state['reader_comments'], {})
+
+    def test_invalid_model_pick_is_not_cached(self):
+        self.browser.collect_manage_comments.return_value = {'ok': True, 'comments': [
+            {'text': '写得真好', 'author': 'a', 'key': '1', 'answer_url': 'u'}]}
+        with self._patches(), patch('web_drivers.get_driver', return_value=Mock()), \
+                patch.object(rt, 'ask_llm', return_value='不确定'):
+            result = rt.run_reply_job(self.browser, now=self.NOW)
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.state['reader_comments'], {})
+
+    def test_real_sent_marks_done(self):
+        card = {'text': '写得真好', 'author': 'a', 'key': '1',
+                'answer_url': 'u'}
+        self.browser.collect_manage_comments.return_value = {'comments': [card]}
+        self.browser.send_reply_from_manage.return_value = {'ok': True, 'sent': True}
+        with self._patches(), patch('web_drivers.get_driver', return_value=Mock()), \
+                patch.object(rt, 'ask_llm', return_value='1'), \
+                patch.object(rt, 'read_original', return_value={'title': 'q', 'answer': 'a'}), \
+                patch.object(rt, 'compose_reply', return_value={'ok': True, 'reply': '谢谢您看完，我继续写。', 'issues': []}), \
+                patch.object(rt, '_refresh_checkin_after_reply', return_value=None), \
+                patch.object(rt.checkin, 'append_reply', Mock()), \
+                patch.object(rt.checkin, 'mark_done', side_effect=lambda state, kind, detail='', now=None: state['done'].__setitem__(kind, True)):
+            result = rt.run_reply_job(self.browser, dry_run=False, now=self.NOW)
+        self.assertEqual(result['units'], 1)
+        self.assertTrue(self.state['done']['comment'])
 
 
 if __name__ == '__main__':

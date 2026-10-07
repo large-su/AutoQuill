@@ -98,6 +98,8 @@ def fresh_state(now=None, campaign_url=''):
         'done': {k: False for k in TRACKED},    # 本地台账：今天成功做过没有
         'tried': [],                 # 今天试过但跳过/失败的目标
         'result': {},                # {ok, detail} 今日打卡结论
+        'reader_comments': {},       # 当日自有故事评论检查；成功检查一次，跨重启复用
+        'reference_story': {},       # 最近读到的参考故事，供晚间巡检补评论
     }
 
 
@@ -198,14 +200,14 @@ def pending_kinds(state):
     return [k for k in TRACKED if needs(state, k)]
 
 
-def mark_done(state, kind, detail=''):
+def mark_done(state, kind, detail='', now=None):
     '''本地记账：今天这一项成功了。'''
     if kind not in TRACKED:
         return state
     state.setdefault('done', {})[kind] = True
     if detail:
         state.setdefault('notes', []).append(
-            {'at': now_str(), 'kind': kind, 'detail': detail})
+            {'at': now_str(now), 'kind': kind, 'detail': detail})
     return state
 
 
@@ -295,8 +297,8 @@ def summary(state, enabled_kinds=None):
             'line': '打卡：' + ' / '.join(rows), 'campaign': state.get('campaign_title') or ''}
 
 
-def set_result(state, ok, detail=''):
-    state['result'] = {'ok': bool(ok), 'detail': detail or '', 'at': now_str()}
+def set_result(state, ok, detail='', now=None):
+    state['result'] = {'ok': bool(ok), 'detail': detail or '', 'at': now_str(now)}
     return state
 
 
@@ -324,7 +326,7 @@ def heal_from_ledger(state, now=None):
         if not hits:
             continue
         mark_done(state, kind,
-                  detail='台账追溯：%s' % (rule['detail'] % len(hits)))
+                  detail='台账追溯：%s' % (rule['detail'] % len(hits)), now=now)
         healed.append(kind)
     return healed
 
@@ -385,10 +387,10 @@ def is_replied(key):
     return bool(key) and key in replied_keys()
 
 
-def append_reply(record):
+def append_reply(record, now=None):
     '''记一条回复（草稿/已发都记，sent 字段区分）。'''
     row = dict(record or {})
-    row.setdefault('at', now_str())
+    row.setdefault('at', now_str(now))
     try:
         with open(replies_path(), 'a', encoding='utf-8') as f:
             f.write(json.dumps(row, ensure_ascii=False) + chr(10))

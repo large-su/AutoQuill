@@ -10,9 +10,12 @@
 # ============================================================
 
 import unittest
+import sys
 from datetime import datetime
+from unittest import mock
 
 from applications.zhihu_story import browser_interact as bi
+from applications.zhihu_story.browser_utils import _PRIMARY_ANSWER_JS
 
 ZW = chr(8203)
 
@@ -203,6 +206,233 @@ class TestJsAnchors(unittest.TestCase):
                    bi._ANSWER_COMMENTS_JS):
             self.assertTrue(js.startswith('('), js[:20])
             self.assertTrue(js.rstrip().endswith('}'), js[-20:])
+
+
+class TestPublishReadinessPolling(unittest.TestCase):
+    '''发布按钮尚未渲染时必须继续等待，不能把缺失当成可发布。'''
+
+    def _mixin(self, states):
+        obj = bi.ReplyActionsMixin()
+        obj.open_answer_comment_editor = mock.Mock(
+            return_value={'ok': True, 'state': {}})
+        obj.open_reply_editor = mock.Mock(
+            return_value={'ok': True, 'editor': {}, 'nested_before': 0})
+        obj._type_into_comment_box = mock.Mock(
+            return_value=(True, 'fixture', ''))
+        obj._clear_editor = mock.Mock()
+        obj._safe_evaluate = mock.Mock(side_effect=list(states))
+        obj.page = mock.Mock()
+        return obj
+
+    def test_send_answer_comment_waits_for_publish_button(self):
+        obj = self._mixin([
+            {'publish_found': False, 'publish_disabled': None},
+            {'publish_found': True, 'publish_disabled': False},
+        ])
+        with mock.patch.object(bi.time, 'sleep'):
+            result = obj.send_answer_comment(
+                '测试评论', dry_run=True, ready_timeout=2)
+        self.assertTrue(result['ok'], result)
+        self.assertFalse(result['sent'])
+        self.assertEqual(obj._safe_evaluate.call_count, 2)
+        obj._clear_editor.assert_called_once()
+
+    def test_send_reply_waits_for_publish_button(self):
+        obj = self._mixin([
+            {'publish_found': False, 'publish_disabled': None},
+            {'publish_found': True, 'publish_disabled': False},
+        ])
+        with mock.patch.object(bi.time, 'sleep'):
+            result = obj.send_reply(
+                '原评论', '测试回复', dry_run=True, ready_timeout=2)
+        self.assertTrue(result['ok'], result)
+        self.assertFalse(result['sent'])
+        self.assertEqual(obj._safe_evaluate.call_count, 2)
+        obj._clear_editor.assert_called_once()
+
+
+class TestBrowserJavascriptDom(unittest.TestCase):
+    '''用本地合成 DOM 执行关键 JS，覆盖真实按钮层级和导航链接。'''
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise unittest.SkipTest('Playwright unavailable: %s' % exc)
+        cls._pw = sync_playwright().start()
+        try:
+            if sys.platform.startswith('win'):
+                cls._browser = cls._pw.chromium.launch(
+                    channel='msedge', headless=True)
+            else:
+                cls._browser = cls._pw.chromium.launch(headless=True)
+        except Exception as exc:
+            cls._pw.stop()
+            raise unittest.SkipTest('headless browser unavailable: %s' % exc)
+
+    @classmethod
+    def tearDownClass(cls):
+        browser = getattr(cls, '_browser', None)
+        if browser:
+            browser.close()
+        pw = getattr(cls, '_pw', None)
+        if pw:
+            pw.stop()
+
+    def setUp(self):
+        self.page = self._browser.new_page()
+
+    def tearDown(self):
+        self.page.close()
+
+    def test_open_comment_targets_first_answer_and_is_idempotent(self):
+        self.page.set_content('''
+          <div class="ContentItem-actions" id="question-actions">
+            <button id="question-comments">99\u200b 条评论</button>
+          </div>
+          <div class="AnswerItem" id="first-answer">
+            <div class="ContentItem-actions">
+              <button id="first-comments">6\u200b 条评论</button>
+            </div>
+          </div>
+          <div class="AnswerItem" id="second-answer">
+            <div class="ContentItem-actions">
+              <button id="second-comments">添加评论</button>
+            </div>
+          </div>
+          <script>
+            window.clicks = {question: 0, first: 0, second: 0};
+            document.getElementById('question-comments').onclick = () => window.clicks.question++;
+            document.getElementById('first-comments').onclick = () => {
+              window.clicks.first++;
+              document.getElementById('first-comments').textContent = '收起评论';
+            };
+            document.getElementById('second-comments').onclick = () => window.clicks.second++;
+          </script>
+        ''')
+        first = self.page.evaluate(bi._OPEN_ANSWER_COMMENT_JS)
+        self.assertTrue(first.get('ok'), first)
+        self.assertEqual(
+            self.page.evaluate('() => window.clicks'),
+            {'question': 0, 'first': 1, 'second': 0})
+
+        # 已展开时再次执行不能把「收起评论」当成入口点击。
+        second = self.page.evaluate(bi._OPEN_ANSWER_COMMENT_JS)
+        self.assertEqual(
+            self.page.evaluate('() => window.clicks'),
+            {'question': 0, 'first': 1, 'second': 0})
+        self.assertIsInstance(second, dict)
+
+    def test_primary_answer_prefers_answer_permalink(self):
+        self.page.set_content('''
+          <base href="https://www.zhihu.com/question/123">
+          <h1 class="QuestionHeader-title">合成问题</h1>
+          <div class="QuestionAnswer-content">
+            <div class="ContentItem-time">发布于 2026-10-07</div>
+            <div class="RichContent-inner">第一段\u200b正文\n\n第二段正文</div>
+            <div class="ContentItem-actions">
+              <button class="VoteButton">赞同 12</button>
+              <span>6 条评论</span><span>收藏 3</span>
+              <a class="answerpermalink" href="/question/123/answer/456">回答链接</a>
+            </div>
+          </div>
+          <div class="AnswerItem"><div class="RichContent-inner">第二个回答</div></div>
+        ''')
+        got = self.page.evaluate(_PRIMARY_ANSWER_JS)
+        self.assertEqual(got['title'], '合成问题')
+        self.assertIn('第一段', got['answer'])
+        self.assertNotIn(ZW, got['answer'])
+        self.assertEqual(got['footer']['answer_url'],
+                         'https://www.zhihu.com/question/123/answer/456')
+
+    def test_open_comment_keeps_add_comment_compatibility(self):
+        self.page.set_content('''
+          <div class="AnswerItem" id="first-answer">
+            <div class="ContentItem-actions">
+              <button id="add-comment">添加评论</button>
+            </div>
+          </div>
+          <script>
+            window.clicks = 0;
+            document.getElementById('add-comment').onclick = () => window.clicks++;
+          </script>
+        ''')
+        result = self.page.evaluate(bi._OPEN_ANSWER_COMMENT_JS)
+        self.assertTrue(result.get('ok'), result)
+        self.assertEqual(self.page.evaluate('() => window.clicks'), 1)
+
+    def test_open_comment_without_first_answer_does_not_use_question_header(self):
+        self.page.set_content('''
+          <div class="ContentItem-actions" id="question-actions">
+            <button id="question-comments">99 条评论</button>
+          </div>
+          <div class="AnswerItem" id="first-answer">
+            <div class="ContentItem-actions"><button>赞同 1</button></div>
+          </div>
+          <div class="AnswerItem" id="second-answer">
+            <div class="ContentItem-actions"><button id="second-comments">添加评论</button></div>
+          </div>
+          <script>
+            window.clicks = {question: 0, second: 0};
+            document.getElementById('question-comments').onclick = () => window.clicks.question++;
+            document.getElementById('second-comments').onclick = () => window.clicks.second++;
+          </script>
+        ''')
+        result = self.page.evaluate(bi._OPEN_ANSWER_COMMENT_JS)
+        self.assertFalse(result.get('ok'), result)
+        self.assertEqual(
+            self.page.evaluate('() => window.clicks'),
+            {'question': 0, 'second': 0})
+
+    def test_send_answer_comment_restores_collapsed_publish_toolbar(self):
+        '''输入后工具栏收起时，发送流程应恢复焦点并保留正文（dry-run）。'''
+        self.page.set_content('''
+          <div class="AnswerItem">
+            <div class="ContentItem-actions">
+              <button id="entry">添加评论</button>
+            </div>
+            <div id="editor" class="public-DraftEditor-content"
+                 contenteditable="true" style="display:none"></div>
+            <button id="publish" style="display:none">发布</button>
+          </div>
+          <script>
+            window.publishClicks = 0;
+            const entry = document.getElementById('entry');
+            const editor = document.getElementById('editor');
+            entry.onclick = () => {
+              editor.style.display = 'block';
+              editor.focus();
+              const publish = document.getElementById('publish');
+              if (publish) publish.style.display = 'block';
+            };
+            editor.addEventListener('input', () => {
+              // 模拟真机：输入后工具栏被折叠，但编辑器仍有焦点和正文。
+              const publish = document.getElementById('publish');
+              if (publish) publish.remove();
+            });
+            editor.addEventListener('focus', () => {
+              if (editor.textContent.trim() && !document.getElementById('publish')) {
+                const publish = document.createElement('button');
+                publish.id = 'publish';
+                publish.textContent = '发布';
+                publish.onclick = () => window.publishClicks++;
+                editor.parentElement.appendChild(publish);
+              }
+            });
+          </script>
+        ''')
+        obj = bi.ReplyActionsMixin()
+        obj.page = self.page
+        obj._safe_evaluate = lambda script, *args: self.page.evaluate(script, *args)
+        with mock.patch.object(bi.time, 'sleep'):
+            result = obj.send_answer_comment(
+                '合成 DOM 的评论正文', dry_run=True, ready_timeout=2)
+        self.assertTrue(result['ok'], result)
+        self.assertFalse(result['sent'])
+        self.assertEqual(self.page.evaluate('() => window.publishClicks'), 0)
+        # Chromium 的 contenteditable 清空后可能保留一个布局换行，语义上仍为空。
+        self.assertEqual(self.page.locator('#editor').inner_text().strip(), '')
 
 
 if __name__ == '__main__':

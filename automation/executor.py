@@ -256,30 +256,34 @@ def _set_checkin_context(ctx):
 
 
 def _checkin_context(job):
-    """当天这一班写草稿要不要顺带做打卡互动（关注 / 赞同）。
+    """当天这一班写草稿要不要顺带做打卡互动与自有评论检查。
 
     打卡任务没启用时返回 {} → 工作流那侧完全不走互动逻辑。
     返回 {follow: do|toggle|done|skip, vote: 同, comment: 同, is_last: bool}。
-    comment 项同样参与决策：只有当天最后一班、且「发布评论」还没达成时，
-    才会在参考故事下补一条贴题评论（用户 2026-09-29 口径）。
+    评论先检查自有故事；仍未达成时，读到参考故事就尝试补做。
     """
     try:
         from automation.store import load_plan
         from automation.model import TASK_TYPES
-        cfg = (load_plan().get("tasks") or {}).get("checkin") or {}
+        tasks = load_plan().get("tasks") or {}
+        cfg = tasks.get("checkin") or {}
         if not (cfg.get("enabled") and TASK_TYPES["checkin"]["implemented"]):
             return {}
         from core import checkin as _ck
         state = _ck.load_state()
         is_last = bool((job.get("params") or {}).get("is_last_of_day"))
+        reply_cfg = tasks.get("reply_comment") or {}
+        reader_check = bool(reply_cfg.get("enabled")
+                            and int(reply_cfg.get("daily_cap") or 0) > 0)
         return {
             "is_last": is_last,
             "follow": _ck.decide(state, "follow", is_last=is_last),
             "vote": _ck.decide(state, "vote", is_last=is_last),
-            # 评论项同样交给决策：只有当天最后一班、且「发布评论」还没达成时，
-            # 才会在参考故事下补一条（用户 2026-09-29 口径）。白天不回，
-            # 因为那时还有机会真的回复读者评论。
             "comment": _ck.decide(state, "comment", is_last=is_last),
+            "reader_check": reader_check,
+            "reader_count": max(1, int(reply_cfg.get("daily_cap") or 1)),
+            "comment_dry_run": bool(reader_check and
+                                    (reply_cfg.get("params") or {}).get("dry_run", True)),
         }
     except Exception as exc:       # noqa: BLE001
         log.debug("打卡上下文构建失败（不影响撰写）：%s", exc)
@@ -294,47 +298,54 @@ def _checkin(job, should_stop=None, progress=None):
     另外它每次都会刷新当日打卡快照，界面据此显示今天打卡成没成。
     """
     from web_drivers.browser_pool import (
-        ProfileBusy, _browser_lock, profile_in_use,
+        ProfileBusy, close_shared_browser, get_browser, profile_in_use,
     )
     busy = _browser_busy()
     if busy:
         raise BrowserBusy("浏览器被占用：" + "、".join(busy))
     if profile_in_use():
         raise BrowserBusy("浏览器正被登录引导或其它实例占用，稍后顺延")
-    from applications.zhihu_story.browser_adapter import (
-        LOGIN_EXPIRED_MSG, ZhihuBrowser,
-    )
+    from applications.zhihu_story.browser_adapter import LOGIN_EXPIRED_MSG
     from applications.zhihu_story import checkin_task
-    with _browser_lock:
-        b = ZhihuBrowser(headless=True)
-        try:
-            b.start()
-            if not b.is_logged_in():
-                raise NeedHuman(LOGIN_EXPIRED_MSG)
-            _sync_progress(b, note="打卡顺带校核")
+    # 补评论也会用网页版模型，和回复任务一样使用本线程的共享浏览器。
+    # 独占浏览器会让模型驱动再开 profile 时撞锁。
+    b = None
+    try:
+        b = get_browser()
+        if not b.is_logged_in():
+            raise NeedHuman(LOGIN_EXPIRED_MSG)
+        _sync_progress(b, note="打卡顺带校核")
 
-            def _say(text):
-                if progress:
-                    try:
-                        progress({"message": text})
-                    except Exception:      # noqa: BLE001
-                        pass
+        def _say(text):
+            if progress:
+                try:
+                    progress({"message": text})
+                except Exception:      # noqa: BLE001
+                    pass
 
-            r = checkin_task.run_checkin_job(b, progress=_say)
-        except ProfileBusy as exc:
-            raise BrowserBusy(str(exc))
-        finally:
+        r = checkin_task.run_checkin_job(b, progress=_say,
+                                       comment_ctx=_checkin_context(job))
+    except ProfileBusy as exc:
+        raise BrowserBusy(str(exc))
+    finally:
+        if b is not None:
             try:
-                b.close()
+                from web_drivers import reset_driver
+                reset_driver(delete_session=True)
+            except Exception:          # noqa: BLE001
+                pass
+            try:
+                close_shared_browser()
             except Exception:          # noqa: BLE001
                 pass
     ok = bool(r.get("ok"))
-    # 失败记 FAILED（触发当日补位重试，最晚仍在自己的时段内）；
+    # 欠项记 FAILED 并补位，但有效巡检的欠项不累计技术失败，避免停用次日补做。
     # 「今天不需要补做」是成功（ok=True, units=0），不是失败。
     return {
         "ok": ok,
         "units": max(0, int(r.get("units") or 0)),
         "status": STATUS_DONE if ok else STATUS_FAILED,
+        "retry_without_failure": bool(r.get("incomplete")),
         "message": r.get("detail") or ("完成" if ok else "未完成"),
         "artifacts": [],
     }
@@ -398,11 +409,15 @@ def _reply_comment(job, should_stop=None, progress=None):
         except Exception:          # noqa: BLE001
             pass
     ok = bool(r.get("ok"))
+    checked = bool(r.get("checked"))
+    message = r.get("detail") or ("完成" if ok else "未完成")
+    if checked and not dry_run and not r.get("units"):
+        message = "自有故事评论检查完成，未发送评论：%s；后续读取故事时补做" % message
     return {
-        "ok": ok,
+        "ok": ok or checked,
         "units": max(0, int(r.get("units") or 0)),
-        "status": STATUS_DONE if ok else STATUS_FAILED,
-        "message": r.get("detail") or ("完成" if ok else "未完成"),
+        "status": STATUS_DONE if ok or checked else STATUS_FAILED,
+        "message": message,
         "artifacts": [],
     }
 

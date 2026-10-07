@@ -167,7 +167,9 @@ async () => {
   const collects = others.length > 0 ? others[0] : null;
   const hearts = others.length > 1 ? others[1] : null;
   const publishTime = timeEl ? timeEl.textContent.trim().replace(/^发布于/, '').trim() : '';
-  return { title, answer, footer: { likes, comments, collects, hearts, publish_time: publishTime, answer_url: location.href } };
+  const answerLink = scope.querySelector('a[href*="/answer/"]');
+  const answerUrl = answerLink ? answerLink.href : location.href;
+  return { title, answer, footer: { likes, comments, collects, hearts, publish_time: publishTime, answer_url: answerUrl } };
 }
 """
 

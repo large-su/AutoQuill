@@ -860,19 +860,22 @@ _EDITOR_STATE_JS = _js('', '''
 ''')
 
 # 给「这条回答」发新评论的入口（真机探针 2026-09-29 确认）：
-#   回答操作栏里的按钮文案是「添加评论」（class 含 ContentItem-action，文本带零宽字符）；
-#   ★ 必须限定在 .ContentItem-actions 内——问题头部也有「N 条评论」，
+#   零评论是「添加评论」，已有评论是「N 条评论」，展开后是「收起评论」；
+#   ★ 必须限定在首条回答内——问题头部也有「N 条评论」，
 #     点错了展开的是问题的评论（同类坑真机踩过）；
 #   ★ 可见性用 shown()（几何判断）挑**优先**候选，但找不到可见的就退回第一个匹配：
 #     回答页操作栏是 fixed 布局（offsetParent 恒为 null），不能拿它当过滤器。
-_OPEN_ANSWER_COMMENT_JS = _js('', '''
-  const scopes = Array.from(document.querySelectorAll(
-      '.AnswerItem .ContentItem-actions, .QuestionAnswer-content .ContentItem-actions, .ContentItem-actions'));
+_OPEN_ANSWER_COMMENT_JS = _js('', r'''
+  const answer = document.querySelector('.AnswerItem')
+      || document.querySelector('.QuestionAnswer-content');
+  const scopes = answer ? Array.from(answer.querySelectorAll('.ContentItem-actions')) : [];
   const picks = [];
   for (const scope of scopes) {
     const btns = Array.from(scope.querySelectorAll('button'));
     for (const b of btns) {
-      if (flat(txt(b)) === '添加评论'
+      const label = flat(txt(b));
+      if (label === '添加评论' || label === '收起评论'
+          || /^\d[\d,\s]*条评论$/.test(label)
           || /添加评论/.test(b.getAttribute('aria-label') || '')) {
         picks.push(b);
       }
@@ -880,8 +883,9 @@ _OPEN_ANSWER_COMMENT_JS = _js('', '''
   }
   if (!picks.length) return { ok: false, reason: 'no-comment-entry' };
   const hit = picks.find(shown) || picks[0];      // 优先可见的那个
-  hit.click();
-  return { ok: true, via: flat(txt(hit)) === '添加评论' ? '添加评论' : 'aria',
+  const label = flat(txt(hit));
+  if (label !== '收起评论') hit.click();          // 已展开时保持编辑器打开
+  return { ok: true, via: label || 'aria',
            shown: shown(hit), candidates: picks.length };
 ''')
 
@@ -1027,8 +1031,8 @@ class ReplyActionsMixin:
     def open_answer_comment_editor(self, pause=2.5):
         '''点开「这条回答」的评论输入框（给别人的回答发**新评论**，不是回复）。
 
-        真机探针确认（2026-09-29）：回答操作栏里是 `添加评论` 按钮
-        （class 含 ContentItem-action）；点开出现 Draft.js 编辑器（自动聚焦），
+        回答操作栏里是 `添加评论` 或 `N 条评论` 按钮；已展开时不再次收起。
+        点开出现 Draft.js 编辑器（自动聚焦），
         发表按钮文案是「发布」。
         ★ 必须限定在 `本回答` 的 .ContentItem-actions 内：问题头部也有
         「N 条评论」，点错了展开的是**问题**的评论（真机踩过同类坑）。
@@ -1098,6 +1102,22 @@ class ReplyActionsMixin:
         except Exception as exc:            # noqa: BLE001
             return False, 'keyboard.type', str(exc)
 
+    def _restore_comment_toolbar(self):
+        '''输入后工具栏收起时，重新触发同一编辑器的焦点事件。
+
+        真机实测（2026-10-07）：Draft 编辑器仍有焦点和正文，但「发布」
+        按钮已被卸载；单纯 focus() 无效，失焦再真实点击才会恢复工具栏。
+        不重输正文、不按 Enter，只由调用方继续检查发送就绪状态。
+        '''
+        try:
+            editor = self.page.locator('div.public-DraftEditor-content').last
+            editor.blur(timeout=5000)
+            editor.click(timeout=5000)
+            return True
+        except Exception as exc:            # noqa: BLE001
+            log.debug('恢复评论工具栏失败：%s', exc)
+            return False
+
     def send_answer_comment(self, text, dry_run=False, type_pause=0.4,
                            ready_timeout=10, verify_wait=8):
         '''在当前回答页给这条回答发一条新评论。
@@ -1120,11 +1140,18 @@ class ReplyActionsMixin:
         log.info('评论兜底：已用 %s 输入正文', how)
         deadline = time.time() + max(2, int(ready_timeout))
         state = {}
+        restored_toolbar = False
         while time.time() < deadline:
             time.sleep(0.8)
             state = self._safe_evaluate(_EDITOR_STATE_JS) or {}
-            if not state.get('publish_disabled'):
+            if state.get('publish_found') and not state.get('publish_disabled'):
                 break
+            if (not state.get('publish_found') and state.get('has_editor')
+                    and flat_text(state.get('text')) == flat_text(text)
+                    and not restored_toolbar):
+                restored_toolbar = True       # 每次发送最多恢复一次，仍受就绪超时约束
+                if self._restore_comment_toolbar():
+                    log.info('评论兜底：已重新聚焦编辑器，等待发布工具栏恢复')
         if state.get('publish_disabled') or not state.get('publish_found'):
             self._clear_editor()
             return {'ok': False, 'sent': False,
@@ -1185,7 +1212,7 @@ class ReplyActionsMixin:
         while time.time() < deadline:
             time.sleep(0.8)
             state = self._safe_evaluate(_EDITOR_STATE_JS) or {}
-            if not state.get('publish_disabled'):
+            if state.get('publish_found') and not state.get('publish_disabled'):
                 break
         if state.get('publish_disabled') or not state.get('publish_found'):
             self._clear_editor()

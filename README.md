@@ -1,11 +1,11 @@
-﻿# AutoQuill v5.1.1
+﻿# AutoQuill v5.1.2
 
 本地的**知乎故事创作助手**：自动选题 → 学习指定作者的文风生成故事 → 写入知乎草稿。
 一键安装，无需 Python、无需命令行。
 
 | 项目 | 内容 |
 |---|---|
-| **当前版本** | v5.1.1|
+| **当前版本** | v5.1.2|
 | **平台** | Windows 10 / 11（x64） |
 | **发布页** | [Releases](https://github.com/large-su/AutoQuill/releases) |
 | **变更记录** | [CHANGELOG.md](CHANGELOG.md) |
@@ -81,7 +81,7 @@
 **校验安装包**（可选）：同目录的 `.sha256` 文件为安装包的 SHA256 值。
 
 ```powershell
-certutil -hashfile AutoQuill-Setup-5.1.1.exe SHA256
+certutil -hashfile AutoQuill-Setup-5.1.2.exe SHA256
 ```
 
 ---

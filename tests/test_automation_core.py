@@ -8,6 +8,7 @@
   - 无人化不能黑箱 → 台账/熔断/暂停通知测试。
 """
 import tempfile
+import shutil
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -715,6 +716,93 @@ class SchedulerTest(unittest.TestCase):
         self.sched.start()
         self.sched._tick()
         self.assertEqual(self.calls, [])
+
+    def test_checkin_incomplete_retries_without_accumulating_failures(self):
+        """有效巡检的欠项可补位，三次仍欠也不能熔断 checkin。"""
+        store.save_plan(_only("checkin", daily_cap=1,
+                             window={"start": "08:00", "end": "23:30"}))
+        self.now = datetime(2026, 9, 20, 12, 0, 0)
+        day = planner.materialize_day(self.now, store.load_plan(), {}, {})
+        store.save_day("2026-09-20", day)
+        self.result = {"ok": False, "units": 0, "status": planner.STATUS_FAILED,
+                       "message": "评论仍欠", "retry_without_failure": True}
+        for _ in range(3):
+            due = [j for j in store.load_day("2026-09-20")["schedule"]
+                   if j.get("status") == planner.STATUS_PLANNED]
+            self.assertTrue(due, store.load_day("2026-09-20"))
+            self.now = datetime.fromisoformat(due[0]["planned_at"])
+            self.sched._tick()
+            self._advance(20)
+        self.assertTrue(store.load_plan()["tasks"]["checkin"]["enabled"])
+        self.assertEqual(self.sched._fails.get("checkin", 0), 0)
+        self.assertEqual(len(self.calls), 3)
+
+
+class ExecutorCompletionContractTest(unittest.TestCase):
+    """回复/打卡执行器的 checked 与资源清理契约。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_auto_exec_contract_"))
+        self._p = mock.patch.object(paths, "DATA_ROOT", str(self.tmp))
+        self._p.start()
+        from automation import executor
+        self.executor = executor
+        self.browser = mock.Mock()
+        self.browser.is_logged_in.return_value = True
+        self._patches = [
+            mock.patch("web_drivers.browser_pool.get_browser", return_value=self.browser),
+            mock.patch("web_drivers.browser_pool.profile_in_use", return_value=False),
+            mock.patch.object(self.executor, "_browser_busy", return_value=[]),
+            mock.patch.object(self.executor, "_sync_progress"),
+            mock.patch("web_drivers.reset_driver"),
+            mock.patch("web_drivers.browser_pool.close_shared_browser"),
+        ]
+        self._reset_driver = self._patches[4].start()
+        self._close_browser = self._patches[5].start()
+        for p in self._patches[:4]:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+        self._p.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_reply_checked_but_not_sent_is_done_with_followup_message(self):
+        from applications.zhihu_story import reply_task
+        with mock.patch.object(reply_task, "run_reply_job", return_value={
+                "checked": True, "ok": False, "units": 0,
+                "detail": "没有合适评论"}):
+            r = self.executor._reply_comment({"params": {"count": 1,
+                                                            "dry_run": False}})
+        self.assertEqual(r["status"], planner.STATUS_DONE)
+        self.assertEqual(r["units"], 0)
+        self.assertIn("未发送", r["message"])
+        self.assertIn("补做", r["message"])
+        self.assertTrue(r["ok"])
+
+    def test_reply_unchecked_error_is_failed(self):
+        from applications.zhihu_story import reply_task
+        with mock.patch.object(reply_task, "run_reply_job", return_value={
+                "checked": False, "ok": False, "units": 0,
+                "detail": "采集失败"}):
+            r = self.executor._reply_comment({"params": {"count": 1,
+                                                            "dry_run": False}})
+        self.assertEqual(r["status"], planner.STATUS_FAILED)
+        self.assertFalse(r["ok"])
+
+    def test_checkin_incomplete_is_retry_without_failure_and_closes_browser(self):
+        from applications.zhihu_story import checkin_task
+        with mock.patch.object(checkin_task, "run_checkin_job", return_value={
+                "ok": False, "units": 0, "incomplete": True,
+                "detail": "评论仍欠"}):
+            r = self.executor._checkin({"params": {}})
+        self.assertEqual(r["status"], planner.STATUS_FAILED)
+        self.assertTrue(r["retry_without_failure"])
+        self.assertFalse(r["ok"])
+        self.assertTrue(self.browser.is_logged_in.called)
+        self.assertTrue(self._reset_driver.called)
+        self.assertTrue(self._close_browser.called)
 
 
 

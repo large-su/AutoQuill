@@ -364,7 +364,13 @@ class AutomationScheduler:
             self._run_progress = None
         self._ledgered_keys.add(job.get("key") or "")
         before = self._fails.get(job["type"], 0)
-        self._update_failures(job["type"], job["status"], plan)
+        # 有效巡检确认欠项：当日继续补位，但不因业务未达成停用次日任务。
+        # 浏览器/采集等技术失败仍沿用连续失败熔断。
+        if result.get("retry_without_failure"):
+            self._fails[job["type"]] = 0
+            before = 0
+        else:
+            self._update_failures(job["type"], job["status"], plan)
         # 失败补位：熔断前先试着「当日完成」（用户口径：数量当日完成即可）
         if (job["status"] == STATUS_FAILED and before + 1 < CIRCUIT_BREAK_AFTER
                 and planner.plan_retry(self._now(), plan, day_data, job,

@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from core import checkin as ck
 from core import paths
@@ -57,6 +58,20 @@ class TestState(CheckinBase):
         self.assertEqual(s['tasks'], {})               # 当日任务状态重新读
         self.assertEqual(s['campaign_url'], 'https://x/1')   # 当期链接沿用
         self.assertEqual(s['campaign_title'], '第五十三期')
+
+    def test_cross_day_clears_reader_check_and_reference_story(self):
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        self.write_raw({
+            'date': yesterday,
+            'reader_comments': {'checked_at': yesterday + 'T09:00:00',
+                                'outcome': 'no_candidate',
+                                'dry_run': False, 'result': {}},
+            'reference_story': {'title': '旧故事', 'url': 'https://x/old',
+                                'text': '旧正文'},
+        })
+        s = ck.load_state()
+        self.assertEqual(s['reader_comments'], {})
+        self.assertEqual(s['reference_story'], {})
 
     def test_corrupt_file_tolerated(self):
         with open(ck.state_path(), 'w', encoding='utf-8') as f:
@@ -300,19 +315,57 @@ class TestContextWriterIsOnlyAutomation(unittest.TestCase):
 class _FakeCommentBrowser:
     '''只实现评论兜底用到的那几个方法。'''
 
-    def __init__(self, send_ok=True):
+    def __init__(self, send_ok=True, manage_comments=None, tasks=None,
+                 targets=None, send_results=None, answer_url=''):
         self.comments = []
         self.opened = []
         self.send_ok = send_ok
+        self.manage_comments = list(manage_comments or [])
+        self.collect_manage_comments_calls = 0
+        self.tasks = tasks or {}
+        self.targets = targets if targets is not None else []
+        self.send_results = list(send_results or [])
+
+        class _Page:
+            def __init__(self, url):
+                self.url = url
+                self.gotos = []
+                self.fail = False
+
+            def goto(self, url, **kwargs):
+                self.gotos.append((url, kwargs))
+                if self.fail:
+                    raise RuntimeError('导航失败')
+                self.url = url
+
+        self.page = _Page(answer_url)
 
     def open_question(self, url):
         self.opened.append(url)
 
+    def collect_manage_comments(self, limit=20):
+        self.collect_manage_comments_calls += 1
+        return {'comments': list(self.manage_comments)}
+
+    def read_checkin_tasks(self, _url):
+        return {'tasks': dict(self.tasks), 'title': '测试打卡'}
+
+    def list_interact_targets(self):
+        return {'items': list(self.targets)}
+
+    def discover_campaign_url(self):
+        return {'ok': True, 'url': 'https://example.test/checkin', 'text': '测试'}
+
     def send_answer_comment(self, text, dry_run=False):
         self.comments.append(text)
+        if self.send_results:
+            return self.send_results.pop(0)
         if self.send_ok:
             return {'ok': True, 'sent': True, 'detail': '已发送并确认'}
         return {'ok': False, 'sent': False, 'detail': '发布按钮不可用'}
+
+    def _settle_answer_page(self, timeout=15):
+        return None
 
 
 class CommentFallbackTest(unittest.TestCase):
@@ -399,6 +452,226 @@ class CommentFallbackTest(unittest.TestCase):
                                         ctx={'is_last': False})
         self.assertTrue(r['skipped'])
         self.assertFalse(r['sent'])
+
+    def test_read_story_falls_back_after_daily_reader_check_without_last_slot(self):
+        '''自有评论检查无合适对象后，已读到故事就补评论，不依赖末班成功。'''
+        from workflows.base import WorkflowBase
+
+        st = ck.fresh_state()
+        st['reader_comments'] = {'checked_at': ck.now_str(),
+                                 'outcome': 'no_candidate', 'dry_run': False,
+                                 'result': {'ok': True, 'units': 0,
+                                            'detail': '没有可回复的新评论',
+                                            'replies': [], 'dropped': []}}
+        ck.save_state(st)
+        browser = _FakeCommentBrowser()
+        workflow = WorkflowBase()
+        workflow._browser = lambda: browser
+        ck.set_context({'is_last': False, 'follow': 'done', 'vote': 'done',
+                        'comment': 'do', 'reader_check': True})
+        try:
+            with patch.object(task, '_default_ask', return_value=lambda *a, **k:
+                              '那把伞收起来的细节写得好，水珠那段一下就有画面了'):
+                workflow.maybe_checkin_interact(
+                    'https://www.zhihu.com/question/1',
+                    story={'title': '题', 'text': '他把伞收起来，水珠落在地砖上。',
+                           'url': 'https://www.zhihu.com/question/1'})
+        finally:
+            ck.clear_context()
+        self.assertEqual(len(browser.comments), 1,
+                         '已检查自有评论却等末班，会在末班失败时漏掉整日评论')
+        self.assertTrue(ck.load_state()['done']['comment'])
+
+    def test_reader_scan_once_then_fallback_on_later_stories(self):
+        '''自有评论每日只扫描一次；无候选后每个后续故事仍可兜底。'''
+        from applications.zhihu_story import reply_task
+
+        cards = [
+            {'key': 'ad-1', 'author': '广告号', 'text': '加微信互关',
+             'answer_url': 'https://example.test/a/1'},
+        ]
+        browser = _FakeCommentBrowser(
+            manage_comments=cards,
+            send_results=[
+                {'ok': False, 'sent': False, 'detail': 'no-comment-entry'},
+                {'ok': True, 'sent': True, 'detail': '已发送并确认'},
+            ])
+        st = ck.fresh_state()
+        ctx = {'reader_check': True, 'comment': 'do', 'is_last': False,
+               'follow': 'done', 'vote': 'done'}
+        stories = [
+            {'title': '故事一', 'text': '第一段细节很清楚。',
+             'url': 'https://example.test/q/1'},
+            {'title': '故事二', 'text': '第二段细节很清楚。',
+             'url': 'https://example.test/q/2'},
+            {'title': '故事三', 'text': '第三段细节很清楚。',
+             'url': 'https://example.test/q/3'},
+        ]
+        fallback_calls = [0]
+
+        def fallback_ask(*args, **kwargs):
+            fallback_calls[0] += 1
+            return '这段细节很清楚，节奏收得很稳，读起来很有画面。'
+
+        for story in stories:
+            one_ctx = dict(ctx, story=story)
+            task.run_interaction(browser, story['url'], ctx=one_ctx,
+                                 state=st, ask=fallback_ask)
+            st = ck.load_state()
+            # 每轮传入的是同一份逻辑上下文，真实流程依靠当日缓存避免重扫。
+        self.assertEqual(browser.collect_manage_comments_calls, 1)
+        self.assertEqual(len(browser.comments), 2,
+                         '首个故事发送失败后，后续故事应重试一次')
+        self.assertEqual(fallback_calls[0], 2)
+        self.assertTrue(ck.load_state()['done']['comment'])
+        sent_rows = [r for r in ck.load_replies()
+                     if r.get('source') == 'checkin-fallback' and r.get('sent')]
+        self.assertEqual(len(sent_rows), 1)
+        self.assertIsInstance(ck.load_state()['reader_comments'].get('result'), dict)
+
+    def test_successful_reader_reply_heals_and_fallback_does_not_send(self):
+        '''自有故事评论已真实发送后，回到参考故事也不应再补一条评论。'''
+        from applications.zhihu_story import reply_task
+
+        browser = _FakeCommentBrowser()
+        st = ck.fresh_state()
+        story_url = 'https://example.test/q/reference'
+
+        def reader_success(*args, **kwargs):
+            ck.append_reply({'key': 'reader-1', 'reply': '已回复读者',
+                             'sent': True, 'dry_run': False})
+            return {'ok': True, 'units': 1, 'detail': '回复 1 条',
+                    'replies': ['已回复读者'], 'dropped': []}
+
+        with patch.object(reply_task, 'run_reply_job', side_effect=reader_success):
+            r = task.run_interaction(
+                browser, story_url,
+                ctx={'reader_check': True, 'comment': 'do', 'is_last': False,
+                     'follow': 'done', 'vote': 'done',
+                     'story': {'title': '参考', 'text': '参考故事正文。',
+                               'url': story_url}},
+                state=st, ask=lambda *a, **k: '不应生成')
+        self.assertEqual(browser.comments, [])
+        self.assertIn(story_url, browser.opened)
+        self.assertTrue(ck.load_state()['done']['comment'])
+        self.assertNotIn('comment', r['handled'])
+
+    def test_no_follow_vote_target_does_not_block_comment(self):
+        '''关注/赞同没有可操作目标时，独立的评论兜底仍应执行。'''
+        browser = _FakeCommentBrowser(targets=[])
+        st = ck.fresh_state()
+        r = task.run_interaction(
+            browser, 'https://example.test/q/1',
+            ctx={'follow': 'do', 'vote': 'do', 'comment': 'do',
+                 'is_last': False,
+                 'story': {'title': '题目', 'text': '这是一段足够具体的正文。',
+                           'url': 'https://example.test/q/1'}},
+            state=st,
+            ask=lambda *a, **k: '这段具体细节很有画面，节奏也处理得很自然。')
+        self.assertEqual(len(browser.comments), 1)
+        self.assertIn('comment', r['handled'])
+        self.assertTrue(st['done']['comment'])
+
+    def test_checkin_without_reference_story_reports_comment_pending(self):
+        '''晚间关注/赞同已完成但评论欠账、又没有参考故事时，结果必须失败。'''
+        tasks = {
+            'follow': {'title': '关注', 'done': True},
+            'vote': {'title': '赞同', 'done': True},
+            'comment': {'title': '评论', 'done': False},
+        }
+        browser = _FakeCommentBrowser(tasks=tasks)
+        r = task.run_checkin_job(browser, url='https://example.test/checkin',
+                                 is_last=True)
+        self.assertFalse(r['ok'])
+        self.assertIn('评论仍未达成', r['detail'])
+
+    def test_checkin_uses_saved_story_to_complete_comment_and_summary(self):
+        '''晚间巡检可使用已保存故事补评论，并将最终摘要记为完成。'''
+        tasks = {
+            'follow': {'title': '关注', 'done': True},
+            'vote': {'title': '赞同', 'done': True},
+            'comment': {'title': '评论', 'done': False},
+        }
+        browser = _FakeCommentBrowser(tasks=tasks)
+        st = ck.fresh_state()
+        st['reference_story'] = {
+            'title': '已保存故事', 'text': '这是一段具体的已保存正文。',
+            'url': 'https://example.test/q/saved'}
+        ck.save_state(st)
+        r = task.run_checkin_job(browser, url='https://example.test/checkin',
+                                 is_last=True,
+                                 ask=lambda *a, **k:
+                                 '已保存故事中的细节很清楚，结尾的留白也很舒服。')
+        self.assertTrue(r['ok'], r)
+        self.assertTrue(r['summary']['ok'])
+        self.assertTrue(ck.load_state()['done']['comment'])
+
+    def test_dry_run_success_does_not_mark_comment_done(self):
+        '''dry-run 生成成功但未发送，不能把评论打卡置为完成。'''
+        browser = _FakeCommentBrowser()
+        st = ck.fresh_state()
+        r = task.maybe_comment_fallback(
+            browser,
+            ctx={'comment': 'do', 'story': {'title': '题',
+                                            'text': '正文有具体细节。',
+                                            'url': 'https://example.test/q/1'},
+                 'comment_dry_run': True},
+            state=st,
+            ask=lambda *a, **k: '正文里的具体细节很有画面，节奏也很自然。')
+        self.assertTrue(r['ok'])
+        self.assertFalse(r['sent'])
+        self.assertFalse(st['done']['comment'])
+        self.assertEqual(len(ck.replied_keys()), 0)
+
+    def test_sent_ledger_prevents_duplicate_when_state_lost(self):
+        '''本地状态丢失时，真实发送台账仍应阻止重复评论。'''
+        ck.append_reply({'key': '', 'reply': '以前已经发过', 'sent': True,
+                         'dry_run': False, 'source': 'checkin-fallback'})
+        browser = _FakeCommentBrowser()
+        st = ck.fresh_state()
+        r = task.maybe_comment_fallback(
+            browser,
+            ctx={'comment': 'do', 'story': {'title': '题',
+                                            'text': '正文有具体细节。',
+                                            'url': 'https://example.test/q/1'}},
+            state=st,
+            ask=lambda *a, **k: '新的评论不应生成')
+        self.assertTrue(r['skipped'])
+        self.assertEqual(browser.comments, [])
+        self.assertTrue(st['done']['comment'])
+
+    def test_answer_story_url_uses_direct_navigation(self):
+        '''回答链接必须原样导航，不能退化成丢失 answer id 的问题页。'''
+        answer_url = 'https://www.zhihu.com/question/1/answer/2'
+        browser = _FakeCommentBrowser(answer_url='https://www.zhihu.com/question/1')
+        st = ck.fresh_state()
+        r = task.maybe_comment_fallback(
+            browser,
+            ctx={'comment': 'do', 'story': {'title': '题',
+                                            'text': '正文包含具体细节。',
+                                            'url': answer_url}},
+            state=st,
+            ask=lambda *a, **k: '正文的具体细节很有画面，节奏也很自然。')
+        self.assertTrue(r['sent'], r)
+        self.assertEqual(browser.page.gotos[0][0], answer_url)
+        self.assertEqual(browser.opened, [])
+
+    def test_answer_story_navigation_failure_does_not_send(self):
+        browser = _FakeCommentBrowser(
+            answer_url='https://www.zhihu.com/question/1', send_ok=True)
+        browser.page.fail = True
+        st = ck.fresh_state()
+        answer_url = 'https://www.zhihu.com/question/1/answer/2'
+        r = task.maybe_comment_fallback(
+            browser,
+            ctx={'comment': 'do', 'story': {'title': '题',
+                                            'text': '正文包含具体细节。',
+                                            'url': answer_url}},
+            state=st,
+            ask=lambda *a, **k: '导航失败时不应发送评论内容。')
+        self.assertFalse(r['sent'])
+        self.assertEqual(browser.comments, [])
+        self.assertFalse(st['done']['comment'])
 
     def test_skips_when_comment_already_done(self):
         st = ck.fresh_state()

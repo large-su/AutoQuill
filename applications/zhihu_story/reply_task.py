@@ -213,17 +213,60 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
     '''
     count = max(1, int(count or 1))
     state = checkin.load_state(now=now)
+    today = checkin.today_key(now)
+    cached = state.get('reader_comments') or {}
+    if (cached.get('checked_at') or '').startswith(today) and \
+            bool(cached.get('dry_run')) == bool(dry_run) and \
+            isinstance(cached.get('result'), dict):
+        result = dict(cached['result'])
+        result.setdefault('checked', True)
+        result['detail'] = '今日已检查自有故事评论：' + (result.get('detail') or '')
+        return result
+
+    def finish(result, outcome=None, cache=True, stats=None):
+        """Record every normal early return and cache only a complete check."""
+        result = dict(result)
+        result['checked'] = bool(cache)
+        if cache:
+            state['reader_comments'] = {
+                'checked_at': checkin.now_str(now),
+                'outcome': outcome or ('sent' if result.get('units') else 'not_sent'),
+                'dry_run': bool(dry_run),
+                'result': dict(result),
+            }
+            checkin.save_state(state)
+        if stats is None:
+            _record_run_from_result(result, dry_run, now=now)
+        else:
+            _record_run(stats[0], stats[1], stats[2], stats[3], stats[4],
+                        dry_run, details=stats[5], now=now)
+        return result
+
     # 去重口径：真发过的不再回；演练阶段另外跳过「已经生成过草稿」的那些
     # （换样本，别两天看同一条），但切自动后它们会重新变成可回复。
     replied = checkin.replied_keys()
     if dry_run:
         replied = replied | checkin.dryrun_keys()
-    got = browser.collect_manage_comments(limit=manage_limit)
+    try:
+        got = browser.collect_manage_comments(limit=manage_limit)
+        if not isinstance(got, dict):
+            raise RuntimeError('评论管理页返回格式异常')
+    except Exception as exc:             # noqa: BLE001
+        log.warning('采集评论失败：%s', exc)
+        result = {'ok': False, 'units': 0,
+                  'detail': '评论管理页读取失败：%s' % exc,
+                  'replies': [], 'dropped': []}
+        return finish(result, cache=False)
     cards = got.get('comments') or []
     _say(progress, '评论管理页读到 %d 条评论' % len(cards))
     if not cards:
-        return {'ok': False, 'units': 0, 'detail': '评论管理页没读到评论（可能未登录/改版）',
-                'replies': [], 'dropped': []}
+        empty_ok = got.get('ok') is True
+        result = {'ok': empty_ok, 'units': 0,
+                  'detail': ('自有故事暂无评论' if empty_ok else
+                             '评论管理页没读到评论（可能未登录/改版）'),
+                  'replies': [], 'dropped': []}
+        return finish(result, outcome='no_candidate', cache=empty_ok,
+                      stats=(0, 0, {}, 0, 0, [result['detail']]))
     filtered = prefilter(cards, replied_keys=replied)
     candidates, dropped = filtered['candidates'], filtered['dropped']
     drop_counts = {}
@@ -234,15 +277,22 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
          % (len(candidates), len(dropped),
             '、'.join(sorted({d['reason'].split(':')[0] for d in dropped})) or '无'))
     if not candidates:
-        return {'ok': True, 'units': 0,
-                'detail': '没有可回复的新评论（%d 条里已回复/引流/戾气/无内容全被过滤）'
-                          % len(cards),
-                'replies': [], 'dropped': dropped}
+        result = {'ok': True, 'units': 0,
+                  'detail': '没有可回复的新评论（%d 条里已回复/引流/戾气/无内容全被过滤）'
+                            % len(cards),
+                  'replies': [], 'dropped': dropped}
+        return finish(result, outcome='no_candidate',
+                      stats=(len(cards), len(candidates), drop_counts, 0, 0,
+                             [result['detail']]))
     driver = None
     done, skipped, details = [], [], []
+    pick_failed = False
+    model_no_candidate = False
     try:
-        from web_drivers import get_driver
-        driver = get_driver()
+        from config import LLM_MODE
+        if LLM_MODE != 'api':
+            from web_drivers import get_driver
+            driver = get_driver()
         for _i in range(count):
             pool = [c for c in candidates if c['key'] not in replied]
             if not pool:
@@ -254,12 +304,17 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
                 raw = ask_llm(prompt, driver=driver, reuse_session=False)
                 picked = pick_from_candidates(pool, raw)
                 if picked is None:
-                    _say(progress, '大模型没挑出可友善回应的评论（返回 %r）' % (raw or '')[:20])
-                    details.append('大模型判定这批没有适合友善回应的评论')
+                    model_no_candidate = str(raw or '').strip() == '0'
+                    pick_failed = not model_no_candidate
+                    detail = ('大模型判定这批没有适合友善回应的评论' if model_no_candidate
+                              else '大模型选择结果无效，未完成自有评论检查（稍后可重试）')
+                    _say(progress, detail)
+                    details.append(detail)
                     break
             except Exception as exc:             # noqa: BLE001
                 log.warning('挑选评论失败：%s', exc)
                 details.append('挑选评论失败：%s' % exc)
+                pick_failed = True
                 break
             comment = rp.clean_comment_text(picked.get('text'))
             _say(progress, '选中：%s（%s）' % (comment[:24], picked.get('author') or '匿名'))
@@ -287,11 +342,11 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
                 skipped.append(record)
                 details.append('生成不合格（%s），今天不回这条'
                                % '；'.join(record['issues'] or ['未知']))
-                checkin.append_reply(dict(record, failed=True))
+                checkin.append_reply(dict(record, failed=True), now=now)
                 replied.add(record['key'])
                 continue
             if dry_run:
-                checkin.append_reply(record)
+                checkin.append_reply(record, now=now)
                 replied.add(record['key'])
                 done.append(record)
                 details.append('演练：%s → %s' % (comment[:16], record['reply']))
@@ -320,7 +375,7 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
                     if already:
                         details.append('这条评论下已有我们的回复，跳过')
                         replied.add(record['key'])
-                        checkin.append_reply(dict(record, skipped='already-replied'))
+                        checkin.append_reply(dict(record, skipped='already-replied'), now=now)
                         continue
                     sent = browser.send_reply(comment, record['reply'])
                 except Exception as exc:         # noqa: BLE001
@@ -328,9 +383,9 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
                     sent = {'ok': False, 'sent': False, 'detail': str(exc)}
             record['sent'] = bool(sent.get('sent'))
             record['send_detail'] = sent.get('detail') or ''
-            checkin.append_reply(record)
+            checkin.append_reply(record, now=now)
             replied.add(record['key'])
-            if sent.get('ok'):
+            if sent.get('ok') and sent.get('sent'):
                 done.append(record)
                 details.append('已回复：%s → %s' % (comment[:16], record['reply']))
             elif sent.get('sent'):
@@ -351,20 +406,20 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
         #   根因是这里从来没记过账，「发布评论✓」完全依赖读打卡页——而打卡页
         #   有自己的统计延迟，刚发完就读往往还是「去评论」，于是那一格永远是 ✗。
         #   注意：只认「真的发出去了」（ok 或 sent），失败/跳过绝不记账。
-        if done:
+        if any(r.get('sent') for r in done) and not dry_run:
             checkin.mark_done(
                 state, 'comment',
                 detail='回复读者评论 %d 条（%s）'
-                       % (len(done), done[0].get('author') or '读者'))
+                       % (len(done), done[0].get('author') or '读者'), now=now)
             log.info('评论回复：已记账，打卡「发布评论」置为达成')
         # 顺带刷新打卡状态：评论任务在打卡页上算不算达成，一次页面就读得到
         # （本地已记账的项在 update_tasks 里只升不降，页面滞后也抹不掉）
-        summary = _refresh_checkin_after_reply(browser, state, progress)
+        summary = _refresh_checkin_after_reply(browser, state, progress, now=now)
         if done and summary and not summary.get('ok'):
             # 页面还没跟上（打卡页统计有延迟）：以本地记账为准重算一次摘要，
             # 免得通知里又出现「发布评论✗」把用户搞糊涂。
             fresh = checkin.summary(state)
-            checkin.set_result(state, fresh['ok'], fresh['line'])
+            checkin.set_result(state, fresh['ok'], fresh['line'], now=now)
             checkin.save_state(state)
             _say(progress, fresh['line'])
     finally:
@@ -374,9 +429,6 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
             except Exception:                     # noqa: BLE001
                 pass
     units = len(done)
-    _record_run(collected=len(cards), candidates=len(candidates),
-                drop_counts=drop_counts, picked=len(done) + len(skipped),
-                units=units, dry_run=dry_run, details=details)
     prefix = '演练' if dry_run else '回复'
     # ★ 2026-09-28：本轮**一条都没回**时，只报本轮的最后一条原因。
     #   旧写法会把前几轮的失败原因一起带上，通知里就会出现
@@ -388,15 +440,22 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
             detail += '：' + '；'.join(details[-3:])
     else:
         detail = details[-1] if details else '没有可回复的评论'
-    return {'ok': not skipped or bool(done), 'units': units, 'detail': detail,
-            'replies': [r.get('reply') for r in done],
-            'records': done + skipped, 'dropped': dropped}
+    result = {'ok': (not skipped or bool(done)) and not pick_failed,
+              'units': units, 'detail': detail,
+              'replies': [r.get('reply') for r in done],
+              'records': done + skipped, 'dropped': dropped}
+    outcome = 'sent' if (any(r.get('sent') for r in done) and not dry_run) else ('no_candidate' if model_no_candidate
+              else 'not_sent')
+    return finish(
+        result, outcome=outcome, cache=not pick_failed,
+        stats=(len(cards), len(candidates), drop_counts,
+               len(done) + len(skipped), units, details))
 
 
 
 
 def _record_run(collected, candidates, drop_counts, picked, units, dry_run,
-                details=()):
+                details=(), now=None):
     """把本次运行的概览写进 reply_runs.jsonl（UI 展示「今天抓了什么」）。"""
     try:
         checkin.append_reply_run({
@@ -407,13 +466,26 @@ def _record_run(collected, candidates, drop_counts, picked, units, dry_run,
             'units': int(units),
             'dry_run': bool(dry_run),
             'detail': '；'.join(list(details or [])[-3:])[:300],
+            'at': checkin.now_str(now),
         })
     except Exception as exc:                     # noqa: BLE001
         log.debug('回复运行统计写入失败（不影响回复）：%s', exc)
 
 
+def _record_run_from_result(result, dry_run, now=None):
+    records = result.get('records') or []
+    dropped = result.get('dropped') or []
+    counts = {}
+    for row in dropped:
+        reason = str((row or {}).get('reason') or '').split(':')[0]
+        counts[reason] = counts.get(reason, 0) + 1
+    _record_run(len(records) + len(dropped), 0, counts, len(records),
+                int(result.get('units') or 0), dry_run,
+                details=[result.get('detail') or ''], now=now)
 
-def _refresh_checkin_after_reply(browser, state, progress=None):
+
+
+def _refresh_checkin_after_reply(browser, state, progress=None, now=None):
     '''回复完顺手读一次打卡页：把「发布 1 条评论」的达成情况记进当日快照。
 
     返回最新摘要（读不到返回 None）。★ 页面读到什么**不会覆盖本地已记账的达成**
@@ -429,15 +501,15 @@ def _refresh_checkin_after_reply(browser, state, progress=None):
             checkin.set_campaign(state, url, found.get('text') or '')
         info = browser.read_checkin_tasks(url)
         if info.get('tasks'):
-            checkin.update_tasks(state, info['tasks'])
+            checkin.update_tasks(state, info['tasks'], now=now)
             if info.get('title'):
                 state['campaign_title'] = info['title']
             # 台账追溯：已经发出去的评论补记达成（打卡页统计有延迟）
-            healed = checkin.heal_from_ledger(state)
+            healed = checkin.heal_from_ledger(state, now=now)
             if healed:
                 log.info('评论回复：台账追溯补记打卡项 %s', healed)
             summary = checkin.summary(state)
-            checkin.set_result(state, summary['ok'], summary['line'])
+            checkin.set_result(state, summary['ok'], summary['line'], now=now)
             checkin.save_state(state)
             _say(progress, summary['line'])
             return summary

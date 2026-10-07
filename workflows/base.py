@@ -74,9 +74,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         没有上下文时**零开销、零行为变化**——手动跑完整链路不碰账号互动。
         失败只告警，绝不影响故事撰写与发布。
 
-        story: 参考故事 {'title','text','url'}。当天最后一班若「发布评论」
-               还没达成，就用它在参考故事下补一条贴题评论（用户 2026-09-29
-               口径：评论别人的回答没有限制，是打卡最可靠的保底）。
+        story: 参考故事 {'title','text','url'}。先做当日自有评论检查，
+               若「发布评论」还没达成，就在读到的参考故事下尝试补做。
         """
         try:
             from core import checkin as checkin_core
@@ -88,9 +87,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                 ctx['story'] = dict(story)
             wants = any(ctx.get(k) in ("do", "toggle")
                         for k in ("follow", "vote"))
-            # 评论兜底只在最后一班才可能需要（白天还有机会真回复读者评论），
-            # 且必须有参考故事正文——所以这里先做一次廉价判断，避免无谓调用。
-            wants_comment = bool(ctx.get("is_last")) and bool(
+            wants_comment = bool(
                 (ctx.get("story") or {}).get("text")
                 and (ctx.get("story") or {}).get("url"))
             if not (wants or wants_comment):
@@ -187,10 +184,10 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                 log.warning("on_extracted 回调失败", exc_info=True)
         # 打卡互动：提取成功后、生成开始前（此刻参考回答页就在眼前，
         # 关注/赞同/评论按钮零额外导航即可点到；无上下文时是空操作）。
-        # ★ 把参考故事一并传下去：当天最后一班若「发布评论」还没达成，
-        #   就在这里就地补一条贴题评论（评论别人的回答没有任何限制）。
+        # 把实际读取的回答链接保留下来，供评论与晚间巡检定位。
         self.maybe_checkin_interact(url, story={
-            "title": title or "", "text": answer or "", "url": url or ""})
+            "title": title or "", "text": answer or "",
+            "url": (_footer or {}).get("answer_url") or url or ""})
 
         # ★ 生成带反馈重试：无输出/过短/格式不合规都自动重试，最多
         # STORY_GENERATE_MAX_ATTEMPTS 次；重试时把上一版的失败原因
@@ -255,7 +252,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             except Exception:
                 log.warning("on_extracted 回调失败", exc_info=True)
         self.maybe_checkin_interact(url, story={
-            "title": title or "", "text": answer or "", "url": url or ""})
+            "title": title or "", "text": answer or "",
+            "url": (_footer or {}).get("answer_url") or url or ""})
 
         story, audit = self.generate_clean_with_retry(title, answer)
 
