@@ -22,6 +22,7 @@ __all__ = [
     "TOPIC_GENRE_PRIOR_MIN_AGE_DAYS",
     # 格式与素材
     "ENABLE_FORMAT_RETRY", "STORY_MATERIAL_MODE",
+    "READER_EXPERIENCE_ENABLE",
     # 知识库
     "KB_MAX_PER_GENRE", "KB_MERGE_TRIGGER", "KB_ENABLE", "RECIPE_VERBOSE_MODE",
     # reader_score
@@ -52,7 +53,7 @@ __all__ = [
     "BATCH_GENERATE_MIN_EXTRA", "BATCH_ROUND_SPLIT_ENABLE", "BATCH_MAX_PUBLISH_PER_ROUND",
     "BATCH_QUESTIONS_PER_PAGE", "SCROLLS_PER_REFRESH", "MAX_TOTAL_ATTEMPTS",
     "ENABLE_PARAGRAPH_ANALYSIS",
-    "SCORE_STORY_HEAD_CHARS", "SCORE_STORY_TAIL_CHARS",
+    "SCORE_STORY_HEAD_CHARS", "SCORE_STORY_MIDDLE_CHARS", "SCORE_STORY_TAIL_CHARS",
     "STORY_GENERATE_CONCURRENCY", "STORY_GENERATE_CONCURRENCY_AUTO",
     "STORY_GENERATE_CONCURRENCY_MIN", "STORY_GENERATE_CONCURRENCY_MAX",
     "STORY_GENERATE_MAX_ATTEMPTS",
@@ -176,6 +177,10 @@ ENABLE_FORMAT_RETRY = True
 #   "reference"            纯参考文章（旧模式，用 STORY_SYSTEM_PROMPT + 参考文章）
 #   "recipe_and_reference" 配方 + 参考文章结合（配方指引 + 参考文章风格借鉴）
 STORY_MATERIAL_MODE = "sample"
+
+# 读者体验实验：同一次生成内提示开篇承诺、选择后果与结尾兑现。
+# False 可恢复原提示词行为；状态进入演进方案指纹，便于后续对照。
+READER_EXPERIENCE_ENABLE = True
 
 # ============================================================
 # 知识库配置
@@ -343,8 +348,10 @@ MAX_TOTAL_ATTEMPTS = 1000
 # 正式跑批默认关闭段落分布图；调试段落长度时再打开
 ENABLE_PARAGRAPH_ANALYSIS = False
 
-# 评分时只取开头+结尾，减少评分 prompt 长度
-SCORE_STORY_HEAD_CHARS = 1000
+# 评分正文总预算仍为 1500 字：开头 + 两处中段 + 结尾。
+# 采样片段只能支持编辑判断，不能证明未展示部分的完整因果链。
+SCORE_STORY_HEAD_CHARS = 600
+SCORE_STORY_MIDDLE_CHARS = 400
 SCORE_STORY_TAIL_CHARS = 500
 
 # API 模式下故事并行生成的并发数（增大可缩短阶段2耗时，上限取决于 API 限流策略）

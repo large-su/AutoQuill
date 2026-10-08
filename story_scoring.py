@@ -24,6 +24,81 @@ from llm_client import call_llm_non_streaming, resolve_kb_llm_config
 log = logging.getLogger(__name__)
 
 
+def build_score_preview(story):
+    """按评分预算提取原文片段，保持位置顺序且不重复正文。
+
+    评分通常只需看到开头、若干中段和结尾。片段正文的字符数不超过
+    ``SCORE_STORY_HEAD_CHARS + SCORE_STORY_MIDDLE_CHARS +
+    SCORE_STORY_TAIL_CHARS``；省略说明属于标记，不计入该预算。
+    """
+    story = story or ""
+    try:
+        from config import story as story_config
+        head_budget = int(getattr(story_config, "SCORE_STORY_HEAD_CHARS", 600))
+        middle_budget = int(getattr(story_config, "SCORE_STORY_MIDDLE_CHARS", 400))
+        tail_budget = int(getattr(story_config, "SCORE_STORY_TAIL_CHARS", 500))
+    except (ImportError, TypeError, ValueError):
+        head_budget, middle_budget, tail_budget = 600, 400, 500
+
+    head_budget = max(0, head_budget)
+    middle_budget = max(0, middle_budget)
+    tail_budget = max(0, tail_budget)
+    total_budget = head_budget + middle_budget + tail_budget
+    if not story:
+        return story
+    if total_budget <= 0:
+        return "【评分片段：预算为 0，未展示正文片段】"
+    if len(story) <= total_budget:
+        return story
+
+    # 先锁定头尾，再在两者之间分出两个相互独立的中段窗口。
+    head_end = min(head_budget, len(story))
+    tail_start = max(head_end, len(story) - tail_budget)
+    interior_start, interior_end = head_end, tail_start
+    interior_len = max(0, interior_end - interior_start)
+    middle_len = min(middle_budget, interior_len)
+    ranges = []
+    if head_end:
+        ranges.append((0, head_end, "开头片段"))
+
+    if middle_len:
+        # 让两个窗口分布在中段，且不把同一段正文拼接两次。
+        window_count = 2 if middle_len >= 2 else 1
+        widths = [middle_len // window_count] * window_count
+        widths[-1] += middle_len - sum(widths)
+        free = interior_len - middle_len
+        gap = free // (window_count + 1)
+        gaps = [gap] * window_count
+        gaps.append(free - gap * window_count)
+        starts = []
+        cursor = interior_start + gaps[0]
+        for i, width in enumerate(widths):
+            starts.append(cursor)
+            cursor += width + gaps[i + 1]
+        for start, width in zip(starts, widths):
+            ranges.append((start, start + width, "中段片段"))
+
+    if tail_budget:
+        ranges.append((max(0, len(story) - tail_budget), len(story), "结尾片段"))
+    ranges.sort(key=lambda item: item[0])
+
+    output = []
+    previous_end = 0
+    for start, end, label in ranges:
+        omitted = start - previous_end
+        if omitted:
+            output.append(
+                f"【评分片段：省略 {omitted} 字；以下为原文片段】"
+            )
+        output.append(f"【{label}】\n{story[start:end]}")
+        previous_end = end
+    if previous_end < len(story):
+        output.append(
+            f"【评分片段：省略 {len(story) - previous_end} 字；以上为原文片段】"
+        )
+    return "\n\n".join(output)
+
+
 def _web_llm_generate(prompt, what="请求"):
     """Web 模式：用共享浏览器里的网页版大模型生成一次回答。
 
@@ -168,27 +243,13 @@ def score_stories(stories_data):
     # 构建评分 prompt
     from applications.zhihu_story.prompts import SCORE_PROMPT
     prompt = SCORE_PROMPT
-    from config.story import SCORE_STORY_HEAD_CHARS, SCORE_STORY_TAIL_CHARS
-
-    def _build_score_preview(story):
-        """评分只看开头+结尾，降低 prompt 体积。"""
-        story = story or ""
-        head_chars = max(0, SCORE_STORY_HEAD_CHARS)
-        tail_chars = max(0, SCORE_STORY_TAIL_CHARS)
-        if len(story) <= head_chars + tail_chars:
-            return story
-        head = story[:head_chars]
-        tail = story[-tail_chars:] if tail_chars else ""
-        omitted = len(story) - head_chars - tail_chars
-        return (
-            f"{head}\n\n...(中间省略 {omitted} 字)...\n\n"
-            f"【结尾片段】\n{tail}"
-        )
-
     for i, item in enumerate(stories_data):
-        story_preview = _build_score_preview(item['story'])
+        story_preview = build_score_preview(item['story'])
 
-        prompt += f"\n--- 故事 {i+1}（问题：{item['title'][:50]}）---\n"
+        # 保留问题里的视角和结局要求；旧 50 字截断会漏掉靠后的约束。
+        title = str(item['title'])
+        question = title[:300] + ('（问题过长，后文未展示）' if len(title) > 300 else '')
+        prompt += f"\n--- 故事 {i+1}（问题：{question}）---\n"
         prompt += story_preview
         prompt += "\n"
 

@@ -136,7 +136,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
     # 步骤3：生成故事（通用，API/Web 分发）
     # ============================================================
 
-    def save_story_file(self, story, index=None):
+    def save_story_file(self, story, index=None, workflow_mode='classic'):
         """保存故事为 .md 文件，返回绝对路径"""
         from core import paths
         output_dir = paths.data("output")
@@ -153,7 +153,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             f.write(story)
         try:
             from core import evolution
-            evolution.record_generation(md_path, story)
+            evolution.record_generation(md_path, story, workflow_mode=workflow_mode)
         except Exception:
             log.warning("演进记录：未能记录稿件保存时的方案（不影响稿件保存）", exc_info=True)
         return os.path.abspath(md_path)
@@ -262,7 +262,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             return False
 
         # 生成即存盘：即使审核未过，最终版本也要落盘供人工核对
-        md_path = self.save_story_file(story)
+        md_path = self.save_story_file(story, workflow_mode='clean')
         if on_story:
             try:
                 on_story(story, md_path, audit)
@@ -279,7 +279,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             from core import feedback_loop, topic_ledger
             # 稿件特征 + 选题信号一并落账（反馈闭环的复盘数据源）
             meta = {"story_file": md_path}
-            meta.update(topic_ledger.story_meta(story, "classic"))
+            meta.update(topic_ledger.story_meta(story, "clean"))
             meta.update(getattr(self, "last_topic_meta", None) or {})
             feedback_loop.record_story_published(url, title, meta)
         except Exception:

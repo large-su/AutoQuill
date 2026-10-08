@@ -17,6 +17,7 @@ _LOCK = threading.RLock()
 _FILES = (
     'story_prompt.py',
     'story_generation.py',
+    'story_scoring.py',
     'config/story.py',
     'applications/zhihu_story/prompts.py',
     'workflows/workflow_generation.py',
@@ -28,6 +29,11 @@ _KEYS = (
     'WEB_LLM_DRIVER',
     'AUTHOR_PROFILE',
     'STORY_MATERIAL_MODE',
+    'READER_EXPERIENCE_ENABLE',
+    'SCORE_STORY_HEAD_CHARS',
+    'SCORE_STORY_MIDDLE_CHARS',
+    'SCORE_STORY_TAIL_CHARS',
+    'WORKFLOW_MODE',
     'QUESTION_SELECT_MODE',
     'QUESTION_SOURCE',
     'ENABLE_STORY_FILTER',
@@ -164,8 +170,10 @@ def _settings(settings):
         src = {k: getattr(settings, k, None) for k in _KEYS}
     return {k: src[k] for k in _KEYS if k in src and isinstance(src[k], (str, int, float, bool, type(None)))}
 
-def record_generation(story_file, story_text, settings=None):
+def record_generation(story_file, story_text, settings=None, workflow_mode=None):
     safe = _settings(settings)
+    if workflow_mode in ('classic', 'clean'):
+        safe['WORKFLOW_MODE'] = workflow_mode
     code = _code_id()
     fingerprint = code + ':' + _sha(json.dumps(safe, sort_keys=True, ensure_ascii=False).encode())
     name = Path(str(story_file or '')).name

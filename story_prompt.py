@@ -42,6 +42,24 @@ NAMING_CONSTRAINT = """
 如现代都市可用朴素常见的名字，古风可参考历史真实人名风格。"""
 
 
+# 第一轮读者体验实验：同一次生成内完善叙事，不增加规划/改写调用。
+# 只给读者体验方向，不规定反转频率、结尾类型或统一起手模板。
+READER_EXPERIENCE_RULE = """
+
+## 读者体验：叙事兑现自检
+
+以问题要求和参考文风为准，自由构思，不套统一结构。输出前在心里检查：
+- 开篇是否让读者看懂谁遇到了什么事，并有继续读的理由？不要用隐瞒必要身份或夸张预告代替悬念。
+- 重要行动是否有足够的动机、证据和能力支撑？转折要由前文铺垫或人物选择产生；删掉重复争吵、关系总结和没有新信息的过渡。
+- 结尾是否交代主线结果、兑现开篇承诺？题目要求完整结局时，不在最后添加未解释的新线索或神秘人物。情感余味来自已经发生的事，不强行升华或制造续篇钩子。
+让讨论来自具体人物选择，不追加泛泛提问、断更索取或点赞关注喊话。只修影响理解与兑现的问题，保留题材和文风的多样性；直接输出正文，不输出自检过程。"""
+
+
+def _reader_experience_rule():
+    from config.story import READER_EXPERIENCE_ENABLE
+    return READER_EXPERIENCE_RULE if READER_EXPERIENCE_ENABLE else ""
+
+
 # 行文去AI味守则：AI 生成中文故事的高频"机器味"集中在万能连接词、整齐排比、
 # 抽象形容词与机械句式。作为公共约束追加到所有模式 prompt 末尾（紧跟命名约束），
 # 让"读起来像人写的"成为与格式同等重要的硬要求。
@@ -787,6 +805,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     # === 问题优先 + 命名约束 + 行文去AI味守则 + 发布前自检（公共：所有模式生效） ===
     user_message += QUESTION_FIRST_RULE
+    user_message += _reader_experience_rule()
     user_message += NAMING_CONSTRAINT
     user_message += DEAI_STYLE_RULE
     # 开篇事件化（2026-09-19 用户口径）：管的是引言的"内容"，补住"形式达标但
@@ -867,6 +886,7 @@ def build_clean_prompt(question_title, reference_answer=None, feedback=None):
 {para_section}
 
 请撰写新的回答。"""
+    user_message += _reader_experience_rule()
     user_message += INLINE_OUTPUT_RULE
 
     if feedback:

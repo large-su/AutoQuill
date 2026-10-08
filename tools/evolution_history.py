@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_FILES = WRITING_FILES = {
-    "story_prompt.py", "story_generation.py", "config/story.py",
+    "story_prompt.py", "story_generation.py", "story_scoring.py", "config/story.py",
     "applications/zhihu_story/prompts.py", "workflows/workflow_generation.py",
 }
 TAG_RE = re.compile(r"^v(\d+(?:\.\d+){1,3})$")
