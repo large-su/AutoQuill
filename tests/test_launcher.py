@@ -349,14 +349,17 @@ class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
+        # LRESULT is pointer-sized.  c_long is only 32 bits on 64-bit Windows,
+        # which is unsafe for a window procedure's return ABI.
+        lresult = ctypes.c_ssize_t
         WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_long, wintypes.HWND, wintypes.UINT,
+            lresult, wintypes.HWND, wintypes.UINT,
             wintypes.WPARAM, wintypes.LPARAM)
 
         user32.DefWindowProcW.argtypes = [
             wintypes.HWND, wintypes.UINT,
             wintypes.WPARAM, wintypes.LPARAM]
-        user32.DefWindowProcW.restype = ctypes.c_long
+        user32.DefWindowProcW.restype = lresult
 
         @WNDPROC
         def _wndproc(hwnd, msg, wp, lp):
@@ -376,7 +379,8 @@ class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
                 ("lpszClassName", wintypes.LPCWSTR),
             ]
 
-        class_name = "AQ_Test_DarkTitlebar_Win"
+        # Avoid colliding with a class retained by a failed earlier test run.
+        class_name = f"AQ_Test_DarkTitlebar_Win_{id(_wndproc):x}"
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
         hinst = kernel32.GetModuleHandleW(None)
         wc = _WNDCLASS()
@@ -388,7 +392,11 @@ class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
         wc.hbrBackground = None
         wc.lpszMenuName = None
         wc.lpszClassName = class_name
-        user32.RegisterClassW(ctypes.byref(wc))
+        user32.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASS)]
+        user32.RegisterClassW.restype = wintypes.ATOM
+        self_atom = user32.RegisterClassW(ctypes.byref(wc))
+        if not self_atom:
+            raise ctypes.WinError(ctypes.get_last_error())
         user32.CreateWindowExW.restype = wintypes.HWND
         user32.CreateWindowExW.argtypes = [
             wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
@@ -398,14 +406,16 @@ class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
         hwnd = user32.CreateWindowExW(
             0, class_name, "AutoQuill", 0,  # 隐藏创建（无 WS_VISIBLE）
             0, 0, 320, 200, None, None, hinst, None)
-        return hwnd, class_name, hinst
+        # Keep this callback alive until DestroyWindow has synchronously sent
+        # its final messages.  Windows only stores the raw function pointer.
+        return hwnd, class_name, hinst, _wndproc
 
     @unittest.skipUnless(os.name == "nt", "仅 Windows")
     def test_dark_titlebar_takes_effect_with_intptr_handle(self):
         user32 = ctypes.windll.user32
-        hwnd, class_name, hinst = self._create_hidden_window()
-        self.assertTrue(hwnd, "CreateWindowExW 失败（无桌面会话？）")
+        hwnd, class_name, hinst, wndproc = self._create_hidden_window()
         try:
+            self.assertTrue(hwnd, "CreateWindowExW 失败（无桌面会话？）")
             class _RealIntPtr:
                 """模拟 pythonnet System.IntPtr：无 __int__（int() 必失败，
                 正是 V4.1.4 线上报错路径），仅 .NET 方法 ToInt64()"""
@@ -430,10 +440,16 @@ class TestDwmDarkTitlebarEndToEnd(unittest.TestCase):
             self.assertTrue(value.value,
                             "深色标题栏属性未生效（读回 False）")
         finally:
-            user32.DestroyWindow(hwnd)
+            user32.DestroyWindow.argtypes = [wintypes.HWND]
+            user32.DestroyWindow.restype = wintypes.BOOL
+            if hwnd:
+                self.assertTrue(user32.DestroyWindow(hwnd))
             user32.UnregisterClassW.argtypes = [
                 wintypes.LPCWSTR, wintypes.HINSTANCE]
-            user32.UnregisterClassW(class_name, hinst)
+            user32.UnregisterClassW.restype = wintypes.BOOL
+            self.assertTrue(user32.UnregisterClassW(class_name, hinst))
+            # Keep the callback reference live through the two Win32 calls.
+            self.assertIsNotNone(wndproc)
 
 
 if __name__ == "__main__":

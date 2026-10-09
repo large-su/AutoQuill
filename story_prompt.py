@@ -60,6 +60,25 @@ def _reader_experience_rule():
     return READER_EXPERIENCE_RULE if READER_EXPERIENCE_ENABLE else ""
 
 
+# 盐选阅读第一批：只保留可迁移的方法，不引入原文、人物或情节骨架。
+# 与叙事兑现实验分开开关，便于对照；同一次生成中使用，不增加请求。
+CRAFT_LEARNING_RULE = """
+
+## 人物、细节与情节的衔接
+
+以下是可取舍的通用技法，题目要求和参考文风优先，不必逐条套用：
+- 用人物的关键选择表现性格，代价贴合题意，可以是时间、劳动或让步，不为煽情擅加悲剧。对同一冲突连续回应时，让信息、筹码或关系发生变化，压缩重复受辱和空洞宣言。
+- 与主线有关的细节再次出现时，让它带来证据、阻力或关系变化；没有新作用的重复可以删去。不强制设置象征物，也不照搬参考中的物件、事件或结构顺序。
+- 若依靠特殊能力、制度或计谋解决危机，先展示它的作用条件和限制，高潮利用已建立的条件推进，让代价产生后果；核对条件前后一致，不用术语代替因果，不临时添加万能规则脱困。喜剧可以荒诞，前后逻辑仍需一致。
+在心中取舍和检查，直接输出正文，不展示检查清单或复述所学作品。
+"""
+
+
+def _craft_learning_rule():
+    from config.story import CRAFT_LEARNING_ENABLE
+    return CRAFT_LEARNING_RULE if CRAFT_LEARNING_ENABLE else ""
+
+
 # 行文去AI味守则：AI 生成中文故事的高频"机器味"集中在万能连接词、整齐排比、
 # 抽象形容词与机械句式。作为公共约束追加到所有模式 prompt 末尾（紧跟命名约束），
 # 让"读起来像人写的"成为与格式同等重要的硬要求。
@@ -806,6 +825,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     # === 问题优先 + 命名约束 + 行文去AI味守则 + 发布前自检（公共：所有模式生效） ===
     user_message += QUESTION_FIRST_RULE
     user_message += _reader_experience_rule()
+    user_message += _craft_learning_rule()
     user_message += NAMING_CONSTRAINT
     user_message += DEAI_STYLE_RULE
     # 开篇事件化（2026-09-19 用户口径）：管的是引言的"内容"，补住"形式达标但
@@ -887,6 +907,7 @@ def build_clean_prompt(question_title, reference_answer=None, feedback=None):
 
 请撰写新的回答。"""
     user_message += _reader_experience_rule()
+    user_message += _craft_learning_rule()
     user_message += INLINE_OUTPUT_RULE
 
     if feedback:

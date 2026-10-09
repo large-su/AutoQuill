@@ -22,7 +22,7 @@ __all__ = [
     "TOPIC_GENRE_PRIOR_MIN_AGE_DAYS",
     # 格式与素材
     "ENABLE_FORMAT_RETRY", "STORY_MATERIAL_MODE",
-    "READER_EXPERIENCE_ENABLE",
+    "READER_EXPERIENCE_ENABLE", "CRAFT_LEARNING_ENABLE",
     # 知识库
     "KB_MAX_PER_GENRE", "KB_MERGE_TRIGGER", "KB_ENABLE", "RECIPE_VERBOSE_MODE",
     # reader_score
@@ -181,6 +181,11 @@ STORY_MATERIAL_MODE = "sample"
 # 读者体验实验：同一次生成内提示开篇承诺、选择后果与结尾兑现。
 # False 可恢复原提示词行为；状态进入演进方案指纹，便于后续对照。
 READER_EXPERIENCE_ENABLE = True
+
+# 阅读学习实验：人物选择、细节变义和规则代价，只注入抽象技法。
+# 与读者自检独立；False 可撤回本轮指导，保留 v5.2.0 的叙事兑现指导。
+# 不读取本地会员正文/学习笔记，不增加模型请求。
+CRAFT_LEARNING_ENABLE = True
 
 # ============================================================
 # 知识库配置

@@ -676,21 +676,22 @@
     {
       "version": "5.2.0",
       "tag": "v5.2.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "7857c7018670ec9f9df6dd8b0df940dbb9be1db3",
+      "source_commit": "7857c7018670ec9f9df6dd8b0df940dbb9be1db3",
       "parent": "2f1faad61fde2b3071b6b91416e7a195c8a332a8",
       "date": "2026-10-09",
       "summary": "v5.2.0: 改进叙事兑现与中段评分，建立增长对照基线",
       "summaries": [
         "v5.2.0: 改进叙事兑现与中段评分，建立增长对照基线"
       ],
-      "changed_file_count": 16,
+      "changed_file_count": 17,
       "changed_files": [
         "CHANGELOG.md",
         "README.md",
         "applications/zhihu_story/prompts.py",
         "config/story.py",
         "core/evolution.py",
+        "core/evolution_history.json",
         "core/version.py",
         "docs/GROWTH-EXPERIMENTS.md",
         "installer/AutoQuill.iss",
@@ -711,6 +712,42 @@
         "story_scoring.py"
       ],
       "writing_code_id": "58578342aef6bb9a698f7dd0e5dc8ca3099a3bd8f7ca51051e50199f898668af",
+      "provenance": "git-tag"
+    },
+    {
+      "version": "5.3.0",
+      "tag": "v5.3.0",
+      "commit": null,
+      "source_commit": null,
+      "parent": "7857c7018670ec9f9df6dd8b0df940dbb9be1db3",
+      "date": "2026-10-09",
+      "summary": "v5.3.0: 将故事阅读技法融入生成并建立本地学习台账",
+      "summaries": [
+        "v5.3.0: 将故事阅读技法融入生成并建立本地学习台账"
+      ],
+      "changed_file_count": 14,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "config/story.py",
+        "core/evolution.py",
+        "core/evolution_history.json",
+        "core/version.py",
+        "docs/GROWTH-EXPERIMENTS.md",
+        "docs/STORY-LEARNING.md",
+        "installer/AutoQuill.iss",
+        "story_prompt.py",
+        "tests/test_craft_learning.py",
+        "tests/test_launcher.py",
+        "tests/test_story_study.py",
+        "tools/story_study.py"
+      ],
+      "change_kind": "mixed",
+      "writing_files_changed": [
+        "config/story.py",
+        "story_prompt.py"
+      ],
+      "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
       "provenance": "working-tree",
       "pending": true
     }
