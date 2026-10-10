@@ -469,18 +469,27 @@ def _call_profile_llm(prompt, max_tokens=20000):
     注意：DeepSeek v4 系列是推理模型，思维链（reasoning_content）会先
     消耗输出预算，故 max_tokens 需远大于产出文本量，否则 content 为空。
     """
-    for attempt in (1, 2):
-        reply = _call_profile_llm_once(prompt, max_tokens)
-        profile = _parse_profile_json(reply)
-        if profile:
-            return profile
-        # 失败时带证据（长度 + 首尾片段）：剖析失败难复现时日志可直接
-        # 判断是「读回残缺」还是「LLM 输出无效 JSON」
-        log.warning("author_profiler: 第 %d 次剖析结果解析失败（重试），"
-                    "回复长度=%d 首80=%r 尾80=%r", attempt,
-                    len(reply or ""), (reply or "")[:80], (reply or "")[-80:])
-        time.sleep(2)
-    return None
+    from config import LLM_MODE
+    try:
+        for attempt in (1, 2):
+            reply = _call_profile_llm_once(prompt, max_tokens)
+            profile = _parse_profile_json(reply)
+            if profile:
+                return profile
+            # 失败时带证据（长度 + 首尾片段）：剖析失败难复现时日志可直接
+            # 判断是「读回残缺」还是「LLM 输出无效 JSON」
+            log.warning("author_profiler: 第 %d 次剖析结果解析失败（重试），"
+                        "回复长度=%d 首80=%r 尾80=%r", attempt,
+                        len(reply or ""), (reply or "")[:80], (reply or "")[-80:])
+            time.sleep(2)
+        return None
+    finally:
+        if LLM_MODE == "web":
+            try:
+                from web_drivers import reset_driver
+                reset_driver(delete_session=True)
+            except Exception as exc:
+                log.warning("author_profiler: 清理网页会话失败：%s", exc)
 
 
 def _call_profile_llm_once(prompt, max_tokens):

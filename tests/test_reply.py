@@ -170,6 +170,19 @@ class TestComposeReplyEmptyDriverOutput(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[1]['reuse'])       # 重写复用同一会话
 
+    def test_can_reuse_existing_session_for_first_prompt(self):
+        calls = []
+        old = rt.ask_llm
+        rt.ask_llm = lambda prompt, driver=None, reuse_session=True: (
+            calls.append(reuse_session) or '谢谢您看完，我继续写。')
+        try:
+            result = rt.compose_reply(None, self.COMMENT, '题', '答',
+                                      reuse_session=True)
+        finally:
+            rt.ask_llm = old
+        self.assertTrue(result['ok'])
+        self.assertEqual(calls, [True])
+
 
 class TestPrefilter(unittest.TestCase):
     '''规则预筛（用户口径：引流、戾气、纯表情、已回过的直接踢掉）。'''
@@ -314,7 +327,7 @@ class TestRunReplyJobDailyReaderCheck(unittest.TestCase):
                 'answer_url': 'u'}
         self.browser.collect_manage_comments.return_value = {'comments': [card]}
         driver = Mock()
-        with self._patches(), patch('web_drivers.get_driver', return_value=driver), \
+        with self._patches(), patch('web_drivers.create_driver', return_value=driver), \
                 patch.object(rt, 'ask_llm', return_value='1'), \
                 patch.object(rt, 'read_original', return_value={'title': 'q', 'answer': 'a'}), \
                 patch.object(rt, 'compose_reply', return_value={'ok': True, 'reply': '谢谢您看完，我继续写。', 'issues': []}), \
@@ -340,7 +353,7 @@ class TestRunReplyJobDailyReaderCheck(unittest.TestCase):
     def test_invalid_model_pick_is_not_cached(self):
         self.browser.collect_manage_comments.return_value = {'ok': True, 'comments': [
             {'text': '写得真好', 'author': 'a', 'key': '1', 'answer_url': 'u'}]}
-        with self._patches(), patch('web_drivers.get_driver', return_value=Mock()), \
+        with self._patches(), patch('web_drivers.create_driver', return_value=Mock()), \
                 patch.object(rt, 'ask_llm', return_value='不确定'):
             result = rt.run_reply_job(self.browser, now=self.NOW)
         self.assertFalse(result['ok'])
@@ -351,7 +364,7 @@ class TestRunReplyJobDailyReaderCheck(unittest.TestCase):
                 'answer_url': 'u'}
         self.browser.collect_manage_comments.return_value = {'comments': [card]}
         self.browser.send_reply_from_manage.return_value = {'ok': True, 'sent': True}
-        with self._patches(), patch('web_drivers.get_driver', return_value=Mock()), \
+        with self._patches(), patch('web_drivers.create_driver', return_value=Mock()), \
                 patch.object(rt, 'ask_llm', return_value='1'), \
                 patch.object(rt, 'read_original', return_value={'title': 'q', 'answer': 'a'}), \
                 patch.object(rt, 'compose_reply', return_value={'ok': True, 'reply': '谢谢您看完，我继续写。', 'issues': []}), \
@@ -361,6 +374,37 @@ class TestRunReplyJobDailyReaderCheck(unittest.TestCase):
             result = rt.run_reply_job(self.browser, dry_run=False, now=self.NOW)
         self.assertEqual(result['units'], 1)
         self.assertTrue(self.state['done']['comment'])
+
+    def test_selection_and_composition_reuse_job_driver_session(self):
+        card = {'text': '写得真好', 'author': 'a', 'key': '1',
+                'answer_url': 'u'}
+        self.browser.collect_manage_comments.return_value = {'comments': [card]}
+        driver = Mock()
+        compose = Mock(return_value={'ok': True,
+                                     'reply': '谢谢您看完，我继续写。',
+                                     'issues': []})
+        with self._patches(), patch('web_drivers.create_driver', return_value=driver), \
+                patch.object(rt, 'ask_llm', return_value='1'), \
+                patch.object(rt, 'read_original', return_value={'title': 'q', 'answer': 'a'}), \
+                patch.object(rt, 'compose_reply', compose), \
+                patch.object(rt, '_refresh_checkin_after_reply', return_value=None), \
+                patch.object(rt.checkin, 'append_reply', Mock()):
+            result = rt.run_reply_job(self.browser, dry_run=True, now=self.NOW)
+        self.assertEqual(result['units'], 1)
+        self.assertTrue(compose.call_args.kwargs['reuse_session'])
+        driver.delete_current_session.assert_called_once_with()
+        driver.close_session.assert_called_once_with()
+
+    def test_job_driver_is_closed_when_selection_is_cancelled(self):
+        self.browser.collect_manage_comments.return_value = {'comments': [
+            {'text': '写得真好', 'author': 'a', 'key': '1', 'answer_url': 'u'}]}
+        driver = Mock()
+        with self._patches(), patch('web_drivers.create_driver', return_value=driver), \
+                patch.object(rt, 'ask_llm', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                rt.run_reply_job(self.browser, now=self.NOW)
+        driver.delete_current_session.assert_called_once_with()
+        driver.close_session.assert_called_once_with()
 
 
 if __name__ == '__main__':

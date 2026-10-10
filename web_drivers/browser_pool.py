@@ -16,6 +16,8 @@
 
 import logging
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +32,17 @@ class WorkflowCancelled(Exception):
 
 
 _cancel_hook = None
+_cleanup_active = ContextVar("web_session_cleanup", default=False)
+
+
+@contextmanager
+def session_cleanup():
+    """允许已停止的任务做有界清理；不改变其他线程或后续操作的取消状态。"""
+    token = _cleanup_active.set(True)
+    try:
+        yield
+    finally:
+        _cleanup_active.reset(token)
 
 
 def set_cancel_hook(fn):
@@ -43,7 +56,7 @@ def set_cancel_hook(fn):
 
 
 def _check_cancel():
-    if _cancel_hook is not None and _cancel_hook():
+    if not _cleanup_active.get() and _cancel_hook is not None and _cancel_hook():
         raise WorkflowCancelled("已由用户停止")
 
 
@@ -58,19 +71,19 @@ def safe_evaluate(page, js, *args, timeout=EVAL_TIMEOUT):
     渲染进程彻底卡死（极端风控）时此层无效，由调用方（E2E runner）
     的进程级看门狗兜底。"""
     wrapped = (
-        "async function() {"
+        "async function(_args) {"
         "  const _fn = " + js + ";"
         "  const _timeout = new Promise(_r => setTimeout("
         f"() => _r({{__aq_timeout__: true}}), {int(timeout)}));"
         "  const _result = await Promise.race("
-        "    [Promise.resolve(_fn.apply(null, arguments)), _timeout]);"
+        "    [Promise.resolve(_fn.apply(null, _args)), _timeout]);"
         "  if (_result && _result.__aq_timeout__) return null;"
         "  return _result;"
         "}"
     )
     _check_cancel()
     try:
-        return page.evaluate(wrapped, *args)
+        return page.evaluate(wrapped, list(args))
     except WorkflowCancelled:
         raise
     except Exception as exc:

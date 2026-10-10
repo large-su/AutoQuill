@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from core import checkin as ck
 from core import paths
@@ -380,6 +380,64 @@ class CommentFallbackTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix='aq_cfb_')
         self._orig_root = paths.DATA_ROOT
         paths.DATA_ROOT = self.tmp
+
+    def test_default_ask_is_lazy_and_closes_its_own_driver(self):
+        driver = Mock()
+        with patch('web_drivers.create_driver', return_value=driver):
+            ask = task._default_ask(None)
+            driver_factory = __import__('web_drivers').create_driver
+            self.assertEqual(driver_factory.call_count, 0)
+            with patch('applications.zhihu_story.reply_task.ask_llm', return_value='答') as call:
+                self.assertEqual(ask('题'), '答')
+                self.assertIs(call.call_args.kwargs['driver'], driver)
+            ask.close()
+        driver.delete_current_session.assert_called_once_with()
+        driver.close_session.assert_called_once_with()
+
+    def test_default_fallback_ask_closes_after_generation_cancel(self):
+        driver = Mock()
+        browser = _FakeCommentBrowser()
+        state = ck.fresh_state()
+
+        def compose_then_cancel(ask, *args, **kwargs):
+            ask('先创建自己的网页会话')
+            raise KeyboardInterrupt
+
+        with patch('web_drivers.create_driver', return_value=driver), \
+                patch.object(cfb, 'compose', side_effect=compose_then_cancel):
+            with self.assertRaises(KeyboardInterrupt):
+                task.maybe_comment_fallback(
+                    browser,
+                    ctx={'is_last': True,
+                         'story': {'title': '题', 'text': '正文有具体细节。',
+                                   'url': 'https://example.test/q/1'}},
+                    state=state)
+        driver.delete_current_session.assert_called_once_with()
+        driver.close_session.assert_called_once_with()
+
+    def test_injected_ask_is_not_closed_by_fallback_wrapper(self):
+        browser = _FakeCommentBrowser()
+        injected = Mock(side_effect=lambda *args, **kwargs: '生成内容')
+
+        with patch.object(cfb, 'compose', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                task.maybe_comment_fallback(
+                    browser,
+                    ctx={'is_last': True,
+                         'story': {'title': '题', 'text': '正文有具体细节。',
+                                   'url': 'https://example.test/q/1'}},
+                    state=ck.fresh_state(), ask=injected)
+        injected.close.assert_not_called()
+
+    def test_default_ask_api_mode_does_not_create_driver(self):
+        driver_factory = Mock()
+        with patch('config.LLM_MODE', 'api'), \
+                patch('web_drivers.create_driver', driver_factory), \
+                patch('applications.zhihu_story.reply_task.ask_llm', return_value='答'):
+            ask = task._default_ask(None)
+            self.assertEqual(ask('题'), '答')
+            ask.close()
+        driver_factory.assert_not_called()
 
     def tearDown(self):
         paths.DATA_ROOT = self._orig_root

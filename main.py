@@ -369,16 +369,16 @@ def main():
                 log.error(f"本轮失败: {e}")
                 log.warning(f"  ✗ 异常"
                             f"（尝试 {attempts}/{MAX_TOTAL_ATTEMPTS}）")
-
-            # ★ 修复：run_single() 结束后重置 Web Driver
-            # 避免下次迭代复用已污染的 DeepSeek 会话（旧对话历史累积导致崩溃）
-            if LLM_MODE == "web":
-                try:
-                    from web_drivers import reset_driver
-                    reset_driver()
-                    log.info("  Web Driver 已重置，下次迭代将使用全新会话")
-                except Exception:
-                    pass
+            finally:
+                # 每轮是一个完整业务模块；即使用户中断，也要清理本轮
+                # 所有权归属的 Web 对话，避免下次运行继承旧历史。
+                if LLM_MODE == "web":
+                    try:
+                        from web_drivers import reset_driver
+                        reset_driver(delete_session=True)
+                        log.info("  Web Driver 已重置，下次迭代将使用全新会话")
+                    except Exception:
+                        pass
 
             if done < target and attempts < MAX_TOTAL_ATTEMPTS:
                 random_delay(WAIT_BETWEEN_CYCLES)

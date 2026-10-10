@@ -205,15 +205,24 @@ class ParallelWebRunner:
             if continue_session:
                 # 复用当前会话继续提问：不重置历史、不新开窗口
                 log.info("[Slot %d] 同会话继续提问（窗口复用）", slot.slot_id)
+                if hasattr(drv, "_mark_session_used"):
+                    drv._mark_session_used(prompt)
                 drv.continue_chat(prompt)
             else:
                 drv.new_chat()   # 全新对话：丢弃历史上下文（新任务/新会话）
                 drv.setup()
                 drv.input(prompt)
+                if hasattr(drv, "_mark_session_used"):
+                    drv._mark_session_used(prompt)
                 drv.send()
         except Exception as exc:
             log.error("[Slot %d] 派发异常：%s", slot.slot_id, exc)
             return False
+        finally:
+            if hasattr(drv, "_refresh_session_id"):
+                from web_drivers.browser_pool import session_cleanup
+                with session_cleanup():
+                    drv._refresh_session_id()
         slot.status = SlotState.GENERATING
         slot.last_len = 0
         slot.last_think = 0
@@ -351,9 +360,15 @@ class ParallelWebRunner:
             log.error("[Slot %d] 补位窗口初始化失败：%s", slot.slot_id, exc)
             return
         try:
+            slot.driver.delete_current_session()
+        except Exception:
+            pass
+        try:
             slot.driver.close_session()
         except Exception:
             pass
+        if hasattr(drv, "_adopt_pending_sessions"):
+            drv._adopt_pending_sessions(slot.driver)
         slot.driver = drv
         slot.last_session = None
         slot.status = SlotState.IDLE
@@ -364,6 +379,10 @@ class ParallelWebRunner:
     def _do_reset(self, slot):
         """重建 slot 会话（对应旧版「关 tab 重建」）。"""
         drv = slot.driver
+        try:
+            drv.delete_current_session()
+        except Exception:
+            pass
         try:
             drv.close_session()   # 关页（不关共享浏览器）
         except Exception:

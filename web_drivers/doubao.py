@@ -233,14 +233,15 @@ class DoubaoDriver(WebLLMDriver):
 
     def new_chat(self):
         """重置为全新对话：导航 + 显式点「新对话」+ 等待输入框。"""
-        self._reset_session_state()
+        self._prepare_new_session()
         self.open_session()
         if self._click_new_chat_button():
             log.info("web_drivers[doubao]: 已点击「新对话」")
             self._page_instance().wait_for_timeout(1200)
         for _ in range(12):
             if self._probe_selectors(_INPUT_SELECTORS, attr="tagName")[0]:
-                self._session_id = self._detect_session_id()
+                if self._detect_session_id():
+                    raise RuntimeError("豆包未进入空白新对话，停止发送以保护已有历史")
                 return self
             self._page_instance().wait_for_timeout(500)
         log.warning("web_drivers[doubao]: new_chat 后未等到输入框渲染，"
@@ -700,7 +701,7 @@ class DoubaoDriver(WebLLMDriver):
                 return m.group(1)
             # 新建会话的初始 URL 是 /chat/local_<id>（服务端 ID 还没分配）：
             # 本地 ID 在侧栏里匹配不到（侧栏 href 用服务端 ID），
-            # 返回 None 让调用方改用「侧栏当前打开项」兜底
+            # 返回 None，等发送后的服务器 ID 出现再登记；不猜测侧栏目标。
             if re.search(r"/chat/local_", url):
                 return None
             m = re.search(r"[?&](?:id|session_id|conversation_id)=([0-9a-zA-Z_-]{6,})", url)
@@ -723,9 +724,11 @@ class DoubaoDriver(WebLLMDriver):
     def _delete_current_session_impl(self):
         """先试内部接口（历史实测 401，保留以防站点恢复），再走侧栏 DOM。"""
         sid = self._session_id
-        if not sid or str(sid).startswith("local_"):
+        if (not sid or str(sid).startswith("local_")) and not self._deleting_pending:
             sid = self._detect_session_id()
             self._session_id = sid
+        if not sid or str(sid).startswith("local_"):
+            return False
         if sid and self._delete_session_via_api():
             return True
         return self._delete_session_via_dom()
@@ -740,8 +743,7 @@ class DoubaoDriver(WebLLMDriver):
     def _delete_session_via_dom(self):
         """侧栏会话项 → ⋯ → 菜单「删除」→ 确认弹窗「删除」。"""
         sid = self._session_id
-        title = self._session_title
-        if not sid and not title:
+        if not sid:
             return False
         page = self._page_instance()
         try:
@@ -751,24 +753,15 @@ class DoubaoDriver(WebLLMDriver):
                 if page.locator("[class*='conversation-item']").count():
                     break
                 page.wait_for_timeout(500)
-            if sid:
-                items = page.locator(
-                    f"[class*='conversation-item'][href*='{sid}']")
-            else:
-                items = page.locator("[class*='conversation-item']",
-                                     has_text=title)
-            if not items.count():
-                # 兜底 1：侧栏当前打开项（aria-current=page）——驱动刚在用
-                items = page.locator(
-                    "[class*='conversation-item'][aria-current='page']")
-            if not items.count() and title:
-                # 兜底 2：按首条消息标题文本匹配
-                items = page.locator("[class*='conversation-item']",
-                                     has_text=title)
-            if not items.count():
+            items = page.locator(
+                f"[class*='conversation-item'][href*='/chat/{sid}']")
+            if items.count() != 1:
                 log.info("web_drivers[doubao]: 侧栏未找到本次会话项，跳过 DOM 删除")
                 return False
             item = items.first
+            href = item.get_attribute("href")
+            if not href or href.split("?")[0].split("#")[0].rstrip("/").rsplit("/", 1)[-1] != sid:
+                return False
             item.scroll_into_view_if_needed(timeout=5000)
             item.hover(timeout=5000)          # 真 hover 才会露出操作按钮
             page.wait_for_timeout(500)
@@ -807,6 +800,12 @@ class DoubaoDriver(WebLLMDriver):
                 log.info("web_drivers[doubao]: 删除确认弹窗未命中")
                 return False
             page.wait_for_timeout(2000)
+            gone = self._safe_evaluate(
+                "(href) => !Array.from(document.querySelectorAll("
+                "\"[class*='conversation-item']\")).some(a =>"
+                " a.getAttribute('href') === href)", href)
+            if gone is not True:
+                return False
             log.info("web_drivers[doubao]: 已在侧栏删除本次会话%s",
                      (f"（id={sid}）" if sid else ""))
             return True
@@ -845,11 +844,14 @@ class DoubaoDriver(WebLLMDriver):
             try:
                 resp = page.request.post(
                     origin + path, data=body,
-                    headers={"Content-Type": "application/json"})
+                    headers={"Content-Type": "application/json"}, timeout=10000)
                 log.debug("web_drivers[doubao]: 删除接口 %s → HTTP %d",
                           path, resp.status)
                 if resp.ok:
-                    return True
+                    # HTTP 成功并不等于删除成功；不认识的返回交给 DOM 确认。
+                    result = resp.json()
+                    if result.get("code") == 0 and (result.get("data") or {}).get("biz_code") == 0:
+                        return True
             except Exception as exc:
                 log.debug("web_drivers[doubao]: 删除接口 %s 失败：%s",
                           path, exc)

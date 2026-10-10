@@ -717,8 +717,8 @@
     {
       "version": "5.3.0",
       "tag": "v5.3.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "a5598bacf78033a140347b0f4c55a3cf341f6a49",
+      "source_commit": "a5598bacf78033a140347b0f4c55a3cf341f6a49",
       "parent": "7857c7018670ec9f9df6dd8b0df940dbb9be1db3",
       "date": "2026-10-09",
       "summary": "v5.3.0: 将故事阅读技法融入生成并建立本地学习台账",
@@ -747,6 +747,46 @@
         "config/story.py",
         "story_prompt.py"
       ],
+      "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
+      "provenance": "git-tag"
+    },
+    {
+      "version": "5.3.1",
+      "tag": "v5.3.1",
+      "commit": null,
+      "source_commit": null,
+      "parent": "a5598bacf78033a140347b0f4c55a3cf341f6a49",
+      "date": "2026-10-10",
+      "summary": "v5.3.1: 修复网页模型任务结束后残留对话",
+      "summaries": [
+        "v5.3.1: 修复网页模型任务结束后残留对话"
+      ],
+      "changed_file_count": 21,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "applications/zhihu_story/author_profiler.py",
+        "applications/zhihu_story/checkin_task.py",
+        "applications/zhihu_story/reply_task.py",
+        "core/version.py",
+        "docs/RELEASE-GUIDE.md",
+        "installer/AutoQuill.iss",
+        "main.py",
+        "tests/test_author_profiler.py",
+        "tests/test_checkin.py",
+        "tests/test_reply.py",
+        "tests/test_task_session_boundaries.py",
+        "tests/test_web_session_lifecycle.py",
+        "web_drivers/__init__.py",
+        "web_drivers/base.py",
+        "web_drivers/browser_pool.py",
+        "web_drivers/deepseek.py",
+        "web_drivers/doubao.py",
+        "web_drivers/parallel.py",
+        "workflows/workflow_batch.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
       "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
       "provenance": "working-tree",
       "pending": true

@@ -90,11 +90,13 @@ def reset_driver(delete_session=True):
     仅删除本驱动自己创建/使用过的会话，绝不误删用户已有会话。
     """
     global _driver_instance
-    if _driver_instance:
-        if delete_session:
-            try:
-                _driver_instance.delete_current_session()
-            except Exception:
-                pass
-        _driver_instance.close_session()
-    _driver_instance = None
+    try:
+        if _driver_instance:
+            if delete_session:
+                try:
+                    _driver_instance.delete_current_session()
+                except Exception:
+                    pass
+            _driver_instance.close_session()
+    finally:
+        _driver_instance = None

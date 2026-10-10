@@ -362,6 +362,69 @@ class TestProfileLlmDispatch(unittest.TestCase):
             self.assertIsNone(ap._call_profile_llm("剖析prompt"))
         self.assertEqual(once.call_count, 2)
 
+    def test_web_success_cleans_up_after_both_attempts_complete(self):
+        from applications.zhihu_story import author_profiler as ap
+        from config import LLM_MODE, set_runtime_mode
+        set_runtime_mode("web", persist=False)
+        try:
+            with mock.patch.object(ap, "_call_profile_llm_once",
+                                   return_value='{"style": "短句"}'), \
+                 mock.patch("web_drivers.reset_driver") as reset:
+                self.assertEqual(ap._call_profile_llm("p"),
+                                 {"style": "短句"})
+            reset.assert_called_once_with(delete_session=True)
+        finally:
+            set_runtime_mode(LLM_MODE, persist=False)
+
+    def test_web_json_failure_cleans_up_after_retry(self):
+        from applications.zhihu_story import author_profiler as ap
+        from config import LLM_MODE, set_runtime_mode
+        set_runtime_mode("web", persist=False)
+        try:
+            with mock.patch.object(ap, "_call_profile_llm_once",
+                                   return_value="不是JSON") as once, \
+                 mock.patch("web_drivers.reset_driver") as reset:
+                self.assertIsNone(ap._call_profile_llm("p"))
+            self.assertEqual(once.call_count, 2)
+            reset.assert_called_once_with(delete_session=True)
+        finally:
+            set_runtime_mode(LLM_MODE, persist=False)
+
+    def test_web_exception_and_cancellation_clean_up(self):
+        from applications.zhihu_story import author_profiler as ap
+        from config import LLM_MODE, set_runtime_mode
+        set_runtime_mode("web", persist=False)
+        try:
+            with mock.patch.object(ap, "_call_profile_llm_once",
+                                   side_effect=RuntimeError("boom")), \
+                 mock.patch("web_drivers.reset_driver") as reset:
+                with self.assertRaises(RuntimeError):
+                    ap._call_profile_llm("p")
+            reset.assert_called_once_with(delete_session=True)
+
+            with mock.patch.object(ap, "_call_profile_llm_once",
+                                   side_effect=KeyboardInterrupt()), \
+                 mock.patch("web_drivers.reset_driver") as reset:
+                with self.assertRaises(KeyboardInterrupt):
+                    ap._call_profile_llm("p")
+            reset.assert_called_once_with(delete_session=True)
+        finally:
+            set_runtime_mode(LLM_MODE, persist=False)
+
+    def test_api_channel_does_not_clean_up_web_driver(self):
+        from applications.zhihu_story import author_profiler as ap
+        from config import LLM_MODE, set_runtime_mode
+        set_runtime_mode("api", persist=False)
+        try:
+            with mock.patch.object(ap, "_call_profile_llm_once",
+                                   return_value='{"style": "短句"}'), \
+                 mock.patch("web_drivers.reset_driver") as reset:
+                self.assertEqual(ap._call_profile_llm("p"),
+                                 {"style": "短句"})
+            reset.assert_not_called()
+        finally:
+            set_runtime_mode(LLM_MODE, persist=False)
+
     def test_api_missing_key_returns_none(self):
         from applications.zhihu_story import author_profiler as ap
         # KB 专属 key 也可能已配置（原 kb_manager 语义），须一并置空

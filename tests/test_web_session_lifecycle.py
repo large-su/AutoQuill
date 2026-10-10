@@ -179,6 +179,221 @@ class TestResetDriverDeletes(unittest.TestCase):
             web_drivers._driver_instance = orig
 
 
+class TestReplacedSessionCleanup(unittest.TestCase):
+    """Retries must not orphan a task's earlier website conversations."""
+
+    def test_dom_cleanup_can_pass_multiple_arguments_to_playwright(self):
+        from web_drivers.browser_pool import safe_evaluate
+
+        class PlaywrightPage:
+            # Playwright accepts one serialized argument, not Python *args.
+            def evaluate(self, expression, arg=None):
+                return arg
+
+        result = safe_evaluate(PlaywrightPage(),
+                               "function(sid, title) { return [sid, title]; }",
+                               "owned-id", "owned-title")
+        self.assertEqual(result, ["owned-id", "owned-title"])
+
+    def test_cancelled_task_can_still_delete_its_conversation(self):
+        from web_drivers import browser_pool as pool
+
+        class CancelAwareDriver(RecordDriver):
+            def _delete_current_session_impl(self):
+                pool._check_cancel()
+                return True
+
+        drv = CancelAwareDriver()
+        drv.generate("本任务的会话")
+        with mock.patch.object(pool, "_cancel_hook", lambda: True):
+            self.assertTrue(drv.delete_current_session())
+            with self.assertRaises(pool.WorkflowCancelled):
+                pool._check_cancel()
+
+    def test_failed_delete_is_retryable(self):
+        drv = RecordDriver()
+        drv.generate("本任务的会话")
+        self.assertFalse(drv.delete_current_session())
+        drv._delete_result = True
+        self.assertTrue(drv.delete_current_session(), "删除失败后已丢失清理责任")
+
+    def test_pending_unknown_id_does_not_adopt_current_unowned_id(self):
+        from web_drivers.deepseek import DeepSeekDriver
+        drv = DeepSeekDriver({})
+        drv._session_title = "旧任务"
+        drv._deleting_pending = True
+        with mock.patch.object(drv, "_detect_session_id", return_value="unowned-id") as detect, \
+             mock.patch.object(drv, "_delete_session_via_api") as api, \
+             mock.patch.object(drv, "_delete_session_via_dom", return_value=False):
+            self.assertFalse(drv._delete_current_session_impl())
+        detect.assert_not_called()
+        api.assert_not_called()
+
+    def test_missing_id_never_deletes_an_old_matching_title(self):
+        from web_drivers.deepseek import DeepSeekDriver
+        from web_drivers.doubao import DoubaoDriver
+        for driver_type in (DeepSeekDriver, DoubaoDriver):
+            with self.subTest(driver=driver_type.__name__):
+                drv = driver_type({})
+                drv._session_title = "与已有历史相同的提示词"
+                with mock.patch.object(drv, "_detect_session_id", return_value=None), \
+                     mock.patch.object(drv, "_delete_session_via_api") as api, \
+                     mock.patch.object(drv, "_delete_session_via_dom") as dom:
+                    self.assertFalse(drv._delete_current_session_impl())
+                api.assert_not_called()
+                dom.assert_not_called()
+
+    def test_close_retries_failed_cleanup_before_closing_page(self):
+        drv = RecordDriver()
+        drv.generate("本任务")
+        self.assertFalse(drv.delete_current_session())
+        drv._delete_result = True
+        delete = mock.Mock(wraps=drv._delete_current_session_impl)
+        drv._delete_current_session_impl = delete
+        drv.close_session()
+        delete.assert_called_once_with()
+        self.assertFalse(drv._session_owned)
+        self.assertEqual(drv._pending_sessions, [])
+        self.assertIsNone(drv._page)
+
+    def test_new_driver_can_finish_replaced_driver_cleanup(self):
+        old = RecordDriver()
+        old.generate("旧任务")
+        old._session_id = "old-owned-id"
+        old.close_session()
+        new = RecordDriver()
+        new._delete_result = True
+        new._adopt_pending_sessions(old)
+        self.assertEqual(new._pending_sessions, [("old-owned-id", "旧任务")])
+        self.assertTrue(new.delete_current_session())
+        self.assertEqual(new._pending_sessions, [])
+
+    def test_deepseek_dom_requires_positive_disappearance_verification(self):
+        from web_drivers.deepseek import DeepSeekDriver
+        for gone in (None, False, True):
+            with self.subTest(gone=gone):
+                drv = DeepSeekDriver({})
+                drv._session_id = "owned-id"
+                drv._page = mock.Mock()
+                drv._page.is_closed.return_value = False
+                with mock.patch.object(drv, "_safe_evaluate", side_effect=[
+                        {"status": "ok", "href": "/a/chat/s/owned-id"}, gone]):
+                    self.assertIs(drv._delete_session_via_dom(), gone is True)
+
+    def test_cleanup_exemption_is_local_to_current_thread(self):
+        import threading
+        from web_drivers import browser_pool as pool
+        other_cancelled = []
+
+        def check_other_thread():
+            try:
+                pool._check_cancel()
+            except pool.WorkflowCancelled:
+                other_cancelled.append(True)
+
+        with mock.patch.object(pool, "_cancel_hook", lambda: True):
+            with pool.session_cleanup():
+                pool._check_cancel()
+                other = threading.Thread(target=check_other_thread)
+                other.start()
+                other.join(timeout=2)
+                self.assertFalse(other.is_alive())
+            with self.assertRaises(pool.WorkflowCancelled):
+                pool._check_cancel()
+        self.assertEqual(other_cancelled, [True])
+
+    def test_parallel_reset_deletes_before_closing_page(self):
+        from web_drivers.parallel import ParallelWebRunner, SlotState
+        drv = mock.Mock()
+        slot = SlotState(0, drv)
+        runner = ParallelWebRunner(num_slots=1)
+        runner._do_reset(slot)
+        self.assertEqual([call[0] for call in drv.method_calls][:4],
+                         ["delete_current_session", "close_session", "new_chat", "setup"])
+
+    def test_replacement_retains_failed_old_id_for_final_retry(self):
+        drv = RecordDriver()
+        ids = iter(["old-id", "new-id"])
+        drv._detect_session_id = lambda: next(ids)
+        deleted = []
+
+        def delete():
+            deleted.append(drv._session_id)
+            return len(deleted) > 1
+
+        drv._delete_current_session_impl = delete
+        drv.generate("旧任务")
+        drv.generate("新任务", reuse_session=False)
+        self.assertEqual(drv._pending_sessions, [("old-id", "旧任务")])
+        self.assertTrue(drv.delete_current_session())
+        self.assertEqual(deleted, ["old-id", "old-id", "new-id"])
+        self.assertEqual(drv._pending_sessions, [])
+
+    def test_send_error_keeps_ownership_for_cleanup(self):
+        drv = RecordDriver()
+        drv._delete_result = True
+        drv.send = mock.Mock(side_effect=RuntimeError("发送已接受但读回失败"))
+        with self.assertRaises(RuntimeError):
+            drv.generate("本任务的会话")
+        self.assertTrue(drv.delete_current_session(), "发送异常使会话被当成未使用")
+
+    def test_parallel_dispatch_registers_ownership_for_teardown(self):
+        from web_drivers.parallel import ParallelWebRunner, SlotState
+        drv = RecordDriver()
+        drv._delete_result = True
+        runner = ParallelWebRunner(num_slots=1)
+        slot = SlotState(0, drv)
+        runner.slots = [slot]
+        self.assertTrue(runner._dispatch(slot, "并行任务", {}))
+        self.assertTrue(drv._session_owned, "并行发送绕过了会话归属记录")
+        runner.teardown()
+        self.assertFalse(drv._session_owned)
+        self.assertTrue(drv._page is None)
+
+    def test_deepseek_http_200_without_success_body_is_not_deleted(self):
+        from web_drivers.deepseek import DeepSeekDriver
+        drv = DeepSeekDriver({})
+        drv._page = mock.Mock()
+        drv._page.is_closed.return_value = False
+        response = drv._page.request.post.return_value
+        response.ok = True
+        response.status = 200
+        response.json.return_value = {}
+        with mock.patch.object(drv, "_auth_token", return_value="test-token"):
+            self.assertFalse(drv._delete_session_via_api("owned-session-id"))
+
+    def test_task_cleanup_deletes_replaced_owned_conversations(self):
+        class SiteDriver(RecordDriver):
+            def __init__(self):
+                super().__init__()
+                self.created = []
+                self.deleted = []
+
+            def open_session(self):
+                sid = f"task-{len(self.created) + 1}"
+                self.created.append(sid)
+                self._page.url = f"https://chat.deepseek.com/a/chat/s/{sid}"
+                return super().open_session()
+
+            def _detect_session_id(self):
+                return self._page.url.rsplit("/", 1)[-1]
+
+            def _delete_current_session_impl(self):
+                self.deleted.append(self._session_id)
+                return True
+
+        for broken in (False, True):
+            with self.subTest(broken=broken):
+                drv = SiteDriver()
+                drv.generate("筛选本次回复对象", reuse_session=False)
+                if broken:
+                    drv._mark_session_broken()
+                drv.generate("为空结果重试或换用健康会话", reuse_session=broken)
+                drv.delete_current_session()
+                self.assertCountEqual(drv.deleted, drv.created,
+                                      "任务结束后，替换前的自有对话仍残留")
+
+
 class TestMultiWebDriverFramework(unittest.TestCase):
     """多网页版大模型框架：注册表 / 分发器 / 运行时切换 / 删除机制。"""
 

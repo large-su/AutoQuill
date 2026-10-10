@@ -120,14 +120,15 @@ class DeepSeekDriver(WebLLMDriver):
         输入框未在 5s 内渲染不 raise——交给 input() 的 _dump_page_state
         带页面状态 loud-fail。
         """
-        self._reset_session_state()
+        self._prepare_new_session()
         self.open_session()
         if self._click_new_chat_button():
             log.info("web_drivers: 已点击「新对话」，确认落在全新会话")
             self._page_instance().wait_for_timeout(1000)
         for _ in range(10):
             if self._probe_selectors(_INPUT_SELECTORS, attr="tagName")[0]:
-                self._session_id = self._detect_session_id()
+                if self._detect_session_id():
+                    raise RuntimeError("DeepSeek 未进入空白新对话，停止发送以保护已有历史")
                 return self
             self._page_instance().wait_for_timeout(500)
         log.warning("web_drivers: new_chat 后未等到输入框渲染，交给 input 兜底")
@@ -442,21 +443,6 @@ class DeepSeekDriver(WebLLMDriver):
             m = re.search(r"/(?:chat|s)/[^/?#]{0,64}?([0-9a-zA-Z_-]{16,})", url)
             if m:
                 return m.group(1)
-            stored = self._safe_evaluate(
-                "() => {"
-                "  try {"
-                "    const ks = Object.keys(localStorage);"
-                "    const k = ks.find(k => /chat.*(id|session)|session.*id/i.test(k));"
-                "    if (!k) return '';"
-                "    const v = localStorage.getItem(k) || '';"
-                "    const m = v.match(/[0-9a-zA-Z_-]{16,}/);"
-                "    return m ? m[0] : (v.slice(0, 64));"
-                "  } catch (e) { return ''; }"
-                "}"
-            )
-            if stored and re.search(r"[0-9a-zA-Z_-]{16,}", stored):
-                m = re.search(r"([0-9a-zA-Z_-]{16,})", stored)
-                return m.group(1)
         except Exception:
             pass
         return None
@@ -464,9 +450,11 @@ class DeepSeekDriver(WebLLMDriver):
     def _delete_current_session_impl(self):
         """先走站点接口（快、无 UI 依赖），失败再走侧栏 DOM 兜底。"""
         sid = self._session_id
-        if not sid:
+        if not sid and not self._deleting_pending:
             sid = self._detect_session_id()
             self._session_id = sid
+        if not sid:
+            return False
         if sid and self._delete_session_via_api(sid):
             return True
         if self._delete_session_via_dom():
@@ -523,7 +511,7 @@ class DeepSeekDriver(WebLLMDriver):
                 data=json.dumps({"chat_session_ids": [sid]},
                                 ensure_ascii=False),
                 headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {token}"})
+                         "Authorization": f"Bearer {token}"}, timeout=10000)
         except Exception as exc:
             log.debug("web_drivers: 删除 API 调用失败：%s", exc)
             return False
@@ -531,12 +519,12 @@ class DeepSeekDriver(WebLLMDriver):
             # 站点成功返回 {"code":0,"data":{"biz_code":0,...}}；
             # HTTP 200 但业务码非 0 说明没删掉，不能当成功
             try:
-                body = resp.json() or {}
+                body = resp.json()
+                code = body.get("code")
+                biz = (body.get("data") or {}).get("biz_code")
             except Exception:
-                body = {}
-            code = body.get("code")
-            biz = (body.get("data") or {}).get("biz_code")
-            if code in (None, 0) and biz in (None, 0):
+                return False
+            if code == 0 and biz == 0:
                 log.info("web_drivers: 会话删除 API 命中 %s（HTTP %d）",
                          self._DELETE_API_PATH, resp.status)
                 return True
@@ -552,11 +540,11 @@ class DeepSeekDriver(WebLLMDriver):
         a[href='/a/chat/s/<id>'] 悬停 → 项内 [role=button]（⋯ 更多）
         → .ds-dropdown-menu-option 文本「删除」
         → [role=dialog].ds-modal-content 的「删除该对话」。
-        会话 ID 探测不到时退回按首条消息标题文本匹配侧栏项。
+        只按已跟踪的会话 ID 匹配，标题重复或缺少 ID 时不猜测删除目标。
         """
         sid = self._session_id
         title = self._session_title
-        if not sid and not title:
+        if not sid:
             return False
         js = (
             "async function() {"
@@ -565,10 +553,9 @@ class DeepSeekDriver(WebLLMDriver):
             "  const items = Array.from(document.querySelectorAll("
             "      \"a[href*='/a/chat/s/'], a[href*='/chat/s/']\"));"
             "  let item = sid ? items.find(a =>"
-            "      (a.getAttribute('href') || '').includes(sid)) : null;"
-            "  if (!item && title) item = items.find(a =>"
-            "      (a.innerText || '').includes(title));"
+            "      (a.getAttribute('href') || '').split(/[/?#]/).includes(sid)) : null;"
             "  if (!item) return 'no-item';"
+            "  const href = item.getAttribute('href');"
             "  item.scrollIntoView({block: 'center'});"
             "  item.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));"
             "  await new Promise(r => setTimeout(r, 400));"
@@ -591,7 +578,7 @@ class DeepSeekDriver(WebLLMDriver):
             "      /删除该对话|^删除$|^确认/.test((b.innerText || '').trim()));"
             "  if (!btn) return 'no-confirm-button';"
             "  btn.click();"
-            "  return 'ok';"
+            "  return {status: 'ok', href};"
             "}"
         )
         try:
@@ -599,24 +586,22 @@ class DeepSeekDriver(WebLLMDriver):
         except Exception as exc:
             log.debug("web_drivers: DOM 删除异常：%s", exc)
             return False
-        if res != "ok":
+        if not isinstance(res, dict) or res.get("status") != "ok" or not res.get("href"):
             log.info("web_drivers: DOM 删除未完成（%s）", res)
             return False
         # 点完确认后侧栏项应消失，据此判定（1.5s 内）
         page = self._page_instance()
         page.wait_for_timeout(1500)
-        if sid:
-            try:
-                gone = self._safe_evaluate(
-                    "(sid) => !Array.from(document.querySelectorAll("
-                    "\"a[href*='/a/chat/s/']\")).some(a =>"
-                    " (a.getAttribute('href') || '').includes(sid))", sid)
-            except Exception:
-                gone = None
-            if gone is False:
-                log.info("web_drivers: DOM 删除已确认，但侧栏项仍在（未删成功）")
-                return False
-        return True
+        try:
+            gone = self._safe_evaluate(
+                "(href) => !Array.from(document.querySelectorAll("
+                "\"a[href*='/a/chat/s/'],a[href*='/chat/s/']\")).some(a =>"
+                " a.getAttribute('href') === href)", res["href"])
+        except Exception:
+            gone = None
+        if gone is not True:
+            log.info("web_drivers: DOM 删除后未确认侧栏项消失")
+        return gone is True
 
 
 # ---------------- DeepSeek 登录判定 / 登录引导 ----------------

@@ -72,10 +72,12 @@ class WebLLMDriver:
         self._page = None
         self._browser = None
         # ---- 会话生命周期状态（2026-09 新增：单链路一会话 + 完成后删除）----
-        self._session_owned = False   # 本驱动是否在本会话里发过 prompt（只删自己用过的）
+        self._session_owned = False   # 本任务是否尝试发送过 prompt（发送异常也保留归属）
         self._session_broken = False  # 页面/会话损坏 → 下次开新会话
         self._session_id = None       # 站点侧会话 ID（探测得到时记录，删除用）
-        self._session_title = ""      # 本会话首条用户消息（DOM 侧栏匹配删除用）
+        self._session_title = ""      # 首条 prompt 摘要（区分尚未获得 ID 的清理责任）
+        self._pending_sessions = []   # 替换时未删成功的自有会话，任务结束再试
+        self._deleting_pending = False
 
     # ---------------- 会话管理 ----------------
 
@@ -128,6 +130,9 @@ class WebLLMDriver:
 
     def close_session(self):
         """关闭本 driver 的独立页面（不关共享浏览器）。"""
+        if self._session_owned or self._pending_sessions:
+            self.delete_current_session()
+        self._remember_current_session()
         if self._page is not None:
             try:
                 self._page.close()
@@ -141,9 +146,9 @@ class WebLLMDriver:
 
         并行调度每派发一个任务前调用，防止多轮对话历史污染。
         默认实现 = open_session()；子类可覆盖以等待 SPA 渲染。
-        同时清空本驱动的会话归属记录（新会话未用过，删除钩子不会误删）。
+        替换前清理旧会话；失败的自有会话保留到任务结束重试。
         """
-        self._reset_session_state()
+        self._prepare_new_session()
         return self.open_session()
 
     def continue_chat(self, prompt):
@@ -166,11 +171,37 @@ class WebLLMDriver:
                 and not self._session_broken)
 
     def _mark_session_used(self, prompt):
-        """记录本会话已被本驱动使用（发过 prompt）——删除钩子只删这种。"""
+        """在发送前登记归属，发送生效后读回抛错也能清理。"""
         if not self._session_owned:
             self._session_owned = True
             self._session_title = (str(prompt) or "").strip()[:24]
-            self._session_id = self._detect_session_id()
+
+    def _refresh_session_id(self):
+        """发送可能已生效但抛错/取消时，也尽力记录服务器分配的 ID。"""
+        if self._session_owned and not self._session_id:
+            try:
+                self._session_id = self._detect_session_id()
+            except Exception:
+                pass
+
+    def _remember_current_session(self):
+        if self._session_owned:
+            session = (self._session_id, self._session_title)
+            if session not in self._pending_sessions:
+                self._pending_sessions.append(session)
+
+    def _prepare_new_session(self):
+        if self._session_owned or self._pending_sessions:
+            self.delete_current_session()
+        self._remember_current_session()
+        self._reset_session_state()
+
+    def _adopt_pending_sessions(self, previous):
+        """同站点换驱动时，把已关闭旧页的清理责任交给仍有登录态的新页。"""
+        if type(previous) is type(self):
+            for session in previous._pending_sessions:
+                if session not in self._pending_sessions:
+                    self._pending_sessions.append(session)
 
     def _mark_session_broken(self):
         """标记当前会话损坏：下次 generate 自动新开会话（除非坏才开新）。"""
@@ -196,26 +227,41 @@ class WebLLMDriver:
         会话。删除失败只记日志不抛异常（不影响任务结果）。
         返回是否删除成功（尽力而为）。
         """
-        if not self._session_owned:
+        from web_drivers.browser_pool import session_cleanup
+        if not self._session_owned and not self._pending_sessions:
             log.info("web_drivers: 无可删除会话（本驱动本次未使用网页会话）")
             return False
         if self._page is None or self._page.is_closed():
             log.info("web_drivers: 页面已关闭，跳过会话删除")
-            self._reset_session_state()
             return False
-        deleted = False
-        try:
-            deleted = bool(self._delete_current_session_impl())
-        except Exception as exc:
-            log.warning("web_drivers: 删除会话异常（不阻断）：%s", exc)
-        if deleted:
-            log.info("web_drivers: 已删除本次网页会话%s",
-                     (f"（id={self._session_id}）" if self._session_id else ""))
-        else:
-            log.warning("web_drivers: 本次网页会话未能自动删除"
-                        "（站点接口/DOM 未命中，可稍后在网页端手动清理）")
-        self._reset_session_state()
-        return bool(deleted)
+        with session_cleanup():
+            self._refresh_session_id()
+            current = (self._session_owned, self._session_broken,
+                       self._session_id, self._session_title)
+            targets = list(self._pending_sessions)
+            if current[0] and current[2:] not in targets:
+                targets.append(current[2:])
+            failed = []
+            for sid, title in targets:
+                self._session_id, self._session_title = sid, title
+                self._deleting_pending = not current[0] or (sid, title) != current[2:]
+                try:
+                    deleted = bool(self._delete_current_session_impl())
+                except Exception as exc:
+                    deleted = False
+                    log.warning("web_drivers: 删除会话异常（不阻断）：%s", exc)
+                if deleted:
+                    log.info("web_drivers: 已删除本任务网页会话（id=%s）", sid)
+                else:
+                    failed.append((sid, title))
+                    log.warning("web_drivers: 本任务会话删除未确认（id=%s），"
+                                "保留清理责任并在退出前重试", sid)
+            self._deleting_pending = False
+            self._session_owned, self._session_broken, self._session_id, self._session_title = current
+            self._pending_sessions = [s for s in failed if not current[0] or s != current[2:]]
+            if current[0] and current[2:] not in failed:
+                self._reset_session_state()
+            return not failed
 
     def _delete_current_session_impl(self):
         """站点内删除实现（子类覆写）；完成返回 True。"""
@@ -326,23 +372,27 @@ class WebLLMDriver:
         if reuse_session and self._can_reuse_session():
             log.info("web_drivers: 复用当前会话继续提问（单链路一会话）")
             self.setup()
-            self.continue_chat(prompt)
+            self._mark_session_used(prompt)
+            send = lambda: self.continue_chat(prompt)
         else:
             if self._session_broken:
                 log.info("web_drivers: 上一会话已损坏，新开会话")
             self.new_chat()
             self.setup()
             self.input(prompt)
-            self.send()
-        self._mark_session_used(prompt)
-        completed = self.wait_complete(max_wait=self.config.get("max_wait"))
-        if not completed:
-            self._mark_session_broken()
-            log.warning("web_drivers: 生成未在期限内完成，会话标记损坏")
-        # 会话 ID 名额在首轮回复后页面 URL 才带上（如豆包 /chat/{id}），
-        # 发送瞬间探测不到——完成后补一次，供 delete_current_session 使用
-        if not self._session_id:
-            self._session_id = self._detect_session_id()
-        # 站点钩子：读取前补救机会（豆包卡片式交付 → 要求全文内联等）
-        self._after_wait_before_read()
-        return self.read_result()
+            self._mark_session_used(prompt)
+            send = self.send
+        try:
+            send()
+            self._refresh_session_id()
+            completed = self.wait_complete(max_wait=self.config.get("max_wait"))
+            if not completed:
+                self._mark_session_broken()
+                log.warning("web_drivers: 生成未在期限内完成，会话标记损坏")
+            self._refresh_session_id()
+            self._after_wait_before_read()
+            return self.read_result()
+        finally:
+            from web_drivers.browser_pool import session_cleanup
+            with session_cleanup():
+                self._refresh_session_id()

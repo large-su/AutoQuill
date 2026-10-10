@@ -172,7 +172,7 @@ def read_original(browser, answer_url, wait=6, timeout=45000):
 
 
 def compose_reply(driver, comment, question, answer, author='', progress=None,
-                  max_retry=2, empty_retry=1):
+                  max_retry=2, empty_retry=1, reuse_session=False):
     '''写回复 + 本地硬校验 + 带原因重写。返回 {ok, reply, issues}。
 
     ★ 2026-09-28 真机补：网页版驱动偶发「读回空内容」（日志里
@@ -182,7 +182,7 @@ def compose_reply(driver, comment, question, answer, author='', progress=None,
     '''
     prompt = rp.build_reply_prompt(comment, question, answer)
     reply, issues = '', []
-    first = True                                   # 第一次提问一定是新会话
+    first = not reuse_session
     # 总预算 = 重写次数 + 空内容重试次数（空内容也占一次预算，不会无限重试）
     budget = max(1, int(max_retry) + 1) + max(0, int(empty_retry))
     for attempt in range(budget):
@@ -291,8 +291,8 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
     try:
         from config import LLM_MODE
         if LLM_MODE != 'api':
-            from web_drivers import get_driver
-            driver = get_driver()
+            from web_drivers import create_driver
+            driver = create_driver()
         for _i in range(count):
             pool = [c for c in candidates if c['key'] not in replied]
             if not pool:
@@ -326,7 +326,7 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
             composed = compose_reply(driver, comment, qa.get('title'),
                                      qa.get('answer'),
                                      author=picked.get('author') or '',
-                                     progress=progress)
+                                     progress=progress, reuse_session=True)
             record = {
                 'key': picked.get('key') or '',
                 'author': picked.get('author') or '',
@@ -426,6 +426,10 @@ def run_reply_job(browser, count=1, dry_run=True, progress=None, now=None,
         if driver is not None:
             try:
                 driver.delete_current_session()   # 用完删会话（会话纪律）
+            except Exception:                     # noqa: BLE001
+                pass
+            try:
+                driver.close_session()             # 仅关闭本作业独立页
             except Exception:                     # noqa: BLE001
                 pass
     units = len(done)

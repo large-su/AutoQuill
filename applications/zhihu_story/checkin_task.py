@@ -198,6 +198,24 @@ def run_interaction(browser, question_url, ctx=None, state=None, now=None,
 
 def maybe_comment_fallback(browser, ctx=None, state=None, now=None,
                            progress=None, ask=None, dry_run=False):
+    own_ask = ask is None
+    compose = _default_ask(browser) if own_ask else ask
+    try:
+        return _maybe_comment_fallback_impl(
+            browser, ctx=ctx, state=state, now=now, progress=progress,
+            ask=compose, dry_run=dry_run)
+    finally:
+        if own_ask:
+            close = getattr(compose, 'close', None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:                   # noqa: BLE001
+                    pass
+
+
+def _maybe_comment_fallback_impl(browser, ctx=None, state=None, now=None,
+                                 progress=None, ask=None, dry_run=False):
     '''当天「发布评论」还没达成时，在参考故事下补一条贴题评论。
 
     触发条件：自动化上下文要求补评论、当天评论未达成、已读到参考故事。
@@ -233,9 +251,8 @@ def maybe_comment_fallback(browser, ctx=None, state=None, now=None,
         checkin.save_state(state)
         return {'ok': False, 'sent': False, 'skipped': False, 'detail': detail}
     already = _reply_texts_today(now=now)             # 今天已发过的评论（去重用）
-    compose = ask or _default_ask(browser)
     got = comment_fallback.compose(
-        compose, story.get('title') or '', text_src,
+        ask, story.get('title') or '', text_src,
         avoid_texts=already, progress=lambda t: _say(progress, t))
     if not got.get('ok'):
         detail = '评论兜底：生成不达标（%s），未发送' % '；'.join(got.get('issues') or [])
@@ -289,10 +306,32 @@ def _open_reference_story(browser, url):
 
 
 def _default_ask(browser):
-    '''默认提问通道：按当前生成通道（Web 网页版 / API）问模型。'''
+    '''默认提问通道：惰性创建本兜底独立驱动，并附带 close。'''
+    holder = {'driver': None}
+
+    def close():
+        driver = holder['driver']
+        if driver is None:
+            return
+        try:
+            driver.delete_current_session()
+        except Exception:                           # noqa: BLE001
+            pass
+        try:
+            driver.close_session()
+        except Exception:                           # noqa: BLE001
+            pass
+        holder['driver'] = None
+
     def ask(prompt, reuse_session=True):
         from applications.zhihu_story import reply_task
-        return reply_task.ask_llm(prompt, reuse_session=reuse_session)
+        from config import LLM_MODE
+        if LLM_MODE != 'api' and holder['driver'] is None:
+            from web_drivers import create_driver
+            holder['driver'] = create_driver()
+        return reply_task.ask_llm(prompt, driver=holder['driver'],
+                                  reuse_session=reuse_session)
+    ask.close = close
     return ask
 
 

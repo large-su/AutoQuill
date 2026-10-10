@@ -345,8 +345,9 @@ class BatchGenerationMixin:
         reset_driver()  # 兜底关单例页（并行本身不用单例）
 
     def _batch_generate_web_serial(self, materials):
-        """Web 串行生成（单 tab 复用同一会话）"""
+        """Web 串行生成：每篇独立会话，篇内追问复用，篇末清理。"""
         from core.story_text import clean_story_output, fix_story_format
+        from web_drivers.browser_pool import WorkflowCancelled
 
         for i, mat in enumerate(materials):
             log.info(f"\n  Web 串行生成 {i+1}/{len(materials)}："
@@ -366,12 +367,16 @@ class BatchGenerationMixin:
                 else:
                     mat['story'] = None
                     log.warning("    ✗ 生成失败或过短")
+            except WorkflowCancelled:
+                raise
             except Exception as e:
                 mat['story'] = None
                 log.error(f"    ✗ 异常：{e}")
-
-        from web_drivers import reset_driver
-        reset_driver()
+            finally:
+                # 每篇文章是一个独立的 Web 会话边界；同一篇文章内部的
+                # 追问由 _generate_web 复用会话，完成后再删除并关闭。
+                from web_drivers import reset_driver
+                reset_driver(delete_session=True)
 
     def _batch_retry_api(self, non_compliant, compliant,
                          print_progress_fn, reset_progress_fn):
@@ -546,6 +551,7 @@ class BatchGenerationMixin:
         from core.story_text import (
             clean_story_output, fix_story_format, validate_story_format
         )
+        from web_drivers.browser_pool import WorkflowCancelled
 
         retried_ok = 0
         for mat in non_compliant:
@@ -574,9 +580,11 @@ class BatchGenerationMixin:
                         log.info(f"  ✓ 重试合规（{retry_fmt}/10）")
                     else:
                         log.info("  ✗ 重试仍不合规，标记废稿")
+            except WorkflowCancelled:
+                raise
             except Exception as e:
                 log.error(f"  重试异常：{e}")
-
-        from web_drivers import reset_driver
-        reset_driver()
+            finally:
+                from web_drivers import reset_driver
+                reset_driver(delete_session=True)
         return retried_ok
