@@ -187,6 +187,28 @@ def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
         cap = int(cfg.get("daily_cap") or 0)
         if not (cfg.get("enabled") and meta["implemented"] and cap > 0):
             continue
+        # 每日固定任务有自己的语义：每天一个确定的幂等键，在用户设定时刻
+        # 采集；不受写作窗口、随机抖动、普通配额和去碰撞的影响。
+        if meta.get("job_mode") == "fixed_daily":
+            if any(j.get("type") == task_type for j in schedule):
+                continue
+            done_n = max(len(_done_jobs(schedule, task_type)),
+                         int(counters.get(task_type) or 0))
+            if done_n >= 1:
+                continue
+            at = parse_hhmm(cfg.get("at"), parse_hhmm(meta.get("default_at", "23:00")))
+            when = datetime.strptime(day, "%Y-%m-%d").replace(
+                hour=at.hour, minute=at.minute, second=0, microsecond=0)
+            jobs.append({
+                "key": job_key(task_type, day, "fixed", 0),
+                "type": task_type,
+                "planned_at": when.isoformat(),
+                "status": STATUS_PLANNED,
+                "units": 1,
+                "params": dict(cfg.get("params") or {}),
+                "note": "每日固定反馈刷新（%s）" % cfg.get("at", "23:00"),
+            })
+            continue
         done = _done_jobs(schedule, task_type)
         done_n = max(len(done), int(counters.get(task_type) or 0))
         remaining = cap - done_n
@@ -299,6 +321,9 @@ def _deconflict(jobs, win_end=None):
     pending.sort(key=lambda j: j["planned_at"])
     prev = None
     for job in pending:
+        if TASK_TYPES.get(job.get("type"), {}).get("job_mode") == "fixed_daily":
+            # 固定采集时刻不可为给写作让路而漂移。
+            continue
         t = datetime.fromisoformat(job["planned_at"])
         if prev is not None:
             floor = prev + timedelta(minutes=DECOLLISION_MINUTES)
@@ -334,7 +359,10 @@ def materialize_day(now, plan, day_data, done_counts=None):
     changed = day_data.get("plan_hash") != fingerprint
     if changed or not day_data.get("schedule"):
         keep = [j for j in day_data.get("schedule", [])
-                if j.get("status") in _CONSUMED or j.get("type") not in TASK_TYPES]
+                if j.get("status") in _CONSUMED or j.get("type") not in TASK_TYPES
+                # 固定任务失败需要保留责任；待执行项会按新的 at 重排。
+                or (TASK_TYPES.get(j.get("type"), {}).get("job_mode") == "fixed_daily"
+                    and j.get("status") != STATUS_PLANNED)]
         day_data["schedule"] = keep + _build_schedule(day, plan, keep,
                                                        day_data.get("counters") or {},
                                                        not_before=now)
@@ -433,6 +461,21 @@ def apply_catch_up(now, plan, day_data):
     for _, job in missed:
         task_type = job["type"]
         cfg = (plan.get("tasks") or {}).get(task_type) or {}
+        meta = TASK_TYPES.get(task_type, {})
+        if meta.get("job_mode") == "fixed_daily":
+            # 固定反馈任务只允许在当天补做；不补历史、也不为碰撞改变时刻。
+            day_end = datetime.strptime(day_data["date"], "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59)
+            base = now if job.get("caught_up") else now + timedelta(minutes=2)
+            if base > day_end:
+                job["status"] = STATUS_SKIPPED
+                job["note"] = "错过固定反馈刷新且当天已结束（未补做）"
+                continue
+            job["planned_at"] = base.replace(microsecond=0).isoformat()
+            job["caught_up"] = True
+            job["note"] = (job.get("note") or "") + "（错过固定时刻，当日内补做）"
+            placed_missed += 1
+            continue
         gap = float(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
         win_end = _window_bounds(day_data["date"], plan, cfg)[1]
         # ★ anchor 里没有该类（今天还什么都没做）→ 第一项就从 now+2 开始，
@@ -488,6 +531,19 @@ def plan_retry(now, plan, day_data, failed_job, delay_minutes=20):
     """
     task_type = failed_job.get("type")
     cfg = (plan.get("tasks") or {}).get(task_type) or {}
+    meta = TASK_TYPES.get(task_type, {})
+    if meta.get("job_mode") == "fixed_daily":
+        # 不造第二个固定作业：把同一条责任顺延到当天结束前重试。
+        day_end = datetime.strptime(day_data["date"], "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59)
+        when = now + timedelta(minutes=max(5, int(delay_minutes)))
+        if when > day_end:
+            return False
+        failed_job["status"] = STATUS_PLANNED
+        failed_job["planned_at"] = when.replace(microsecond=0).isoformat()
+        failed_job["note"] = ((failed_job.get("note") or "") +
+                              "（反馈刷新失败，今天稍后重试）")
+        return True
     cap = int(cfg.get("daily_cap") or 0)
     if cap <= 0:
         return False
@@ -649,12 +705,13 @@ def summarize(now, plan, day_data):
             "axis": meta.get("axis") or "",
             "single_stage": meta.get("single_stage") or 0,
             "job_mode": meta.get("job_mode") or "",
+            "at": cfg.get("at") or meta.get("default_at") or "",
             # 设置页据此决定显示哪些输入框（用户口径 2026-10-01）：
             #   打卡：只有一次 → 不显示次数、不显示间隔
             #   回复评论：只显示条数，不显示间隔（一天一班一次回完）
             "cap_fixed": bool(meta.get("cap_fixed")),
-            "show_interval": meta.get("job_mode") != "single",
-            "once_a_day": meta.get("job_mode") == "single",
+            "show_interval": meta.get("job_mode") not in ("single", "fixed_daily"),
+            "once_a_day": meta.get("job_mode") in ("single", "fixed_daily"),
         }
     # 倒计时/进度只算主时间轴上的任务（单次任务有自己的轴，混在一起会误导）
     nxt = next_job(now, day_data)

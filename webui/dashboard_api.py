@@ -26,6 +26,7 @@ def register_dashboard(app):
                       direction: str = "desc"):
         """已发布内容看板：读最新快照 + 筛选/搜索/排序 + 汇总。"""
         from webui import published
+        from core import evolution
         d = published.load()
         rows = published.filter_rows(
             d["rows"], q=q, start=start, end=end,
@@ -43,6 +44,7 @@ def register_dashboard(app):
             "generated_at": d["generated_at"],
             "source_file": d["source_file"],
             "refresh": _DASH_REFRESH,
+            "feedback_refresh": evolution.refresh_status(),
         }
 
     @app.post("/api/dashboard/refresh")
@@ -64,26 +66,21 @@ def register_dashboard(app):
                 count=int(m.group(1)) if m else _DASH_REFRESH["count"])
 
         def _run():
-            from applications.zhihu_story.browser_adapter import ZhihuLoginRequired
             try:
                 from webui import published
-                rows = published.scrape(progress=_on_scrape_progress)
-                if rows:
-                    clear_zhihu_login_stale()      # 抓到了 → 登录态有效
-                    _DASH_REFRESH.update(status="done", count=len(rows), pct=100,
-                                         progress=f"完成，共 {len(rows)} 条")
-                    log.info("看板刷新完成：%d 条", len(rows))
+                result = published.refresh_feedback(
+                    progress=_on_scrape_progress, source="manual",
+                    refresh_key="dashboard")
+                if result.get("status") == "busy":
+                    # 另一个刷新已取得锁并拥有共享状态，不覆盖它的 running。
+                    log.info("看板刷新已由另一个任务执行：%s", result.get("message"))
+                elif result.get("need_login"):
+                    _DASH_REFRESH.update(status="error", error=result.get("message") or "请重新登录",
+                                         progress="", need_login=True)
+                elif result.get("ok"):
+                    log.info("看板刷新完成：%d 条", result.get("count") or 0)
                 else:
-                    _DASH_REFRESH.update(
-                        status="error",
-                        error="抓取未取到有效数据（可能页面改版），已保留上次快照")
-                    log.warning("看板刷新未取到有效数据，已保留上次快照")
-            except ZhihuLoginRequired as exc:
-                # 登录态失效：给出可执行的提示（前端据 need_login 高亮「重新登录」）
-                mark_zhihu_login_stale(str(exc))
-                _DASH_REFRESH.update(status="error", error=str(exc),
-                                     progress="", need_login=True)
-                log.warning("看板刷新中止：知乎登录态已失效")
+                    _DASH_REFRESH.update(status="error", error=result.get("message") or "刷新未完成")
             except Exception as exc:  # noqa: BLE001
                 log.exception("dashboard 刷新失败")
                 _DASH_REFRESH.update(status="error", error=str(exc))
@@ -95,6 +92,11 @@ def register_dashboard(app):
     def api_dashboard_refresh_status():
         """轮询刷新任务状态。"""
         return dict(_DASH_REFRESH)
+
+    @app.get("/api/dashboard/feedback/status")
+    def api_dashboard_feedback_status():
+        from core import evolution
+        return evolution.refresh_status()
 
     @app.get("/api/dashboard/poor")
     def api_dashboard_poor(before: str = "", max_likes: int = 5,

@@ -29,9 +29,13 @@ class EvolutionUITest(unittest.TestCase):
             publish_date = (today - timedelta(days=30)).isoformat()
             rows = [{"aid": str(index), "url": "https://www.zhihu.com/answer/" + str(index),
                      "title": "隔离测试作品 " + str(index), "publish_date": publish_date,
-                     "metrics": {"赞同": str(likes), "阅读": "1000"}}
+                     "metrics": {"赞同": str(likes), "阅读": "1000", "收藏": str(index)}}
                     for index, likes in enumerate((30, 35, 40, 45, 50, 1000), 1)]
             evolution.ingest_snapshot(rows, datetime.now().astimezone().isoformat())
+            refresh = evolution.start_refresh('automation', 'synthetic-ui')
+            evolution.finish_refresh(refresh['id'], status='done', count=6,
+                                     observed_at=datetime.now().astimezone().isoformat(),
+                                     source_file='published_answers_ui.json')
             client = TestClient(app)
             scheme_id = client.get("/api/evolution").json()["nodes"][0]["id"]
             for aid in ("2", "3", "4", "5", "6"):
@@ -68,14 +72,21 @@ class EvolutionUITest(unittest.TestCase):
                     page.select_option('select[data-evo-aid="1"]', scheme_id)
                     page.click('button[data-evo-save="1"]')
                     page.wait_for_function("document.querySelectorAll('#evoArticles .evo-state.confirmed').length === 6")
+                    page.locator('#evoNodeList button').first.click()
                     self.assertIn("42.5", page.inner_text("#evoDetail"))
                     self.assertGreater(page.locator("#evoDistribution canvas").count(), 0)
+                    self.assertIn("6 篇", page.inner_text("#evoFeedbackStatus"))
+                    page.select_option("#evoMetric", "collects")
+                    page.wait_for_function("document.getElementById('evoDetail').textContent.includes('收藏中位数')")
+                    self.assertIn("3.5", page.inner_text("#evoDetail"))
+                    page.select_option("#evoMetric", "likes")
                     page.select_option("#evoHorizon", "7")
                     page.wait_for_function("document.getElementById('evoWindowNote').textContent.includes('第 7～10')")
                     self.assertIn("缺少窗口内有效观测", page.inner_text("#evoArticles"))
                     page.click('[data-evo-view="release"]')
-                    self.assertEqual(page.locator("#evoNodeList button").count(), 16)
-                    self.assertEqual(page.evaluate("echarts.getInstanceByDom(document.getElementById('evoGraph')).getOption().series[0].links.length"), 15)
+                    release_count = len(client.get('/api/evolution').json()['releases'])
+                    self.assertEqual(page.locator("#evoNodeList button").count(), release_count)
+                    self.assertEqual(page.evaluate("echarts.getInstanceByDom(document.getElementById('evoGraph')).getOption().series[0].links.length"), release_count - 1)
                     page.click("#evoNodeList button:first-child")
                     self.assertIn("属于", page.inner_text("#evoDetail"))
                     page.click('[data-evo-view="scheme"]')

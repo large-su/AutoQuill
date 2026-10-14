@@ -4,6 +4,9 @@
 window.AutoQuillEvolution = (() => {
   let data = null, view = "scheme", selected = null, graph = null, distribution = null;
   let requestNumber = 0;
+  const metricNames = {likes: "赞同", reads: "阅读", comments: "评论", collects: "收藏", favors: "喜欢"};
+  const metricKey = () => data?.metric || el("evoMetric")?.value || "likes";
+  const metricName = () => metricNames[metricKey()] || "赞同";
   const el = (id) => document.getElementById(id);
   const h = (value) => String(value ?? "").replace(/[&<>"']/g,
     (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -16,6 +19,11 @@ window.AutoQuillEvolution = (() => {
     : node.label;
   const selectedScheme = () => view === "scheme" ? nodes().find((n) => n.id === selected)
     : nodes().find((n) => n.id === releases().find((r) => r.tag === selected)?.node_id);
+  const selectedRelease = () => view === "release" ? releases().find((r) => r.tag === selected) : null;
+  const selectedMetrics = () => selectedRelease()?.metrics || selectedScheme()?.metrics || {};
+  const belongsToSelected = (article) => view === "release"
+    ? (selectedRelease()?.article_ids || []).includes(article.aid)
+    : article.node_id === selectedScheme()?.id;
   function publicLink(url) {
     try {
       const parsed = new URL(url);
@@ -29,7 +37,9 @@ window.AutoQuillEvolution = (() => {
     el("evoStatus").textContent = "正在读取本地版本与反馈记录…";
     el("evoStatus").classList.remove("evo-error");
     try {
-      const response = await fetch("/api/evolution?horizon=" + el("evoHorizon").value);
+      const params = new URLSearchParams({horizon: el("evoHorizon").value, metric: el("evoMetric").value,
+        since: el("evoSince").value, until: el("evoUntil").value});
+      const response = await fetch("/api/evolution/feedback?" + params);
       if (!response.ok) throw new Error("读取失败（HTTP " + response.status + "）");
       const result = await response.json();
       if (number !== requestNumber) return;
@@ -56,6 +66,18 @@ window.AutoQuillEvolution = (() => {
     el("evoWarnings").textContent = warnings.join("；");
     el("evoWindowNote").textContent = "对齐文章发布后的年龄：采用第 " + data.horizon + "～"
       + (data.horizon + 3) + " 天内最接近目标日的一次实际观测。错过窗口的历史数据保留展示，不反推当时成绩。";
+    const refreshes = data.refreshes || {};
+    const latest = refreshes.latest, good = refreshes.last_success;
+    const names = {done: "完成", error: "失败", running: "进行中", stopped: "已停止", interrupted: "上次中断"};
+    el("evoFeedbackStatus").textContent = good
+      ? "最近成功采集：" + (good.observed_at || "时间未知").replace("T", " ") + " · " + num(good.count) + " 篇"
+        + (latest && latest.id !== good.id ? "；最新尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "") : "")
+      : latest ? "最新采集尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "尚无成功观测")
+        : "尚无每日采集节点；已有历史快照仍可查询。开启日常自动化后默认每天 23:00 刷新，亦可手动更新。";
+    el("evoRefreshNodes").innerHTML = (refreshes.history || []).map((node) => "<p>"
+      + h((node.observed_at || node.finished_at || node.started_at || "").replace("T", " ").slice(0, 19))
+      + " · " + (node.source === "automation" ? "每日自动采集" : "手动采集") + " · " + h(names[node.status] || node.status)
+      + " · " + (node.status === "done" ? num(node.count) + " 篇" : h(node.message || "")) + "</p>").join("") || "暂无采集记录。";
     renderGraph(); renderDetail(); renderArticles();
   }
 
@@ -83,7 +105,7 @@ window.AutoQuillEvolution = (() => {
       const active = key(item) === selected;
       const color = scheme?.source === "runtime" ? "#34d399" : "#818cf8";
       const name = view === "scheme" ? nodeLabel(item) : item.tag;
-      const m = scheme?.metrics || {};
+      const m = view === "release" ? item.metrics || {} : scheme?.metrics || {};
       const subtitle = view === "release" ? ({engineering: "工程改动", writing: "写作改动", mixed: "混合改动"}[item.change_kind] || "改动记录")
         : m.observed ? "中位数 " + num(m.median) + " · " + m.observed + " 篇观测"
           : m.assigned ? "已有作品 · 等待阶段观测" : "尚无已确认样本";
@@ -113,20 +135,25 @@ window.AutoQuillEvolution = (() => {
   function renderDetail() {
     const node = selectedScheme();
     if (!node) { el("evoDetail").innerHTML = '<p class="evo-muted">尚无节点记录。</p>'; return; }
-    const release = view === "release" ? releases().find((r) => r.tag === selected) : null;
-    const m = node.metrics || {};
+    const release = selectedRelease();
+    const m = selectedMetrics();
     const metric = (label, value) => "<div><dt>" + label + "</dt><dd>" + num(value) + "</dd></div>";
     let html = "<h3>" + h(release ? release.tag : nodeLabel(node)) + "</h3>";
     html += '<p class="evo-muted">' + h(release?.date || node.start_date || "") + "</p>";
     if (release) {
       html += "<p>" + h(Array.isArray(release.summary) ? release.summary.join("；") : release.summary || "版本记录") + "</p>";
-      html += '<p class="evo-muted">属于 ' + h(nodeLabel(node)) + "。下面是这个方案阶段的作品反馈。</p>";
+      html += '<p class="evo-muted">属于 ' + h(nodeLabel(node)) + "。下面仅统计有该生成版本证据且已确认归属的作品。</p>";
     } else html += "<p>" + h(node.description || "同一写作方案连续使用的阶段") + "</p>";
-    html += "<dl>" + metric("赞同中位数", m.median) + metric("P25 · 较低四分位", m.p25)
-      + metric("篇均赞同", m.mean) + metric("有效阶段观测", m.observed || 0) + "</dl>";
+    html += "<dl>" + metric(metricName() + "中位数", m.median) + metric("P25 · 较低四分位", m.p25)
+      + metric("篇均" + metricName(), m.mean) + metric("有效阶段观测", m.observed || 0) + "</dl>";
     const share = m.top_share == null ? "—" : (m.top_share * 100).toFixed(1) + "%";
     html += '<p class="evo-muted">已关联 ' + (m.assigned || 0) + " 篇 · 已到观察日 " + (m.mature || 0)
       + " 篇<br>最大单篇占比 " + share + "；用于查看成绩是否集中在一篇作品。</p>";
+    html += '<p class="evo-muted">尚未到观察日 ' + num(m.immature || 0) + " 篇 · 窗口缺失 " + num(m.missing || 0)
+      + " 篇 · 发布日期未知 " + num(m.unknown_publish || 0) + " 篇</p>";
+    if (m.by_metric) html += '<details><summary>各反馈指标的有效样本</summary>' + Object.entries(m.by_metric)
+      .map(([key, stat]) => '<p class="evo-muted">' + h(metricNames[key]) + "：" + num(stat.valid_n)
+        + " 篇，中位数 " + num(stat.median) + "，缺失 " + num(stat.missing) + " 篇</p>").join("") + "</details>";
     html += '<p class="evo-note">' + h(m.observed ? (m.observed < 5 ? "样本较少，保留观察结果，暂不足以判断稳定改善。" : "优先结合中位数、P25 与样本分布判断；这些结果尚不能证明改动的因果效果。")
       : m.assigned ? "尚未获得这个阶段的有效观测，暂不评分。" : "尚无已确认归属的公开作品，暂不评分。") + "</p>";
     html += '<p class="evo-muted">包含版本</p>' + (node.releases || []).map((tag) => '<a class="evo-release-link" href="'
@@ -148,13 +175,13 @@ window.AutoQuillEvolution = (() => {
   function renderArticles() {
     const node = selectedScheme();
     const all = [...(data.articles || [])].sort((a, b) => (b.publish_date || "").localeCompare(a.publish_date || ""));
-    const articles = el("evoOnlySelected").checked ? all.filter((a) => a.node_id === node?.id) : all;
+    const articles = el("evoOnlySelected").checked ? all.filter(belongsToSelected) : all;
     if (!articles.length) {
       el("evoArticles").innerHTML = '<p class="evo-muted">' + (all.length ? "所选方案尚无已关联作品。取消筛选后，可从已有作品中确认归属。"
         : "尚无公开作品快照。可先到已发布内容看板刷新，再回到此页查看。") + "</p>";
     } else {
       el("evoArticles").innerHTML = '<table class="evo-table"><thead><tr><th>作品 / 发布日期</th><th>方案归属</th>'
-        + '<th class="evo-num">当前赞同</th><th class="evo-num">阶段赞同</th><th>观测状态</th></tr></thead><tbody>'
+        + '<th class="evo-num">当前' + h(metricName()) + '</th><th class="evo-num">阶段' + h(metricName()) + '</th><th>观测状态与变化</th></tr></thead><tbody>'
         + articles.map((article) => {
           const href = publicLink(article.url);
           const title = href ? '<a class="evo-title" href="' + h(href) + '" target="_blank" rel="noopener noreferrer">' + h(article.title || article.aid) + " ↗</a>"
@@ -166,37 +193,52 @@ window.AutoQuillEvolution = (() => {
           const state = !isPublic ? "发布回执 · 待公开确认" : article.node_id ? "已确认归属"
             : article.suggested_node_id ? "归属建议 · 待确认" : "待关联";
           const observation = article.horizon_observation;
-          const hasValue = articleMetric(article).likes != null;
+          const hasValue = articleMetric(article)[metricKey()] != null;
           const status = !isPublic ? "等待公开内容快照" : !article.node_id ? "确认归属后参与评价" : !article.publish_date ? "缺少发布日期"
             : observation && hasValue ? "第 " + num(observation.age_days) + " 天观测"
               : article.age_days != null && article.age_days < data.horizon ? "尚未到观察日" : "缺少窗口内有效观测";
-          return "<tr><td>" + title + '<span class="evo-muted">' + h(article.publish_date || "发布日期未知") + "</span></td><td>"
+          const change = article.latest_change;
+          const delta = change?.metrics?.[metricKey()];
+          const windowChange = (pair) => article.window_deltas?.[pair]?.[metricKey()];
+          const interval = (pair, label) => {
+            const x = windowChange(pair);
+            return label + "：" + (x ? (x.value >= 0 ? "+" : "") + num(x.value)
+              + "（第 " + num(x.from_age_days) + "→" + num(x.to_age_days) + " 天实际观测）" : "缺少两端观测");
+          };
+          const details = '<details><summary>观测变化 · ' + num(article.observations?.length || 0) + ' 次</summary>'
+            + (change ? '<p class="evo-muted">' + h(change.from_at) + " → " + h(change.to_at) + "<br>"
+              + h(metricName()) + "变化：" + (delta == null ? "—（缺指标）" : (delta >= 0 ? "+" : "") + num(delta)) + "</p>" : "尚缺相邻观测。")
+            + '<p class="evo-muted">' + h(interval("7_14", "7→14 天")) + "<br>" + h(interval("14_30", "14→30 天")) + "</p>"
+            + (article.observations || []).slice(-7).map((o) => '<div class="evo-muted">' + h(o.observed_at)
+              + " · " + num(o[metricKey()]) + "</div>").join("") + "</details>";
+          return "<tr><td>" + title + '<span class="evo-muted">' + h(article.publish_date || "发布日期未知")
+            + (article.generation_version ? " · 生成 v" + h(article.generation_version.replace(/^v/, "")) : " · 生成版本未知") + "</span></td><td>"
             + '<div class="evo-assignment-box"><select class="evo-assignment" data-evo-aid="' + h(article.aid) + '" aria-label="作品所属方案">'
             + options + '</select><button class="btn ghost" data-evo-save="' + h(article.aid) + '"'
             + (isPublic ? "" : " disabled") + '>确认归属</button></div>'
             + '<span class="evo-state ' + (article.node_id ? "confirmed" : "") + '">' + state + "</span></td>"
-            + '<td class="evo-num">' + num((article.latest?.metrics || article.latest || {}).likes) + "</td>"
-            + '<td class="evo-num">' + num(articleMetric(article).likes) + "</td><td>" + h(status) + "</td></tr>";
+            + '<td class="evo-num">' + num((article.latest?.metrics || article.latest || {})[metricKey()]) + "</td>"
+            + '<td class="evo-num">' + num(articleMetric(article)[metricKey()]) + "</td><td>" + h(status) + details + "</td></tr>";
         }).join("") + "</tbody></table>";
     }
     renderDistribution(node, all);
   }
 
   function renderDistribution(node, articles) {
-    const samples = articles.filter((a) => a.node_id === node?.id && articleMetric(a).likes != null)
-      .sort((a, b) => articleMetric(a).likes - articleMetric(b).likes);
+    const samples = articles.filter((a) => belongsToSelected(a) && a.attribution === "confirmed" && articleMetric(a)[metricKey()] != null)
+      .sort((a, b) => articleMetric(a)[metricKey()] - articleMetric(b)[metricKey()]);
     el("evoDistribution").hidden = !samples.length;
     if (!samples.length || !window.echarts) return;
     if (!distribution) distribution = echarts.init(el("evoDistribution"));
     distribution.setOption({animation: false,
-      title: {text: "所选方案 · 每篇作品的阶段赞同（由低到高）", textStyle: {color: "#dbe3f0", fontSize: 12}},
+      title: {text: "所选节点 · 每篇作品的阶段" + metricName() + "（由低到高）", textStyle: {color: "#dbe3f0", fontSize: 12}},
       grid: {left: 50, right: 20, top: 42, bottom: 32},
-      tooltip: {trigger: "item", formatter: (params) => h(samples[params.dataIndex].title || "作品") + "<br>阶段赞同：" + num(params.value)},
+      tooltip: {trigger: "item", formatter: (params) => h(samples[params.dataIndex].title || "作品") + "<br>阶段" + metricName() + "：" + num(params.value)},
       xAxis: {type: "category", data: samples.map((_, i) => i + 1), name: "作品", axisLabel: {color: "#7d8aa3"}},
-      yAxis: {type: "value", name: "赞同", axisLabel: {color: "#7d8aa3"}, splitLine: {lineStyle: {color: "#232b3d"}}},
-      series: [{type: "bar", data: samples.map((a) => articleMetric(a).likes), itemStyle: {color: "#818cf8"},
+      yAxis: {type: "value", name: metricName(), axisLabel: {color: "#7d8aa3"}, splitLine: {lineStyle: {color: "#232b3d"}}},
+      series: [{type: "bar", data: samples.map((a) => articleMetric(a)[metricKey()]), itemStyle: {color: "#818cf8"},
         markLine: {symbol: "none", lineStyle: {color: "#34d399"}, label: {color: "#34d399"},
-          data: node?.metrics?.median == null ? [] : [{yAxis: node.metrics.median, name: "中位数", label: {formatter: "中位数"}}]}}]
+          data: selectedMetrics().median == null ? [] : [{yAxis: selectedMetrics().median, name: "中位数", label: {formatter: "中位数"}}]}}]
     }, true);
     distribution.resize();
   }
@@ -224,6 +266,27 @@ window.AutoQuillEvolution = (() => {
 
   el("evoRefresh").addEventListener("click", load);
   el("evoHorizon").addEventListener("change", load);
+  ["evoMetric", "evoSince", "evoUntil"].forEach((id) => el(id).addEventListener("change", load));
+  el("evoFeedbackRefresh").addEventListener("click", async () => {
+    const button = el("evoFeedbackRefresh");
+    button.disabled = true;
+    try {
+      const response = await fetch("/api/dashboard/refresh", {method: "POST"});
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.message || "刷新未启动");
+      el("evoFeedbackStatus").textContent = "正在从知乎采集反馈，可离开此页；完成后会保存新的观测节点。";
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        const status = await (await fetch("/api/dashboard/refresh/status")).json();
+        if (status.status === "running") { el("evoFeedbackStatus").textContent = status.progress || "正在采集…"; continue; }
+        await load();
+        if (status.status !== "done") throw new Error(status.error || "本次采集未完成，已有观测仍保留");
+        break;
+      }
+    } catch (error) {
+      el("evoFeedbackStatus").textContent = "反馈采集未完成：" + error.message;
+    } finally { button.disabled = false; }
+  });
   el("evoReset").addEventListener("click", () => { if (data) renderGraph(); });
   el("evoOnlySelected").addEventListener("change", () => { if (data) renderArticles(); });
   el("evoViewSwitch").addEventListener("click", (event) => {

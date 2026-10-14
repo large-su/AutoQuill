@@ -197,6 +197,10 @@ class AutomationScheduler:
                 return
         day = now.strftime("%Y-%m-%d")
         day_data = store.load_day(day)
+        # 仅恢复每日反馈刷新的持久化 running 状态。它是只读采集，且执行器
+        # 会以同一 refresh_key 确认已成功节点，因而可在“站点已采到、进程尚未
+        # 写完台账”时安全确认；其他任务含写作/发布副作用，绝不在这里猜测重跑。
+        self._recover_interrupted_feedback_refresh(now, plan, day, day_data)
         # 续做：按台账里「今天已完成的量」扣减配额后再生成排班（用户明确要求）
         day_data = planner.materialize_day(now, plan, day_data,
                                            store.done_counts(day))
@@ -212,11 +216,12 @@ class AutomationScheduler:
             _, win_end = planner.window_bounds(day, plan)
             if now > win_end:
                 self._close_out_day(now, plan, day, day_data)
-            due_manual = [j for j in planner.due_jobs(now, day_data, plan)
-                          if j.get("manual")]
-            if not due_manual:
+            due_outside = [j for j in planner.due_jobs(now, day_data, plan)
+                           if j.get("manual") or
+                           model.TASK_TYPES.get(j.get("type"), {}).get("job_mode") == "fixed_daily"]
+            if not due_outside:
                 return
-            due = due_manual
+            due = due_outside
         else:
             due = planner.due_jobs(now, day_data, plan)
             if not due:
@@ -226,6 +231,45 @@ class AutomationScheduler:
             if browser_busy():
                 return                     # 手动任务优先，等它跑完再派活
         self._run_job(due[0], day, day_data, plan)
+
+    def _recover_interrupted_feedback_refresh(self, now, plan, day, day_data):
+        """把上次进程中断的当日反馈刷新恢复为同一条待确认作业。
+
+        只有本进程没有活跃作业时才可能是遗留状态；恢复不生成新 key，也不跨过
+        午夜。总开关、任务开关和暂停在调用此方法前已经挡住，确保用户明确停止
+        后只看见责任、不发生后台采集。
+        """
+        if self._running_job is not None:
+            return False
+        cfg = (plan.get("tasks") or {}).get("feedback_refresh") or {}
+        if not cfg.get("enabled"):
+            return False
+        recovered = False
+        day_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        when = (now + timedelta(seconds=3)).replace(microsecond=0)
+        for job in day_data.get("schedule", []):
+            if (job.get("type") != "feedback_refresh"
+                    or job.get("status") != STATUS_RUNNING):
+                continue
+            # 旧版本可能留有错误日期的 day 文件；不把它当成今天的观测恢复。
+            if not str(job.get("key") or "").startswith("auto:%s:" % day):
+                continue
+            if when > day_end:
+                job["status"] = STATUS_SKIPPED
+                job["note"] = ((job.get("note") or "") +
+                               "（进程中断，已过午夜，当日未采集）")
+                recovered = True
+                continue
+            job["original_planned_at"] = (job.get("original_planned_at")
+                                           or job.get("planned_at") or "")
+            # started_at 保留为实际首次启动时刻，供后续演进/审计识别中断。
+            job["status"] = STATUS_PLANNED
+            job["planned_at"] = when.isoformat()
+            job["recovered_interrupted"] = True
+            job["note"] = ((job.get("note") or "") +
+                           "（检测到上次进程中断，待确认）")
+            recovered = True
+        return recovered
 
     def _ledger_skips(self, now, day, day_data):
         """把「跳过 / 需要人工」的作业补进台账。
@@ -264,10 +308,12 @@ class AutomationScheduler:
         if self._closed_day == day:
             return
         schedule = day_data.get("schedule", []) or []
-        leftover = [j for j in schedule if j.get("status") == STATUS_PLANNED]
+        leftover = [j for j in schedule if j.get("status") == STATUS_PLANNED
+                    and model.TASK_TYPES.get(j.get("type"), {}).get("job_mode") != "fixed_daily"]
         # 「本该做但没做成」的口径：还挂着的 + 被跳过/失败的（排不下那种 units=0 的说明不算）
         unfinished = [j for j in schedule
-                      if j.get("status") in (STATUS_PLANNED, STATUS_FAILED)
+                      if (j.get("status") in (STATUS_PLANNED, STATUS_FAILED)
+                          and model.TASK_TYPES.get(j.get("type"), {}).get("job_mode") != "fixed_daily")
                       or (j.get("status") == STATUS_SKIPPED and j.get("units"))]
         self._closed_day = day
         if not unfinished:
@@ -323,11 +369,21 @@ class AutomationScheduler:
         except BrowserBusy as exc:
             # 排队重来：浏览器被手动任务占用，不算失败（用户优先）
             nxt = (self._now() + timedelta(minutes=BUSY_RETRY_MINUTES))
-            job["status"] = STATUS_PLANNED
-            job["planned_at"] = nxt.replace(microsecond=0).isoformat()
-            job["note"] = (job.get("note") or "") + "（浏览器被占用，顺延）"
-            result = {"ok": False, "units": 0, "status": STATUS_PLANNED,
-                      "message": str(exc), "artifacts": []}
+            fixed_daily = (model.TASK_TYPES.get(job.get("type"), {})
+                           .get("job_mode") == "fixed_daily")
+            if fixed_daily and nxt.date().isoformat() != day:
+                # 每日反馈观测不能跨日补写：过了午夜应如实留下当日未采集，
+                # 次日会生成新一天的固定责任。
+                job["status"] = STATUS_SKIPPED
+                job["note"] = (job.get("note") or "") + "（浏览器被占用，当日未采集）"
+                result = {"ok": False, "units": 0, "status": STATUS_SKIPPED,
+                          "message": "浏览器被占用，当日未采集", "artifacts": []}
+            else:
+                job["status"] = STATUS_PLANNED
+                job["planned_at"] = nxt.replace(microsecond=0).isoformat()
+                job["note"] = (job.get("note") or "") + "（浏览器被占用，顺延）"
+                result = {"ok": False, "units": 0, "status": STATUS_PLANNED,
+                          "message": str(exc), "artifacts": []}
         except NeedHuman as exc:
             job["status"] = STATUS_NEEDS_HUMAN
             result = {"ok": False, "units": 0, "status": STATUS_NEEDS_HUMAN,
@@ -551,6 +607,8 @@ def _single_axis_payload(day, day_data, plan=None):
             "label": meta.get("label") or job.get("type"),
             "unit": meta.get("unit") or "",
             "stage": meta.get("single_stage") or 0,
+            "job_mode": meta.get("job_mode") or "",
+            "at": cfg.get("at") or meta.get("default_at") or "",
             "planned_at": job.get("planned_at") or "",
             "status": job.get("status") or "",
             "units": int(job.get("units") or 0),

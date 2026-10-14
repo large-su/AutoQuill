@@ -190,7 +190,7 @@ class PlannerTest(unittest.TestCase):
         再登记——这里只放已经在 executor 里有处理器的类型。
         """
         self.assertEqual(sorted(TASK_TYPES),
-                         ["checkin", "full_chain", "publish_drafts",
+                         ["checkin", "feedback_refresh", "full_chain", "publish_drafts",
                           "reply_comment"])
         from automation.executor import _HANDLERS
         self.assertEqual(sorted(_HANDLERS), sorted(TASK_TYPES),
@@ -210,12 +210,12 @@ class PlannerTest(unittest.TestCase):
                             "full_chain": {"enabled": True, "daily_cap": 2}}}
         plan = normalize_plan(legacy)
         self.assertEqual(sorted(plan["tasks"]),
-                         ["checkin", "full_chain", "publish_drafts",
+                         ["checkin", "feedback_refresh", "full_chain", "publish_drafts",
                           "reply_comment"])
         self.assertEqual(plan["tasks"]["full_chain"]["daily_cap"], 2)
         day = planner.materialize_day(self.now, plan, {}, {})
         self.assertFalse([j for j in day["schedule"]
-                          if j["type"] not in ("full_chain", "publish_drafts")])
+                          if j["type"] not in ("full_chain", "publish_drafts", "feedback_refresh")])
 
     def test_new_tasks_enabled_by_default(self):
         """新装默认开启的任务：写 / 发 / 打卡。
@@ -406,7 +406,8 @@ class PlannerTest(unittest.TestCase):
         past = [j for j in planned
                 if datetime.fromisoformat(j["planned_at"]) < late]
         self.assertEqual(past, [], [j["planned_at"] for j in past])
-        self.assertEqual(planned, [], "50 分钟放不下 60 分钟的最小间隔：不该排任何作业")
+        regular = [j for j in planned if j["type"] != "feedback_refresh"]
+        self.assertEqual(regular, [], "50 分钟放不下 60 分钟的最小间隔：不该排任何作业")
         skipped = [j for j in day["schedule"] if j["status"] == planner.STATUS_SKIPPED]
         self.assertLessEqual(len(skipped), 2,
                              [(j["type"], (j.get("note") or "")[:20]) for j in skipped])
@@ -850,7 +851,7 @@ class AutomationApiTest(unittest.TestCase):
         """目录里只有能跑的任务（UI 泳道/配置表据此渲染，不留空泳道）。"""
         d = self.client.get("/api/automation/types").json()
         ids = sorted(t["id"] for t in d["types"])
-        self.assertEqual(ids, ["checkin", "full_chain", "publish_drafts",
+        self.assertEqual(ids, ["checkin", "feedback_refresh", "full_chain", "publish_drafts",
                                "reply_comment"])
         self.assertTrue(all(t["implemented"] for t in d["types"]))
 
@@ -864,7 +865,7 @@ class AutomationApiTest(unittest.TestCase):
         self.assertEqual(plan["window"]["start"], "09:00")
         self.assertEqual(plan["tasks"]["full_chain"]["daily_cap"], 5)
         self.assertEqual(sorted(plan["tasks"]),
-                         ["checkin", "full_chain", "publish_drafts",
+                         ["checkin", "feedback_refresh", "full_chain", "publish_drafts",
                           "reply_comment"])
 
     def test_start_stop_toggles_enabled(self):

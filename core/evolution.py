@@ -14,6 +14,7 @@ from core.version import VERSION
 
 
 _LOCK = threading.RLock()
+_RUN_ID = uuid.uuid4().hex
 _FILES = (
     'story_prompt.py',
     'story_generation.py',
@@ -61,7 +62,7 @@ def _now():
     return datetime.now().astimezone().isoformat(timespec='seconds')
 
 def _blank():
-    return {'schema_version': 1, 'generations': [], 'drafts': [], 'articles': {}}
+    return {'schema_version': 1, 'generations': [], 'drafts': [], 'articles': {}, 'refreshes': []}
 
 def _sha(b):
     return hashlib.sha256(b).hexdigest()
@@ -74,7 +75,7 @@ def _load():
         data = json.loads(p.read_text(encoding='utf8'))
         if not isinstance(data, dict):
             raise ValueError('状态根不是对象')
-        for k, v in (('generations', []), ('drafts', []), ('articles', {})):
+        for k, v in (('generations', []), ('drafts', []), ('articles', {}), ('refreshes', [])):
             data.setdefault(k, v)
         valid_generations = isinstance(data['generations'], list)
         valid_drafts = isinstance(data['drafts'], list)
@@ -100,6 +101,11 @@ def _load():
             raise ValueError('状态字段类型无效')
         if data.get('schema_version', 1) != 1:
             raise ValueError('不支持的演进状态版本')
+        if not isinstance(data['refreshes'], list) or any(
+                not isinstance(item, dict) or not isinstance(item.get('id'), str)
+                or _date(item.get('started_at')) is None
+                for item in data['refreshes']):
+            raise ValueError('刷新记录字段无效')
         generation_fields = ('id', 'episode', 'fingerprint', 'basename', 'content_hash', 'observed_at')
         if any(not all(isinstance(item.get(key), str) for key in generation_fields)
                for item in data['generations']):
@@ -326,6 +332,68 @@ def ingest_snapshot(rows, observed_at=None):
         _save(d)
         return count
 
+
+def start_refresh(source='manual', refresh_key=''):
+    """记录一次实际刷新尝试；状态随观测留在本机，重启后仍可查。"""
+    with _LOCK:
+        data, warnings = _load()
+        if data is None:
+            raise ValueError(warnings[0])
+        node = {'id': 'refresh:' + uuid.uuid4().hex, 'source': str(source),
+                'key': str(refresh_key), 'started_at': _now(), 'status': 'running',
+                'run_id': _RUN_ID, 'count': 0, 'observed_at': None,
+                'source_file': None, 'message': ''}
+        data['refreshes'].append(node)
+        _save(data)
+        return dict(node)
+
+
+def finish_refresh(node_id, *, status, count=0, observed_at=None,
+                   source_file=None, message=''):
+    with _LOCK:
+        data, warnings = _load()
+        if data is None:
+            raise ValueError(warnings[0])
+        node = next((r for r in data['refreshes'] if r['id'] == node_id), None)
+        if node is None:
+            raise ValueError('未知刷新节点')
+        node.update(status=status, count=int(count), observed_at=observed_at,
+                    source_file=Path(source_file).name if source_file else None,
+                    message=str(message)[:500], finished_at=_now())
+        _save(data)
+        return dict(node)
+
+
+def _refresh_payload(data, limit=20):
+    nodes = [dict(row) for row in data.get('refreshes', [])]
+    for node in nodes:
+        if node.get('status') == 'running' and node.get('run_id') != _RUN_ID:
+            node['status'] = 'interrupted'
+            node['message'] = '上次进程退出前未确认完成，未补造观测'
+        node.pop('run_id', None)
+    good = [n for n in nodes if n.get('status') == 'done']
+    return {'history': list(reversed(nodes[-limit:])),
+            'latest': nodes[-1] if nodes else None,
+            'last_success': good[-1] if good else None,
+            'total': len(nodes)}
+
+
+def refresh_status(limit=20):
+    with _LOCK:
+        data, warnings = _load()
+        return dict(_refresh_payload(data or _blank(), limit), warnings=warnings)
+
+
+def find_refresh(refresh_key, source='automation'):
+    """查找同一任务已确认完成的采集，用于提交观测后崩溃的恢复。"""
+    with _LOCK:
+        data, _ = _load()
+        for node in reversed((data or _blank())['refreshes']):
+            if (node.get('status') == 'done' and node.get('key') == refresh_key
+                    and node.get('source') == source):
+                return {k: v for k, v in node.items() if k != 'run_id'}
+    return None
+
 def _legacy():
     out = {}
     root = Path(paths.data('data'))
@@ -378,10 +446,11 @@ def _nodes(d):
     for i, n in enumerate(runtime, 1):
         episode_generations = [x for x in d['generations'] if x.get('episode') == n['id']]
         g = episode_generations[0]
-        versions = list(dict.fromkeys(str(item.get('version', VERSION)).lstrip('v')
-                                     for item in episode_generations))
-        version_label = versions[0] if len(versions) == 1 else versions[0] + ' ～ ' + versions[-1]
-        n['label'] = f"试用 {i} · v{version_label}"
+        versions = list(dict.fromkeys(str(item.get('version')).lstrip('v')
+                                     for item in episode_generations if item.get('version')))
+        version_label = ('v' + versions[0] if len(versions) == 1 else
+                         'v' + versions[0] + ' ～ v' + versions[-1] if versions else '版本未知')
+        n['label'] = f"试用 {i} · {version_label}"
         n['settings'] = _settings(g.get('settings', {}))
         n['releases'] = ['v' + version for version in versions]
     if runtime:
@@ -396,6 +465,13 @@ def _merged(d):
         a['observations'].extend(s.get('observations', []))
     for a in out.values():
         a['observations'] = sorted({(x.get('observed_at'), x.get('source')): x for x in a['observations']}.values(), key=lambda x: x.get('observed_at', ''))
+        fresh_mirrors = {(_date(o.get('observed_at')), tuple(_number(o.get(k)) for k in _METRICS))
+                         for o in a['observations'] if o.get('source') == 'fresh'}
+        # 每日看板文件是同一次采集的副本。已有同日同指标的精确观测时，
+        # 不再把文件名推导出的午夜当成另一个真实采集点。
+        a['observations'] = [o for o in a['observations']
+                             if o.get('source') != 'legacy'
+                             or (_date(o.get('observed_at')), tuple(_number(o.get(k)) for k in _METRICS)) not in fresh_mirrors]
     return out
 
 def _ledger_versions():
@@ -455,12 +531,69 @@ def _q(v, q):
     h = min(l + 1, len(v) - 1)
     return v[l] + (v[h] - v[l]) * (p - l)
 
-def contract(horizon=30):
+def _window_observation(observations, horizon, metric):
+    candidates = [o for o in observations
+                  if o.get('age_days') is not None
+                  and horizon <= o['age_days'] <= horizon + 3
+                  and o.get(metric) is not None]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda o: (
+        o['age_days'] - horizon, o.get('source') != 'fresh',
+        -datetime.fromisoformat(o['observed_at'].replace('Z', '+00:00')).timestamp()))
+
+
+def _feedback_statistics(articles, horizon, metric):
+    mature = [a for a in articles if a['age_days'] is not None and a['age_days'] >= horizon]
+    by_metric = {}
+    for key in _METRICS:
+        values = [a['horizon_observations'][key][key] for a in mature
+                  if a['horizon_observations'][key] is not None]
+        by_metric[key] = {
+            'valid_n': len(values), 'missing': len(mature) - len(values),
+            'sum': sum(values) if values else None,
+            'median': _q(values, .5), 'p25': _q(values, .25),
+            'mean': sum(values) / len(values) if values else None,
+            'top_share': max(values) / sum(values) if values and sum(values) else None,
+        }
+    selected = by_metric[metric]
+    return dict(selected, assigned=len(articles), total=selected['valid_n'],
+                mature=len(mature), observed=selected['valid_n'],
+                immature=sum(a['age_days'] is not None and a['age_days'] < horizon for a in articles),
+                unknown_publish=sum(a['age_days'] is None for a in articles),
+                metric=metric, by_metric=by_metric,
+                status='ok' if selected['valid_n'] >= 5 else 'insufficient')
+
+
+def _observation_change(observations):
+    """只相减两次实际观测；负数保留，缺一个值则为 None。"""
+    fresh_dates = {_date(o['observed_at']) for o in observations if o.get('source') == 'fresh'}
+    observations = [o for o in observations
+                    if o.get('source') != 'legacy' or _date(o['observed_at']) not in fresh_dates]
+    if len(observations) < 2:
+        return None
+    before, after = observations[-2:]
+    return {'from_at': before['observed_at'], 'to_at': after['observed_at'],
+            'from_precision': before.get('date_precision'),
+            'to_precision': after.get('date_precision'),
+            'metrics': {k: after[k] - before[k]
+                        if before.get(k) is not None and after.get(k) is not None else None
+                        for k in _METRICS}}
+
+
+def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='', as_of=None):
     try:
         horizon = int(horizon)
     except (ValueError, TypeError):
         horizon = 30
     horizon = horizon if horizon in (7, 14, 30, 90) else 30
+    metric = metric if metric in _METRICS else 'likes'
+    today = _date(as_of) if as_of is not None else date.today()
+    if today is None:
+        raise ValueError('无效的查询截止日期')
+    start, end = _date(since) if since else None, _date(until) if until else None
+    if (since and start is None) or (until and end is None) or (start and end and start > end):
+        raise ValueError('无效的作品发布日期范围')
     with _LOCK:
         d, warnings = _load()
         d = d or _blank()
@@ -468,20 +601,27 @@ def contract(horizon=30):
         by = {n['id']: n for n in nodes}
         gens = {g['id']: g for g in d['generations']}
         ledger = _ledger_versions()
-        for n in nodes:
-            n.update(article_ids=[], metrics={'assigned': 0, 'total': 0, 'mature': 0, 'observed': 0, 'missing': 0, 'median': None, 'p25': None, 'mean': None, 'top_share': None, 'status': 'insufficient'})
         articles = []
         for a in _merged(d).values():
             pub = _date(a.get('publish_date'))
+            if aid and a['aid'] != str(aid):
+                continue
+            if (start and (pub is None or pub < start)) or (end and (pub is None or pub > end)):
+                continue
             obs = []
             for o in a['observations']:
                 x = dict(o)
+                for key in _METRICS:
+                    x[key] = _number(x.get(key))
                 od = _date(x.get('observed_at'))
+                if od is None or od > today:
+                    continue
                 x['age_days'] = (od - pub).days if od and pub else None
                 obs.append(x)
-            candidates = [o for o in obs if horizon <= (o.get('age_days') if o.get('age_days') is not None else -1) <= horizon + 3 and o.get('likes') is not None]
-            hov = min(candidates, key=lambda o: (abs(o['age_days'] - horizon), -datetime.fromisoformat(o['observed_at'].replace('Z', '+00:00')).timestamp())) if candidates else None
+            hovs = {k: _window_observation(obs, horizon, k) for k in _METRICS}
+            hov = hovs[metric]
             node = a.get('node_id')
+            generation = gens.get(a.get('generation_id'), {})
             suggested = None if a.get('assignment_source') == 'manual_clear' else node or gens.get(a.get('generation_id'), {}).get('episode')
             if not suggested and a.get('assignment_source') != 'manual_clear' and a['aid'] in ledger:
                 tag = 'v' + ledger[a['aid']].lstrip('v')
@@ -489,31 +629,70 @@ def contract(horizon=30):
             attribution = a.get('attribution', 'unassigned')
             if a.get('published_at') and (not a.get('observations')):
                 attribution = 'draft_match_pending'
-            item = {'aid': a['aid'], 'url': a.get('url', ''), 'title': a.get('title', ''), 'publish_date': a.get('publish_date', ''), 'attribution': attribution, 'node_id': node, 'suggested_node_id': suggested if suggested in by else None, 'latest': obs[-1] if obs else {k: None for k in _METRICS}, 'observations': obs, 'horizon_observation': hov, 'age_days': (date.today() - pub).days if pub else None}
+            if node_id and node != node_id:
+                continue
+            age = (today - pub).days if pub else None
+            windows = {str(h): {k: _window_observation(obs, h, k) for k in _METRICS}
+                       for h in (7, 14, 30)}
+            window_deltas = {}
+            for low, high in ((7, 14), (14, 30)):
+                window_deltas[f'{low}_{high}'] = {}
+                for k in _METRICS:
+                    before, after = windows[str(low)][k], windows[str(high)][k]
+                    window_deltas[f'{low}_{high}'][k] = (
+                        {'value': after[k] - before[k], 'from_at': before['observed_at'],
+                         'to_at': after['observed_at'], 'from_age_days': before['age_days'],
+                         'to_age_days': after['age_days']}
+                        if before is not None and after is not None else None)
+            item = {'aid': a['aid'], 'url': a.get('url', ''), 'title': a.get('title', ''),
+                    'publish_date': a.get('publish_date', ''), 'published_at': a.get('published_at'),
+                    'publish_date_precision': a.get('publish_date_precision'),
+                    'attribution': attribution, 'assignment_source': a.get('assignment_source'),
+                    'node_id': node, 'suggested_node_id': suggested if suggested in by else None,
+                    'generation_id': a.get('generation_id'),
+                    'generation_version': generation.get('version') or ledger.get(a['aid']),
+                    'generation_episode': generation.get('episode'),
+                    'latest': obs[-1] if obs else {k: None for k in _METRICS},
+                    'observations': obs, 'horizon_observation': hov,
+                    'horizon_observations': hovs, 'age_days': age, 'windows': windows,
+                    'window_deltas': window_deltas, 'latest_change': _observation_change(obs),
+                    'window_status': 'unknown_publish' if age is None else 'immature' if age < horizon
+                                     else 'observed' if hov else 'missing'}
             articles.append(item)
-            if node in by and item['attribution'] == 'confirmed':
-                m = by[node]['metrics']
-                by[node]['article_ids'].append(a['aid'])
-                m['assigned'] += 1
-                if item['age_days'] is not None and item['age_days'] >= horizon:
-                    if hov:
-                        m['observed'] += 1
-                    else:
-                        m['missing'] += 1
-                    m['mature'] += 1
-        article_by_aid = {article['aid']: article for article in articles}
         for n in nodes:
-            vals = [article_by_aid[aid]['horizon_observation']['likes'] for aid in n['article_ids'] if article_by_aid[aid]['horizon_observation']]
-            m = n['metrics']
-            m['total'] = len(vals)
-            if vals:
-                m.update(median=_q(vals, 0.5), p25=_q(vals, 0.25), mean=sum(vals) / len(vals), top_share=max(vals) / sum(vals) if sum(vals) else None, status='ok' if len(vals) >= 5 else 'insufficient')
+            assigned = [a for a in articles if a['node_id'] == n['id'] and a['attribution'] == 'confirmed']
+            n['article_ids'] = [a['aid'] for a in assigned]
+            n['metrics'] = _feedback_statistics(assigned, horizon, metric)
+            n['publication_counts'] = {
+                'total': len(assigned), 'dated': sum(bool(a['publish_date']) for a in assigned),
+                'by_date': {day: sum(a['publish_date'] == day for a in assigned)
+                            for day in sorted({a['publish_date'] for a in assigned if a['publish_date']})}}
         releases = []
         for r in _history():
             x = {k: r.get(k) for k in ('version', 'tag', 'date', 'change_kind', 'writing_code_id', 'writing_files_changed', 'changed_files', 'pending')}
-            x.update(commit=r.get('commit') or r.get('source_commit'), summary=r.get('summary') or r.get('summaries') or [], node_id=next((n['id'] for n in nodes if r.get('tag') in n['releases']), None), metrics={'assigned': 0, 'total': 0})
+            version = str(r.get('version') or r.get('tag') or '').lstrip('v')
+            assigned = [a for a in articles if a['attribution'] == 'confirmed'
+                        and str(a.get('generation_version') or '').lstrip('v') == version]
+            x.update(commit=r.get('commit') or r.get('source_commit'),
+                     summary=r.get('summary') or r.get('summaries') or [],
+                     node_id=next((n['id'] for n in nodes if r.get('tag') in n['releases']), None),
+                     article_ids=[a['aid'] for a in assigned],
+                     metrics=_feedback_statistics(assigned, horizon, metric))
             releases.append(x)
         warnings.append('历史运行配置未知；标题和日期仅供人工参考。')
-        return {'schema_version': 1, 'current_version': VERSION, 'objective': '观察不同写作方案在固定成熟窗口的公开表现，不作因果判断。', 'horizon': horizon, 'horizons': [7, 14, 30, 90], 'nodes': nodes, 'releases': releases, 'edges': [{'source': nodes[i - 1]['id'], 'target': n['id'], 'label': '演进'} for i, n in enumerate(nodes) if i], 'articles': articles, 'summary': {'nodes': len(nodes), 'articles': len(articles)}, 'warnings': warnings}
+        return {'schema_version': 1, 'current_version': VERSION,
+                'objective': '比较逐作品发布年龄窗口的真实反馈；保留缺失和归属证据，不作因果判断。',
+                'horizon': horizon, 'horizons': [7, 14, 30, 90],
+                'metric': metric, 'metrics_available': dict(_METRICS),
+                'query': {'since': since, 'until': until, 'aid': aid, 'node_id': node_id,
+                          'as_of': today.isoformat(), 'window_slack_days': 3},
+                'refreshes': _refresh_payload(d), 'nodes': nodes, 'releases': releases,
+                'edges': [{'source': nodes[i - 1]['id'], 'target': n['id'], 'label': '演进'}
+                          for i, n in enumerate(nodes) if i],
+                'articles': articles,
+                'summary': {'nodes': len(nodes), 'articles': len(articles),
+                            'confirmed': sum(a['attribution'] == 'confirmed' for a in articles),
+                            'unassigned': sum(a['attribution'] != 'confirmed' for a in articles)},
+                'warnings': warnings}
 
 

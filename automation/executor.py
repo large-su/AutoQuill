@@ -4,9 +4,9 @@
 刻意的分层：本模块**不直接操作 DOM**，只调用既有能力：
   - full_chain → webui.run_manager.TaskRunner（经典/纯净完整链路，rounds=1 = 一篇）；
   - publish_drafts（M2）→ applications/zhihu_story 的草稿发布能力；
-  - 任务类型只有两个（用户 2026-09-24 口径）：full_chain（写故事）、
-    publish_drafts（发布草稿）。打卡/互动类不做——登记表里没有的类型
-    一律返回「未知任务类型」，不假装成功。
+  - checkin / reply_comment → 已有打卡巡检、评论回复能力；
+  - feedback_refresh → 已发布内容看板刷新和逐作品反馈观测。
+  登记表里没有的类型返回「未知任务类型」，不假装成功。
 
 异常语义（调度器据此决策，不混为一谈）：
   BrowserBusy   浏览器被手动任务占用 → 排队稍后再来，**不算失败**；
@@ -422,11 +422,86 @@ def _reply_comment(job, should_stop=None, progress=None):
     }
 
 
+def _feedback_refresh(job, should_stop=None, progress=None):
+    """刷新已发布内容的反馈快照（只读、可重复，供晚间自动化调用）。
+
+    刷新实现负责复用看板抓取器并写入逐作品观测；这里仅负责自动化层的
+    资源仲裁、停止语义和结果归一化。这样调度器不会把「没有新数据」误记
+    成成功，也不会因为取消而启动一次新的浏览器任务。
+    """
+    busy = _browser_busy()
+    if busy:
+        raise BrowserBusy("浏览器被占用：" + "、".join(busy))
+    from web_drivers.browser_pool import profile_in_use
+    if profile_in_use():
+        raise BrowserBusy("浏览器正被登录引导或其它实例占用，稍后顺延")
+
+    def _stopped():
+        try:
+            return bool(should_stop and should_stop())
+        except Exception:  # noqa: BLE001
+            return False
+
+    if _stopped():
+        return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
+                "message": "反馈刷新已取消", "artifacts": []}
+
+    def _say(text="", pct=None):
+        if not progress:
+            return
+        if isinstance(text, dict):
+            pct = text.get("pct", pct)
+            text = text.get("text") or text.get("message") or ""
+        try:
+            progress({"progress": {"text": str(text), "pct": pct}})
+        except Exception:  # noqa: BLE001
+            pass
+
+    from webui.published import refresh_feedback
+    params = job.get("params") or {}
+    result = refresh_feedback(
+        progress=_say,
+        stop_flag=_stopped,
+        source="automation",
+        refresh_key=job.get("key") or params.get("refresh_key") or "job-key",
+    ) or {}
+    if result.get("status") == "stopped" or (_stopped() and result.get("status") != "done"):
+        return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
+                "message": result.get("message") or "反馈刷新已取消",
+                "artifacts": []}
+    if result.get("status") == "busy":
+        raise BrowserBusy(result.get("message") or "浏览器正忙")
+    if result.get("need_login"):
+        raise NeedHuman(result.get("message") or "反馈看板需要重新登录")
+
+    count = int(result.get("count") or 0)
+    if result.get("status") != "done" or not result.get("ok") or count <= 0:
+        return {"ok": False, "units": 0, "status": STATUS_FAILED,
+                "message": result.get("message") or "反馈刷新失败",
+                "artifacts": []}
+
+    observed_at = result.get("observed_at") or "未知时间"
+    source_file = result.get("source_file")
+    node_id = result.get("node_id")
+    artifacts = []
+    if source_file:
+        artifacts.append("snapshot:" + str(source_file))
+    if observed_at:
+        artifacts.append("observed_at:" + str(observed_at))
+    if node_id:
+        artifacts.append("node_id:" + str(node_id))
+    message = result.get("message") or (
+        "反馈刷新完成：%d 条，观测时间 %s" % (count, observed_at))
+    return {"ok": True, "units": 1, "status": STATUS_DONE,
+            "message": message, "artifacts": artifacts}
+
+
 _HANDLERS = {
     "full_chain": _full_chain,
     "publish_drafts": _publish_drafts,
     "checkin": _checkin,
     "reply_comment": _reply_comment,
+    "feedback_refresh": _feedback_refresh,
 }
 
 

@@ -7,15 +7,17 @@
   - 同类任务最小间隔 ≥60 分钟且**随机化**，当日完成即可（不固定时间点）；
   - 随时可停；再次开始时先看「今天已发布多少 / 已写多少」，在此基础上续做。
 
-**当前四个任务类型**（2026-09-27 更新）：
+**当前五个任务类型**（2026-10-14 更新）：
   · 发布草稿 / 全链路撰写——「要做 N 次」的重复任务，画在 24 小时时间轴上；
   · 打卡互动 / 回复评论——「一天一次」的单次任务（job_mode=single），
     画在「单次任务轴」上，另有阶段闸门保证「先回复、后检查」。
+  · 反馈刷新——每天固定时刻的独立单次任务，不参加写作随机排班，
+    只读采集真实作品互动，留存逐作品观测供后续演进查询。
 历史：2026-09-24 曾砍到只剩发布+撰写；2026-09-27 用户要求把打卡与评论回复做回来
 （真机探针证明可行且成本低），于是重新登记这两个类型。
 契约层不登记任何「预留/未实现」类型：清单里有的就是能跑的，
 免得 UI 与排班里出现永远不执行的空泳道。
-默认开关：DEFAULT_ENABLED 里的四个任务在新装（计划里没有该键）时默认开启；
+默认开关：DEFAULT_ENABLED 中的任务在计划没有该键时默认开启；
 已有计划里的显式开关（含熔断自动停用）永不被覆盖。
 """
 
@@ -83,6 +85,21 @@ TASK_TYPES = {
         "desc": "选题 → 提取 → 生成 → 校验 → 写入草稿箱（不公开）",
         "params": {"mode": "single", "rounds": 1},   # single=经典链路，clean=纯净链路
     },
+    "feedback_refresh": {
+        "label": "反馈刷新",
+        "unit": "次",
+        "lane": 4,
+        "implemented": True,
+        # 每晚固定采集一次已发布内容的真实互动快照。它不是写作配额的一部分，
+        # 也不参加随机铺排或普通任务的去碰撞。
+        "job_mode": "fixed_daily",
+        "axis": "single",
+        "default_cap": 1,
+        "default_at": "23:00",
+        "desc": "刷新已发布内容的点赞、收藏和评论反馈快照，供后续演进评估使用",
+        "params": {},
+        "cap_fixed": True,
+    },
 }
 
 # 执行顺序上的偏好（同一分钟到点时按此排序）：
@@ -90,7 +107,7 @@ TASK_TYPES = {
 # ★ 打卡检查排在最后不是"顺手"，是语义：它要确认的是"今天该做的都做完了没"。
 #   真正的保障是 planner 的「阶段闸门」（single_stage），这里只是同刻排序的兜底。
 TASK_PRIORITY = {"publish_drafts": 0, "full_chain": 1, "reply_comment": 2,
-                 "checkin": 3}
+                 "checkin": 3, "feedback_refresh": 4}
 
 # 全局去碰撞：任意两个作业至少隔开的分钟数（避免同一分钟挤成一堆）
 DECOLLISION_MINUTES = 15
@@ -102,7 +119,7 @@ DECOLLISION_MINUTES = 15
 #   一起带崩）。稳定期先不默认开启；要用的用户在面板上手动打开即可。
 #   注意：**只在计划里没有这个键时生效**——用户已有的显式开关（含熔断自动停用、
 #   以及本次手工关闭）永远不会被覆盖。
-DEFAULT_ENABLED = ("full_chain", "publish_drafts", "checkin")
+DEFAULT_ENABLED = ("full_chain", "publish_drafts", "checkin", "feedback_refresh")
 
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
@@ -151,11 +168,11 @@ def _norm_task(task_type, raw):
     # 间隔：一天一班的单次任务（job_mode=single：打卡、回复评论）不设间隔——
     # 用户口径 2026-10-01：「打卡只有一次，不需要次数也不需要间隔；
     # 评论只需要次数，不需要间隔，因为评论都是一次性回复的」。
-    if meta.get("job_mode") == "single":
+    if meta.get("job_mode") in ("single", "fixed_daily"):
         gap = 0
     else:
         gap = raw.get("min_gap_minutes")                 # None = 用计划全局值
-    return {
+    out = {
         "enabled": enabled,
         # 每天只有一次的项（打卡）：次数固定 1、不可配
         "daily_cap": 1 if meta.get("cap_fixed") else cap,
@@ -164,6 +181,14 @@ def _norm_task(task_type, raw):
         "window": raw.get("window") or meta.get("default_window"),
         "params": params,
     }
+    if meta.get("job_mode") == "fixed_daily":
+        # 固定任务只认一个本地时刻；非法手改回退默认，并统一成 HH:MM。
+        out["at"] = hhmm(parse_hhmm(raw.get("at"),
+                                     parse_hhmm(meta.get("default_at", "23:00"))))
+        # 这是固定任务在单次轴上的真实可执行窗口，而不是全局写作窗口。
+        # 强制从 at 到 23:59，避免手改 window 或默认的全局窗口误导看板。
+        out["window"] = {"start": out["at"], "end": "23:59"}
+    return out
 
 
 def normalize_plan(raw):

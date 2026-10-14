@@ -1063,6 +1063,17 @@ function renderDashHeader(d) {
 function renderSrcInfo(d) {
   const gen = d.generated_at ? d.generated_at.replace("T", " ").slice(0, 16) : "无快照";
   $("dashSrcLine").innerHTML = "快照文件：<b>" + esc(baseName(d.source_file)) + "</b><br>抓取时间：" + esc(gen);
+  const feedback = d.feedback_refresh || {};
+  const statusNames = {done: "完成", error: "失败", running: "进行中", stopped: "已停止", interrupted: "上次中断"};
+  const rows = (feedback.history || []).slice(0, 7);
+  if (rows.length) {
+    $("dashSrcLine").innerHTML += '<details style="margin-top:8px"><summary>最近反馈更新节点</summary>'
+      + rows.map((node) => '<p>' + esc((node.observed_at || node.finished_at || node.started_at || "").replace("T", " ").slice(0, 16))
+        + " · " + (node.source === "automation" ? "每日自动" : "手动") + " · "
+        + esc(statusNames[node.status] || node.status)
+        + (node.status === "done" ? " · " + fmtNum(node.count || 0) + " 篇" : " · " + esc(node.message || "")) + '</p>').join("")
+      + '</details>';
+  }
 }
 
 function kpiCard(label, value, sub, barPct) {
@@ -1250,7 +1261,7 @@ async function refreshDashboard() {
           setRefreshBar(100, "刷新完成，共 " + (s.count || 0) + " 条", 8000);
           dashJustRefreshed = true;
           loadDashboard(true);
-        } else if (s.status === "error") {
+        } else if (["error", "stopped", "busy"].includes(s.status)) {
           clearInterval(dashPollTimer); dashPollTimer = null;
           // 登录态失效（need_login）：直接给可执行指引，别只说「刷新失败」
           const errText = s.need_login

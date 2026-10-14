@@ -55,7 +55,8 @@ const AUTO_STATUS_COLOR = {
 // 视觉分工（用户 2026-09-27 口径）：**颜色只表达状态**，任务身份用形状 +
 // 编号 + 中文标签表达。形状按「动作性质」归类，新增单次任务按性质挑形状即可：
 //   菱形 = 回复 / 对话类 · 圆形 = 检查 / 巡检类 · 方形 = 生成 / 写入类 · 三角 = 对外发布类
-const SA_SHAPE = { reply_comment: "diamond", checkin: "circle" };
+const SA_SHAPE = { reply_comment: "diamond", checkin: "circle",
+                   feedback_refresh: "circle" };
 const SA_ROLE = [
   ["diamond", "回复 / 对话类"],
   ["circle", "检查 / 巡检类"],
@@ -63,7 +64,8 @@ const SA_ROLE = [
   ["triangle", "对外发布类"],
 ];
 const SA_STAGE_CHAR = { 1: "\u2460", 2: "\u2461", 3: "\u2462", 4: "\u2463" };
-const SA_STAGE_TEXT = { reply_comment: "先回复", checkin: "后检查" };
+const SA_STAGE_TEXT = { reply_comment: "先回复", checkin: "后检查",
+                        feedback_refresh: "独立刷新" };
 
 function saShapeOf(t) { return SA_SHAPE[t] || "circle"; }
 function saColorOf(s) { return AUTO_STATUS_COLOR[s] || "#818cf8"; }
@@ -194,16 +196,19 @@ function renderAutoProgress() {
     const m = per[t];
     if (!m.implemented || !m.enabled) return;
     const pct = m.cap ? Math.min(100, Math.round(m.done * 100 / m.cap)) : 0;
-    const single = m.job_mode === "single";
+    const single = m.job_mode === "single" || m.job_mode === "fixed_daily";
+    const fixedDaily = m.job_mode === "fixed_daily";
     // 单次任务（打卡互动）的「每日数量」是班次不是条数：显示成「0/1 项」
     // 会让人以为还差一项配额。这里按语义显示：一天一班 + 当前状态。
-    const value = (single && m.cap <= 1)
+    const value = (single && m.cap <= 1) || fixedDaily
       ? "<span class=\"sub\">一天一班</span>"
       : m.done + "<span class=\"sub\"> / " + m.cap + " " + esc(m.unit) + "</span>";
     const jobs = (st.schedule || []).filter(function (j) { return j.type === t; });
     const jstatus = jobs.length ? (AUTO_STATUS_TEXT[jobs[0].status] || jobs[0].status) : "未排班";
     const when = (jobs.length && jobs[0].planned_at) ? autoClock(jobs[0].planned_at) : "-";
-    const desc = single
+    const desc = fixedDaily
+      ? ("每天 " + esc(m.at || "23:00") + " 到点串行刷新 · "+ jstatus)
+      : single
       ? ("窗口 " + esc((m.window || {}).start || "-") + "–" + esc((m.window || {}).end || "-")
          + " · " + jstatus + " " + when)
       : ("窗口 " + esc((m.window || {}).start || "-") + "–" + esc((m.window || {}).end || "-")
@@ -224,7 +229,9 @@ function renderAutoProgress() {
         : "今天没有待执行任务") + "</div></div>";
   html += "<div class=\"auto-pcard\"><div class=\"l\">运行时段</div>"
     + "<div class=\"v\">" + esc(s.window_label || "-") + "</div>"
-    + "<div class=\"d\">" + (s.in_window ? "当前在时段内" : "当前不在时段内（时段外不派活，程序不退出）")
+    + "<div class=\"d\">" + (s.in_window
+      ? "当前在写作时段内"
+      : "写作时段外不派活；反馈任务仍按固定时间独立采集，程序未运行不会回填过去观测")
     + "</div></div>";
   box.innerHTML = html;
 }
@@ -303,8 +310,11 @@ function renderAutoSingleAxis() {
   const single = st.single || {};
   const axis = single.axis || [];
   const nowMin = autoMinutes(st.now);
+  const hasFeedback = axis.some(function (j) { return j.type === "feedback_refresh"; });
   const head = '<div class="sa-head"><span class="sa-title">◎ 单次任务轴</span>'
-    + '<span class="sa-hint">一天一次 · 按 ①→② 顺序执行（前面没结束，后面的不动手）</span></div>';
+    + '<span class="sa-hint">一天一次 · ' + (hasFeedback
+      ? '反馈按固定时间独立刷新，其他任务按 ①→② 顺序执行'
+      : '按 ①→② 顺序执行（前面没结束，后面的不动手）') + '</span></div>';
   if (!axis.length) {
     box.innerHTML = head + '<div class="empty-note">今天没有单次任务：在下方「任务与配额」里打开「打卡互动」或「回复评论」</div>';
     return;
@@ -322,7 +332,7 @@ function renderAutoSingleAxis() {
     const mMin = autoMinutes(j.planned_at);
     const left = mMin >= 0 ? Math.max(1.5, Math.min(98.5, mMin / 1440 * 100)) : 50;
     const when = mMin >= 0 ? autoClock(j.planned_at) : "未排班";
-    const stage = SA_STAGE_CHAR[j.stage] || (i + 1);
+    const stage = j.type === "feedback_refresh" ? "↻" : (SA_STAGE_CHAR[j.stage] || (i + 1));
     const title = j.label + " · " + saStatusText(j.status) + " · " + when
       + (j.note ? " · " + j.note : "");
     html += '<div class="tl-lane"><div class="tl-lane-label">' + esc(j.label)
@@ -535,9 +545,15 @@ function renderAutoTaskConfig() {
     // 控制项按任务性质显示（用户口径 2026-10-01）：
     //   打卡（cap_fixed）：本身只有一次 → 不设次数、不设间隔，只显示一句说明
     //   回复评论（once_a_day）：一天一班一次回完 → 只设条数，不设间隔
-    const showCap = !m.cap_fixed;
+    const fixedDaily = m.job_mode === "fixed_daily";
+    const showCap = !m.cap_fixed && !fixedDaily;
     const showGap = !!m.show_interval;
-    if (!showCap) {
+    if (fixedDaily) {
+      html += "<div class=\"auto-task-ctl\">每天 <b>一次</b>，固定时间 "
+        + "<input type=\"time\" data-role=\"at\" value=\""
+        + esc(cfg.at || m.at || "23:00") + "\">"
+        + "　<span class=\"auto-hint\">到点串行刷新；写作时段外也可采集</span></div>";
+    } else if (!showCap) {
       html += "<div class=\"auto-task-ctl\">每天 <b>1</b> 次"
         + "　<span class=\"auto-hint\">（本身只有一次，无需设置次数与间隔）</span></div>";
     } else {
@@ -556,7 +572,10 @@ function renderAutoTaskConfig() {
     const maxN = m.max_per_day || 0;
     const over = maxN > 0 && cap > maxN;
     var note;
-    if (!showCap) {
+    if (fixedDaily) {
+      note = "每天 " + esc(cfg.at || m.at || "23:00")
+        + " 到点串行刷新（程序未运行不会回填过去观测）";
+    } else if (!showCap) {
       note = "每天只跑一次（时段 " + (m.window_minutes || 0) + " 分钟内择时）";
     } else if (!showGap) {
       note = "时段 " + (m.window_minutes || 0) + " 分钟内跑一班，一次最多 <b>"
@@ -631,6 +650,7 @@ function collectAutoPlan() {
     const en = el.querySelector("[data-role=enabled]");
     const cap = el.querySelector("[data-role=cap]");
     const gap = el.querySelector("[data-role=gap]");
+    const at = el.querySelector("[data-role=at]");
     const mode = el.querySelector("[data-role=mode]");
     const dryrun = el.querySelector("[data-role=dryrun]");
     if (en) cfg.enabled = en.checked;
@@ -643,6 +663,13 @@ function collectAutoPlan() {
     if (gap) {
       const v = parseInt(gap.value, 10);
       cfg.min_gap_minutes = isNaN(v) ? (parseInt(cfg.min_gap_minutes, 10) || 60) : v;
+    }
+    if (at) {
+      // 空编辑期间保留原值；只接受合法的 HTML time 值，避免一次清空
+      // 把用户已保存的固定采集时间覆盖掉。
+      if (/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(at.value || "")) {
+        cfg.at = at.value;
+      }
     }
     if (mode) { cfg.params = cfg.params || {}; cfg.params.mode = mode.value; }
     if (dryrun) { cfg.params = cfg.params || {}; cfg.params.dry_run = dryrun.value === "1"; }

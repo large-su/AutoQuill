@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,9 @@ log = logging.getLogger(__name__)
 # （不能用 __file__ 相对路径——安装版会把快照写进 _internal 安装目录）
 _DATA_DIR = Path(paths.data("data"))
 _URL = "https://www.zhihu.com/creator/manage/creation/answer"
+_FEEDBACK_REFRESH_LOCK = threading.Lock()
+_MAX_SCROLL_ROUNDS = 500
+_SCROLL_BUDGET_SECONDS = 600
 
 # 抽卡片 JS：每张 .CreationManage-CreationCard 提取 id/标题/发布/正文/互动
 _EXTRACT_JS = r"""
@@ -148,6 +152,8 @@ def _normalize_row(r):
         "comments": _to_number(m.get("评论")),
         "collects": _to_number(m.get("收藏")),
         "favors": _to_number(m.get("喜欢")),
+        # 保留原始指标，区分「页面明确显示 0」与「没有取到该指标」。
+        "metrics": dict(m),
     }
     row["genre"] = genre_of(row)
     return row
@@ -480,7 +486,7 @@ def delete_zhihu(aids, progress=None, stop_flag=None):
     return deleted
 
 
-def scrape(progress=None, stop_flag=None):
+def scrape(progress=None, stop_flag=None, result_meta=None):
     """从创作中心完整滚动抓取已发布回答，落盘到 data/published_answers_YYYY-MM-DD.json。
 
     返回归一化后的 rows（同 load）。progress(text, pct) 可选；stop_flag() 返回
@@ -510,6 +516,10 @@ def scrape(progress=None, stop_flag=None):
             return None
         return min(99, int(cur * 100 / prev_total))
 
+    def _meta(**values):
+        if isinstance(result_meta, dict):
+            result_meta.update(values)
+
     b = ZhihuBrowser(headless=True)
     try:
         b.start()
@@ -525,8 +535,12 @@ def scrape(progress=None, stop_flag=None):
 
         prev = _count(b)
         stable = 0
-        for i in range(1, 100):
+        complete = False
+        deadline = time.monotonic() + _SCROLL_BUDGET_SECONDS
+        for i in range(1, _MAX_SCROLL_ROUNDS + 1):
             if stop_flag and stop_flag():
+                break
+            if time.monotonic() >= deadline:
                 break
             _check_cancel()
             b._safe_evaluate(
@@ -539,8 +553,7 @@ def scrape(progress=None, stop_flag=None):
                 stable = 0
             prev = cur
             if stable >= 3:
-                break
-            if cur >= 790:
+                complete = True
                 break
             if progress and i % 8 == 0:
                 progress(f"已加载 {cur} 条…", _pct(cur))
@@ -549,8 +562,22 @@ def scrape(progress=None, stop_flag=None):
 
         raw = b._safe_evaluate(_EXTRACT_JS) or []
         if stop_flag and stop_flag():
+            _meta(error="stopped")
             return []
-        rows = [_normalize_row(r) for r in raw if r.get("aid")]
+        if not complete:
+            _meta(error="滚动未达到稳定终点，未确认完整抓取")
+            if progress:
+                progress("滚动未达到稳定终点，已保留上次快照", None)
+            return []
+        raw_dedup = []
+        seen_raw = set()
+        for item in raw:
+            aid = str(item.get("aid") or "") if isinstance(item, dict) else ""
+            if not aid or aid in seen_raw:
+                continue
+            seen_raw.add(aid)
+            raw_dedup.append(item)
+        rows = [_normalize_row(r) for r in raw_dedup]
         # 去重
         seen, dedup = set(), []
         for r in rows:
@@ -582,28 +609,181 @@ def scrape(progress=None, stop_flag=None):
                 len(dedup), new_eng, prev_eng)
             if progress:
                 progress("抓取到的互动数据异常（可能未登录/页面改版），已保留上次快照", None)
+            _meta(error="抓取结果质量异常，已保留上次快照")
             return []
 
-        path = _DATA_DIR / f"published_answers_{datetime.now():%Y-%m-%d}.json"
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        path = _DATA_DIR / f"published_answers_{stamp[:10]}.json"
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(dedup, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
         if progress:
             progress(f"已抓取 {len(dedup)} 条，已保存", 100)
         log.info("已发布内容抓取完成：%d 条 → %s", len(dedup), path)
+        ingest_error = None
         try:
             from core import evolution
             # 原始指标才能区分「缺失」与实测 0；看板归一后的旧字段已丢失这个区别。
-            evolution.ingest_snapshot(raw)
-        except Exception:
+            ingested = evolution.ingest_snapshot(raw_dedup, observed_at=stamp)
+            if not ingested:
+                ingest_error = "演进观测未写入"
+        except Exception as exc:
+            ingest_error = "演进观测保存失败：%s" % exc
             log.warning("演进记录：反馈观测保存失败（看板快照已保留）", exc_info=True)
         try:
             from core import feedback_loop
             from config.story import FEEDBACK_LOOP_ENABLE
             if FEEDBACK_LOOP_ENABLE:
-                feedback_loop.attach_snapshot_rows(dedup)
+                feedback_loop.attach_snapshot_rows(raw_dedup, observed=stamp)
         except Exception:
             log.debug("反馈闭环入账失败（不影响快照）", exc_info=True)
+        _meta(observed_at=stamp, source_file=str(path), count=len(dedup), error=ingest_error)
         return dedup
     finally:
         b.close()
+
+
+def refresh_feedback(progress=None, stop_flag=None, source="manual", refresh_key=""):
+    """执行一次带演进节点的看板刷新；不会并发启动第二个浏览器抓取。"""
+    def _dash(update):
+        try:
+            from webui.browser_tasks import _DASH_REFRESH
+            _DASH_REFRESH.update(**update)
+        except Exception:
+            pass
+
+    def _progress(text, pct=None):
+        _dash({"status": "running", "progress": text or "", "pct": pct})
+        if progress:
+            try:
+                progress(text, pct)
+            except Exception:
+                log.debug("反馈刷新进度回调失败", exc_info=True)
+
+    if not _FEEDBACK_REFRESH_LOCK.acquire(blocking=False):
+        return {"ok": False, "status": "busy", "count": 0,
+                "observed_at": None, "source_file": None, "node_id": None,
+                "message": "反馈刷新正在进行", "need_login": False}
+    node = None
+    meta = {}
+
+    def _finish(status, **kwargs):
+        if node is None:
+            return None
+        try:
+            from core import evolution
+            return evolution.finish_refresh(node["id"], status=status, **kwargs)
+        except Exception as exc:
+            _dash({"status": "error", "error": "刷新节点保存失败：%s" % exc,
+                   "need_login": False})
+            log.warning("反馈刷新节点收尾失败", exc_info=True)
+            return None
+
+    try:
+        if stop_flag and stop_flag():
+            return {"ok": False, "status": "stopped", "count": 0,
+                    "observed_at": None, "source_file": None, "node_id": None,
+                    "message": "反馈刷新已取消", "need_login": False}
+        from core import evolution
+        if source == "automation" and refresh_key:
+            existing = evolution.find_refresh(refresh_key, source="automation")
+            if existing:
+                observed = str(existing.get("observed_at") or "")
+                today = datetime.now().astimezone().date().isoformat()
+                if observed[:10] == today and int(existing.get("count") or 0) > 0 and existing.get("source_file"):
+                    _dash({"status": "done", "count": existing["count"], "pct": 100,
+                           "progress": "今日反馈已采集，恢复完成记录", "error": "", "need_login": False})
+                    return {"ok": True, "status": "done",
+                            "count": int(existing.get("count") or 0),
+                            "observed_at": existing.get("observed_at"),
+                            "source_file": existing.get("source_file"),
+                            "node_id": existing.get("id"),
+                            "message": "复用今日已完成的反馈刷新",
+                            "need_login": False}
+        try:
+            node = evolution.start_refresh(source, refresh_key)
+        except Exception as exc:
+            _dash({"status": "error", "error": "刷新节点启动失败：%s" % exc,
+                   "need_login": False})
+            return {"ok": False, "status": "error", "count": 0,
+                    "observed_at": None, "source_file": None, "node_id": None,
+                    "message": str(exc), "need_login": False}
+        try:
+            _dash({"status": "running", "progress": "启动反馈刷新…", "count": 0,
+                   "pct": None, "error": "", "need_login": False})
+            rows = scrape(progress=_progress, stop_flag=stop_flag, result_meta=meta)
+        except Exception as exc:
+            from applications.zhihu_story.browser_adapter import ZhihuLoginRequired
+            from web_drivers.browser_pool import WorkflowCancelled
+            if isinstance(exc, WorkflowCancelled):
+                _finish("stopped", message="反馈刷新已取消")
+                _dash({"status": "stopped", "error": "反馈刷新已取消", "need_login": False})
+                return {"ok": False, "status": "stopped", "count": 0,
+                        "observed_at": None, "source_file": None,
+                        "node_id": node["id"], "message": "反馈刷新已取消",
+                        "need_login": False}
+            if isinstance(exc, ZhihuLoginRequired):
+                from webui.browser_tasks import mark_zhihu_login_stale
+                mark_zhihu_login_stale(str(exc))
+                _finish("error", message=str(exc))
+                _dash({"status": "error", "error": str(exc), "need_login": True})
+                return {"ok": False, "status": "error", "count": 0,
+                        "observed_at": None, "source_file": None,
+                        "node_id": node["id"], "message": str(exc),
+                        "need_login": True}
+            _finish("error", message=str(exc))
+            _dash({"status": "error", "error": str(exc), "need_login": False})
+            return {"ok": False, "status": "error", "count": 0,
+                    "observed_at": None, "source_file": None,
+                    "node_id": node["id"], "message": str(exc),
+                    "need_login": False}
+        committed = bool(meta.get("observed_at") and meta.get("source_file")
+                         and rows and not meta.get("error"))
+        if meta.get("error") == "stopped" or ((stop_flag and stop_flag()) and not committed):
+            _finish("stopped", message="反馈刷新已取消")
+            _dash({"status": "stopped", "error": "反馈刷新已取消", "need_login": False})
+            return {"ok": False, "status": "stopped", "count": 0,
+                    "observed_at": None, "source_file": None,
+                    "node_id": node["id"], "message": "反馈刷新已取消",
+                    "need_login": False}
+        if meta.get("error"):
+            _finish("error", count=len(rows),
+                                     observed_at=meta.get("observed_at"),
+                                     source_file=meta.get("source_file"),
+                                     message=meta["error"])
+            _dash({"status": "error", "error": meta["error"], "need_login": False})
+            return {"ok": False, "status": "error", "count": len(rows),
+                    "observed_at": meta.get("observed_at"),
+                    "source_file": meta.get("source_file"),
+                    "node_id": node["id"], "message": meta["error"],
+                    "need_login": False}
+        if not committed:
+            message = meta.get("error") or "刷新未产生完整快照"
+            _finish("error", count=len(rows), message=message)
+            _dash({"status": "error", "error": message, "need_login": False})
+            return {"ok": False, "status": "error", "count": len(rows),
+                    "observed_at": meta.get("observed_at"),
+                    "source_file": meta.get("source_file"), "node_id": node["id"],
+                    "message": message, "need_login": False}
+        from webui.browser_tasks import clear_zhihu_login_stale
+        clear_zhihu_login_stale()
+        finished = _finish("done", count=len(rows),
+                                 observed_at=meta.get("observed_at"),
+                                 source_file=meta.get("source_file"),
+                                 message="反馈刷新完成")
+        if finished is None:
+            return {"ok": False, "status": "error", "count": len(rows),
+                    "observed_at": meta.get("observed_at"),
+                    "source_file": meta.get("source_file"), "node_id": node["id"],
+                    "message": "刷新节点收尾失败", "need_login": False}
+        _dash({"status": "done", "count": len(rows), "pct": 100,
+               "progress": "反馈刷新完成，共 %d 条" % len(rows), "error": "",
+               "need_login": False})
+        return {"ok": True, "status": "done", "count": len(rows),
+                "observed_at": meta.get("observed_at"),
+                "source_file": meta.get("source_file"), "node_id": node["id"],
+                "message": "反馈刷新完成，共 %d 条" % len(rows), "need_login": False}
+    finally:
+        _FEEDBACK_REFRESH_LOCK.release()
