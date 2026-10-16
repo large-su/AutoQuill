@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 from types import SimpleNamespace
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -10,6 +12,107 @@ from tools import build_release, evolution_history, release
 
 
 class ReleaseFlowTests(unittest.TestCase):
+    SHA = "a" * 40
+
+    def test_wait_for_ci_ignores_old_success_and_accepts_matching_run(self):
+        old = {"id": 1, "head_sha": "b" * 40, "head_branch": "main", "event": "push",
+               "status": "completed", "conclusion": "success", "html_url": "old"}
+        current = {"id": 2, "head_sha": self.SHA, "head_branch": "main", "event": "push",
+                   "status": "completed", "conclusion": "success", "html_url": "current"}
+        with mock.patch.object(release, "_ci_api_runs", return_value=[old, current]):
+            self.assertIs(release.wait_for_ci(self.SHA), current)
+
+    def test_wait_for_ci_filters_branch_event_and_uses_latest_attempt(self):
+        wrong_branch = {"id": 9, "head_sha": self.SHA, "head_branch": "dev", "event": "push",
+                        "status": "completed", "conclusion": "failure", "html_url": "wrong-branch"}
+        wrong_event = {"id": 8, "head_sha": self.SHA, "head_branch": "main", "event": "workflow_dispatch",
+                       "status": "completed", "conclusion": "failure", "html_url": "wrong-event"}
+        old_success = {"id": 10, "run_number": 20, "run_attempt": 1, "created_at": "2026-01-01T00:00:00Z",
+                       "head_sha": self.SHA, "head_branch": "main", "event": "push", "status": "completed",
+                       "conclusion": "success", "html_url": "old-attempt"}
+        latest_failure = {**old_success, "id": 11, "run_attempt": 2, "conclusion": "failure", "html_url": "latest-attempt"}
+        with mock.patch.object(release, "_ci_api_runs",
+                               return_value=[old_success, wrong_branch, latest_failure, wrong_event]):
+            with self.assertRaisesRegex(RuntimeError, "latest-attempt"):
+                release.wait_for_ci(self.SHA)
+
+    def test_wait_for_ci_waits_for_registration_then_success(self):
+        run = {"id": 3, "head_sha": self.SHA, "head_branch": "main", "event": "push",
+               "status": "completed", "conclusion": "success", "html_url": "ok"}
+        with mock.patch.object(release, "_ci_api_runs", side_effect=[[], [{**run, "status": "in_progress"}], [run]]), \
+                mock.patch.object(release.time, "monotonic", side_effect=[0, 0, 1, 1, 2]), \
+                mock.patch.object(release.time, "sleep") as sleep:
+            release.wait_for_ci(self.SHA, timeout=10, poll_interval=2)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_wait_for_ci_rejects_failure_cancelled_and_timeout(self):
+        for conclusion in ("failure", "cancelled", "timed_out"):
+            run = {"id": 4, "head_sha": self.SHA, "head_branch": "main", "event": "push",
+                   "status": "completed", "conclusion": conclusion, "html_url": "bad"}
+            with self.subTest(conclusion=conclusion), \
+                    mock.patch.object(release, "_ci_api_runs", return_value=[run]):
+                with self.assertRaisesRegex(RuntimeError, conclusion):
+                    release.wait_for_ci(self.SHA)
+        with mock.patch.object(release, "_ci_api_runs", return_value=[]), \
+                mock.patch.object(release.time, "monotonic", side_effect=[0, 2]), \
+                mock.patch.object(release.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "超时"):
+                release.wait_for_ci(self.SHA, timeout=1)
+
+    def test_wait_for_ci_reports_api_and_format_errors(self):
+        with mock.patch.object(release, "capture", return_value=SimpleNamespace(
+                returncode=1, stdout="", stderr="network down")):
+            with self.assertRaisesRegex(RuntimeError, "network down"):
+                release._ci_api_runs(self.SHA)
+        with mock.patch.object(release, "capture", side_effect=release.subprocess.TimeoutExpired("gh", 30)):
+            with self.assertRaisesRegex(RuntimeError, "超时"):
+                release._ci_api_runs(self.SHA)
+        with mock.patch.object(release, "capture", return_value=SimpleNamespace(
+                returncode=0, stdout="{}", stderr="")):
+            with self.assertRaisesRegex(RuntimeError, "workflow_runs"):
+                release._ci_api_runs(self.SHA)
+        with mock.patch.object(release, "capture", return_value=SimpleNamespace(
+                returncode=0, stdout=json.dumps({"workflow_runs": [None]}), stderr="")):
+            with self.assertRaisesRegex(RuntimeError, "项不是对象"):
+                release._ci_api_runs(self.SHA)
+
+    def test_check_ci_entry_resolves_ref_without_release_side_effects(self):
+        with mock.patch.object(release, "out", return_value=self.SHA) as out, \
+                mock.patch.object(release, "wait_for_ci") as wait, \
+                mock.patch.object(release, "run") as run:
+            self.assertEqual(release.main(["--check-ci", "HEAD", "--ci-timeout", "3"]), 0)
+        out.assert_called_once_with(["git", "rev-parse", "--verify", "HEAD^{commit}"])
+        wait.assert_called_once_with(self.SHA, timeout=3.0)
+        run.assert_not_called()
+
+    def test_main_does_not_announce_completion_when_ci_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'release').mkdir()
+            notes = root / 'release/release_notes_5.0.7.md'
+            notes.write_text('# v5.0.7', encoding='utf-8')
+            exe = root / 'release/AutoQuill-Setup-5.0.7.exe'
+            exe.write_bytes(b'package')
+            exe.with_suffix('.exe.sha256').write_text(release._sha256(exe), encoding='utf-8')
+            with mock.patch.object(release, 'ROOT', root), \
+                    mock.patch.object(release, 'version', return_value='5.0.7'), \
+                    mock.patch.object(release, 'changed_paths', return_value=[]), \
+                    mock.patch.object(release, '_preflight'), \
+                    mock.patch.object(build_release, 'sync_release_metadata'), \
+                    mock.patch.object(evolution_history, 'refresh_history'), \
+                    mock.patch.object(release, 'run_checks'), \
+                    mock.patch.object(release, 'commit_release'), \
+                    mock.patch.object(release, 'validate_published_assets'), \
+                    mock.patch.object(release, 'wait_for_ci', side_effect=RuntimeError('CI 未通过（failure）：run-url')), \
+                    mock.patch.object(release, 'out', return_value='a' * 40), \
+                    mock.patch.object(release, 'run') as run:
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaisesRegex(RuntimeError, '资产/tag 可能已经发布'):
+                    release.main(['-m', 'fix: new behavior'])
+            self.assertNotIn('发布完成：', output.getvalue())
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertTrue(any(cmd[:3] == ['gh', 'release', 'create'] for cmd in commands))
+
     def test_message_prefix_replaced_and_body_preserved(self):
         self.assertEqual(release.normalize_message("feat: make it faster\n\nDetails", "5.0.7"),
                          "v5.0.7: make it faster\n\nDetails")
@@ -136,6 +239,8 @@ class ReleaseFlowTests(unittest.TestCase):
                     mock.patch.object(release, 'run_checks'), \
                     mock.patch.object(release, 'commit_release') as commit, \
                     mock.patch.object(release, 'validate_published_assets'), \
+                    mock.patch.object(release, 'wait_for_ci'), \
+                    mock.patch.object(release, 'out', return_value='a' * 40), \
                     mock.patch.object(release, 'run') as run:
                 self.assertEqual(release.main(['-m', 'fix: new behavior']), 0)
             commit.assert_called_once_with('fix: new behavior', '5.0.7')

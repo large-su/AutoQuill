@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -164,12 +165,20 @@ class GrowthReportTests(unittest.TestCase):
         self.assertEqual(report["immature"], 1)
 
     def test_cli_subprocess_and_invalid_since(self):
-        proc = subprocess.run([sys.executable, "tools/growth_report.py", "--data-root", self.tmp.name], capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn('"observation_cutoff_date": null', proc.stdout)
-        bad = subprocess.run([sys.executable, "tools/growth_report.py", "--data-root", self.tmp.name, "--since", "2026-99-01"], capture_output=True, text=True, encoding="utf-8")
-        self.assertNotEqual(bad.returncode, 0, bad.stdout)
-        self.assertIn("--since must be YYYY-MM-DD", bad.stderr, bad.stderr)
+        for encoding in ("cp1252", "cp936"):
+            with self.subTest(encoding=encoding):
+                env = os.environ.copy()
+                env.update({"PYTHONIOENCODING": encoding, "PYTHONUTF8": "0"})
+                proc = subprocess.run([sys.executable, "tools/growth_report.py", "--data-root", self.tmp.name], capture_output=True, env=env)
+                self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", errors="replace"))
+                output = proc.stdout.decode("utf-8")
+                report = json.loads(output)
+                self.assertIsNone(report["observation_cutoff_date"])
+                self.assertIn("描述性全量公开快照上下文", report["all_public_context"])
+
+        bad = subprocess.run([sys.executable, "tools/growth_report.py", "--data-root", self.tmp.name, "--since", "2026-99-01"], capture_output=True, env=env)
+        self.assertNotEqual(bad.returncode, 0, bad.stdout.decode("utf-8", errors="replace"))
+        self.assertIn("--since must be YYYY-MM-DD", bad.stderr.decode("utf-8", errors="replace"))
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -14,11 +15,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "large-su/AutoQuill"
+CI_WORKFLOW = "test.yml"
 
 
-def capture(cmd):
-    return subprocess.run([str(c) for c in cmd], cwd=str(ROOT),
-                          capture_output=True, text=True, encoding="utf-8")
+def capture(cmd, timeout=None):
+    options = dict(capture_output=True, text=True, encoding="utf-8")
+    if timeout is not None:
+        options["timeout"] = timeout
+    return subprocess.run([str(c) for c in cmd], cwd=str(ROOT), **options)
 
 
 def timed(label, action):
@@ -177,6 +181,99 @@ def validate_published_assets(tag, exe, sha, verify_download=False):
             if _sha256(Path(directory) / exe.name) != _sha256(exe):
                 raise RuntimeError("回下载的安装包 sha256 不匹配")
 
+
+def _positive_seconds(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("必须是正数") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("必须大于 0")
+    return seconds
+
+
+def _ci_run_key(run):
+    """Order runs by creation, run number, and attempt without trusting list order."""
+    def timestamp(value):
+        if not value:
+            return ""
+        return str(value)
+    def number(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+    return (timestamp(run.get("created_at")), number(run.get("run_number")),
+            number(run.get("run_attempt")), number(run.get("id")))
+
+
+def _ci_api_runs(commit):
+    query = (f"repos/{REPO}/actions/workflows/{CI_WORKFLOW}/runs"
+             f"?head_sha={commit}&branch=main&event=push&per_page=10")
+    try:
+        result = capture(["gh", "api", query], timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("查询 GitHub CI 超时（30s）") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "未知 gh api 错误").strip()
+        raise RuntimeError(f"查询 GitHub CI 失败：{detail}")
+    try:
+        payload = json.loads(result.stdout or "")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHub CI API 返回了无效 JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
+        raise RuntimeError("GitHub CI API 返回格式异常：缺少 workflow_runs")
+    if any(not isinstance(run, dict) for run in payload["workflow_runs"]):
+        raise RuntimeError("GitHub CI API 返回格式异常：workflow_runs 项不是对象")
+    return payload["workflow_runs"]
+
+
+def wait_for_ci(commit, timeout=900, poll_interval=20):
+    """Wait for the push CI run for exactly *commit* to finish successfully."""
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise RuntimeError("CI 检查要求 40 位完整提交 SHA")
+    if (not math.isfinite(float(timeout)) or not math.isfinite(float(poll_interval))
+            or timeout <= 0 or poll_interval <= 0):
+        raise RuntimeError("CI 检查 timeout 和 poll_interval 必须大于 0")
+    timeout = float(timeout)
+    poll_interval = float(poll_interval)
+    started = time.monotonic()
+    deadline = started + timeout
+    last_state = None
+    while True:
+        runs = _ci_api_runs(commit)
+        matches = [run for run in runs
+                   if isinstance(run, dict)
+                   and run.get("head_sha", "").lower() == commit.lower()
+                   and run.get("head_branch") == "main"
+                   and run.get("event") == "push"]
+        if matches:
+            run = max(matches, key=_ci_run_key)
+            status = run.get("status")
+            conclusion = run.get("conclusion")
+            url = run.get("html_url") or f"https://github.com/{REPO}/actions/runs/{run.get('id', '')}"
+            state = (status, conclusion, run.get("id"), run.get("run_attempt"))
+            if state != last_state:
+                print(f"CI：{status or 'unknown'}{(' / ' + conclusion) if conclusion else ''}（{url}）",
+                      flush=True)
+                last_state = state
+            if status == "completed":
+                if conclusion == "success":
+                    return run
+                if conclusion in {"failure", "cancelled", "timed_out"}:
+                    raise RuntimeError(f"CI 未通过（{conclusion}）：{url}")
+                raise RuntimeError(f"CI 返回未知结论（{conclusion!r}）：{url}")
+            if status not in {"queued", "in_progress", "waiting", "requested", "pending"}:
+                raise RuntimeError(f"CI 返回未知状态（{status!r}）：{url}")
+        else:
+            if last_state != ("not_found",):
+                print("CI：尚未登记匹配的 workflow run", flush=True)
+                last_state = ("not_found",)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"CI 检查超时（提交 {commit} 尚未完成）")
+        time.sleep(min(30, poll_interval, remaining))
+
 def run_tests(command):
     """Keep routine test output in a log; surface the result or failure context."""
     environment = os.environ.copy()
@@ -265,7 +362,17 @@ def main(argv=None):
     ap.add_argument("--skip-build", action="store_true", help="复用 manifest 与当前 HEAD 一致的构建")
     ap.add_argument("--plan", action="store_true", help="只显示计划，不写文件或访问网络")
     ap.add_argument("--verify-download", action="store_true", help="额外回下载完整 EXE 校验")
+    ap.add_argument("--check-ci", metavar="GIT_REF", help="只检查指定本地 ref 的 push CI，不执行发布")
+    ap.add_argument("--ci-timeout", type=_positive_seconds, default=900,
+                    help="CI 等待秒数（默认 900）")
     args = ap.parse_args(argv)
+    if args.check_ci:
+        commit = out(["git", "rev-parse", "--verify", f"{args.check_ci}^{{commit}}"])
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+            raise RuntimeError(f"无法将 ref 解析为完整提交 SHA：{args.check_ci}")
+        wait_for_ci(commit, timeout=args.ci_timeout)
+        print(f"CI 检查通过：{commit}")
+        return 0
     ver = version()
     tag = "v" + ver
     paths = changed_paths()
@@ -306,12 +413,19 @@ def main(argv=None):
         timed("5. 构建安装包", build_installer)
     validate_local_assets(*assets)
     run(["git", "tag", tag])
+    commit = out(["git", "rev-parse", f"{tag}^{{commit}}"])
     timed("6. 推送 main 和 tag", lambda: run(["git", "push", "--atomic", "origin", "main", tag]))
     timed("7. 创建 Release", lambda: create_release(tag, notes, assets))
     timed("8. 校验发布资产", lambda: validate_published_assets(tag, *assets, args.verify_download))
+    try:
+        timed("9. 等待精确提交的 GitHub CI", lambda: wait_for_ci(commit, timeout=args.ci_timeout))
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"CI gate 未通过；资产/tag 可能已经发布。请使用 --check-ci {commit} 独立检查，"
+            f"不要重跑发布或覆盖 tag：{exc}") from exc
     print(f"发布完成：https://github.com/{REPO}/releases/tag/{tag}")
     print(f"发布命令总用时：{time.monotonic() - started:.1f}s")
-    print("main 的完整 CI 已在后台触发；安装演练与完整回下载按改动需要执行。")
+    print("main 的完整 CI 已确认通过；安装演练与完整回下载按改动需要执行。")
     return 0
 
 if __name__ == "__main__":

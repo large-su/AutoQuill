@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 |---|---|
 | **适用版本** | v5.0.6 之后的验证与发布流程 |
-| **最后更新** | 2026-10-01 |
+| **最后更新** | 2026-10-16 |
 | **状态** | 活跃 |
 | **说明** | 测试、校验、打包脚本清单与发布前检查清单 |
 
@@ -16,7 +16,7 @@
 | `tests/run_all.py` | 完整回归，自动跳过真实浏览器/登录态用例 | main CI 后台必跑；大范围或公共模块改动时本地运行 | `python tests/run_all.py` |
 | `tools/auto_test.py` | 自动回归测试：后端单测 + Python/app.js 语法 + 前端 Playwright 全流程 + 服务端日志检查 | 改完前端/后端后，模拟“人工测试员”跑一遍；`--quick` 只跑后端+语法（CI 友好） | `python tools/auto_test.py`<br>`python tools/auto_test.py --quick` |
 | `tools/ai_flavor_check.py` | AI 味检测（0-100）：检查生成稿的机器味，与真人基准对比 | 生成效果前后对比、发布前自查 | `python tools/ai_flavor_check.py output`<br>`python tools/ai_flavor_check.py --zhihu data/published_answers_.json` |
-| `tools/release.py` | 相关测试与语法 → 元数据同步 → 一次提交与构建 → main/tag 原子推送 → Release → 资产校验 | 统一发布入口，详见发布指南 | `python tools/release.py --plan` |
+| `tools/release.py` | 相关测试与语法 → 元数据同步 → 一次提交与构建 → main/tag 原子推送 → Release → 资产校验 → 本次提交 CI 结论 | 统一发布入口；独立 `--check-ci HEAD` 可复查 CI | `python tools/release.py --plan` |
 | `tools/build_release.py` | 门禁、PyInstaller、Inno Setup、SHA256；由发布入口复用已有测试结果 | 单独调试构建，日常发版由 release.py 调用 | `python tools/build_release.py --local --skip-test` |
 | `tests/test_*.py` | 专项单测（草稿箱/快照/评分回退/并行窗口/大模型筛选/launcher/自动化/启动器设置等） | 定位具体模块问题时单独跑 | `python -m unittest tests.test_drafts` |
 | `tools/archive/probes/` | 历史一次性探查脚本（已归档，只读参考）。其中 `probe_markdown_rebuild.py` 是逐块重建 markdown 的**合成 DOM 真机验证**（不登录不联网，改 walker 后跑一次）；`spike_tray.py` 是 M4 托盘常驻的真机验证（**直接跑生产代码** `launcher.TrayController` + 本地假 API，15 项检查） | 浏览器 DOM / 托盘排查时的历史参考 | `python tools/archive/probes/probe_markdown_rebuild.py`<br>`python tools/archive/probes/spike_tray.py` |
@@ -106,7 +106,7 @@ python tools/release.py --message-file logs/release-commit.txt
 发布说明的惯例：正文用 `CHANGELOG.md` 对应版本段 + 「测试」+「安装提示（SmartScreen / 数据保留 / sha256 校验）」；
 发完把同一份说明存一份到 `release/release_notes_x.y.z.md`（`release/` 不入库，仅本机留档）。
 默认核对本地 SHA、GitHub API digest 与线上 SHA 文件；完整 EXE 回下载使用 `--verify-download`。
-相关测试仅执行一次。CI 在 main 推送后后台完整回归，tag 不重复触发；无需等待两份同一提交的 CI。
+相关测试仅执行一次。CI 在 main 推送后完整回归，tag 不重复触发；发布入口等待该提交的 Windows/Linux 最终结果，不重复触发 CI。若失败，按 run/attempt/job 的最终异常处理，修复后用 `python tools/release.py --check-ci HEAD` 独立验收。
 隔离安装演练用于安装器、外部宿主或退出/重启生命周期变更，普通界面小改无需重复。
 固定步骤和验证分级见 [发布指南](RELEASE-GUIDE.md)。
 
@@ -123,6 +123,8 @@ python tools/release.py --message-file logs/release-commit.txt
 |---|---|
 | `python tools/auto_test.py` 前端项失败 | 看测试输出定位到具体检查点；测试服务日志在临时目录 server.log，页面 console 错误会汇总在「页面无 console 错误」项 |
 | 单元测试报导入错误 | 确认在项目根执行；`tests/run_all.py` 已自动把项目根加入 sys.path |
+| Windows CI 的中文报告子进程失败，Linux 通过 | 查看 stderr 是否为 `UnicodeEncodeError`；CI 设置 `PYTHONIOENCODING=utf-8`，JSON CLI 自身明确输出 UTF-8，并以 cp1252/cp936 子进程回归验证，避免本地编码环境掩盖缺陷 |
+| 发布已上传，但 GitHub 发来失败通知 | 上传成功不等于 CI 通过；按完整提交 SHA 查两平台结论。下载该 run 的 `unittest-<平台>-<attempt>` 日志 artifact，定位末尾失败测试；保留已发布 tag，不靠重跑旧提交消除历史红灯 |
 | 双击启动无窗口 | 查看 `logs/launcher.log` 最近一次双击的时间戳与内容；多为启动早期崩溃 |
 | build_release 门禁失败「工作区有未提交改动」 | 日常发布使用 release.py，由统一入口同步元数据并提交；单独构建调试使用 --local |
 | AI 味检测分数对比不明显 | 确认采样的是同一数据源；检测器为规则启发式，配合评分日志的「自然度」维度交叉看 |

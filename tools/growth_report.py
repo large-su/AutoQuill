@@ -304,6 +304,9 @@ def main(argv=None):
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     else:
+        # Piped JSON has the same UTF-8 contract as --output on every platform.
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
         print(text)
 
 

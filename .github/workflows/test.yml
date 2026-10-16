@@ -17,6 +17,8 @@ jobs:
       # Keep subprocess JSON output deterministic on Windows runners.
       PYTHONIOENCODING: utf-8
     strategy:
+      # Preserve both platform results when only one fails.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -41,4 +43,17 @@ jobs:
         run: cp config/llm_providers.example.json config/llm_providers.json
 
       - name: Run unit tests (skip browser-dependent suites)
-        run: python tests/run_all.py
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          python tests/run_all.py 2>&1 | tee logs/unittest-${{ runner.os }}.log
+
+      - name: Save unit test log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unittest-${{ runner.os }}-${{ github.run_attempt }}
+          path: logs/unittest-${{ runner.os }}.log
+          retention-days: 14
+          if-no-files-found: warn
