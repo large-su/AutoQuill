@@ -13,6 +13,9 @@ concurrency:
 
 jobs:
   unittest:
+    env:
+      # Keep subprocess JSON output deterministic on Windows runners.
+      PYTHONIOENCODING: utf-8
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]

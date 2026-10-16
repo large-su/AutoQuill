@@ -165,11 +165,11 @@ class GrowthReportTests(unittest.TestCase):
 
     def test_cli_subprocess_and_invalid_since(self):
         proc = subprocess.run([sys.executable, "tools/growth_report.py", "--data-root", self.tmp.name], capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn('"observation_cutoff_date": null', proc.stdout)
         bad = subprocess.run([sys.executable, "tools/growth_report.py", "--data-root", self.tmp.name, "--since", "2026-99-01"], capture_output=True, text=True, encoding="utf-8")
-        self.assertNotEqual(bad.returncode, 0)
-        self.assertIn("--since must be YYYY-MM-DD", bad.stderr)
+        self.assertNotEqual(bad.returncode, 0, bad.stdout)
+        self.assertIn("--since must be YYYY-MM-DD", bad.stderr, bad.stderr)
 
 
 if __name__ == "__main__":
