@@ -88,5 +88,25 @@ process.stdout.write(elements.autoSingleCards.innerHTML);
         self.assert_comment_row(html, True, "自动化 09:15（平台待同步）")
 
 
+    def test_persisted_cooling_is_visible_without_in_memory_notices(self):
+        runner = r"""
+const fs = require('fs'), vm = require('vm');
+const elements = {autoHint: {textContent: ''}};
+const context = {$: id => elements[id] || null, applyLeftMode: () => {}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8') + `
+autoData = {enabled: true, notices: [], summary: {per_type: {
+  full_chain: {label: '全链路撰写'}}}, circuit_breakers: {
+  full_chain: {until: '2026-10-16T12:36:00'}}};
+renderAutoState();`, context, {timeout: 1000});
+process.stdout.write(elements.autoHint.textContent);
+"""
+        proc = subprocess.run([self.node, "-e", runner, self.script],
+                              capture_output=True, text=True, encoding="utf-8", timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("全链路撰写 冷却至 12:36", proc.stdout)
+        self.assertIn("到期自动重试", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

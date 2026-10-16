@@ -26,8 +26,11 @@ from automation.planner import (
 
 log = logging.getLogger(__name__)
 
-# 同类任务连续失败达到这个次数 → 熔断该类任务（停用并通知），避免无人值守时反复撞墙
+# 同类任务连续失败达到这个次数 → 当日临时熔断，避免无人值守时反复撞墙。
+# 熔断绝不能改用户的 plan.json：技术故障不应把用户明确开启的任务永久关掉。
 CIRCUIT_BREAK_AFTER = 3
+# 技术熔断的冷却时间。状态保存在当天 day JSON，重启后仍会等待，但次日自然清空。
+CIRCUIT_COOLDOWN_MINUTES = 60
 # 浏览器被占用时的重排延迟（分钟）
 BUSY_RETRY_MINUTES = 5
 # 作业失败后的补位延迟（分钟）：当日配额没完成就再补一次（熔断前最多补 2 次）
@@ -45,6 +48,7 @@ class AutomationScheduler:
         self._sleep = sleep_fn
         self._tick_seconds = tick_seconds
         self._thread = None
+        self._restart_requested = False
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
         self._paused = False
@@ -84,13 +88,24 @@ class AutomationScheduler:
         重启后按计划恢复（ensure_running）、以及未开启时用户手动点
         「立即执行」（run_now）要真把这一次跑掉。
         """
-        if self._thread and self._thread.is_alive():
-            return False
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                # stop() 后立刻 start() 时旧线程可能还在执行一个正被取消的作业。
+                # 此时不能 clear stop_event，否则那个作业会失去取消信号；等旧循环退出后
+                # 再由 _loop 的 finally 拉起新线程，避免两个 scheduler 同时派活。
+                if self._stop_event.is_set():
+                    self._restart_requested = True
+                return False
+            self._start_thread_locked()
+            return True
+
+    def _start_thread_locked(self):
+        """在持有 _lock 时启动一个新循环。"""
         self._stop_event.clear()
+        self._restart_requested = False
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="automation-scheduler")
         self._thread.start()
-        return True
 
     def ensure_running(self):
         """进程启动时按计划恢复调度（重启 ≠ 停工）；返回是否恢复了调度。
@@ -115,6 +130,7 @@ class AutomationScheduler:
         with self._lock:
             self._paused = False
             self._pause_reason = ""
+        self._clear_circuit_breakers(self._now().strftime("%Y-%m-%d"))
         self._ensure_thread()
         done = store.done_counts(self._now().strftime("%Y-%m-%d"))
         self._push_notice("info", "自动化已启动；今日已完成：%s"
@@ -133,6 +149,7 @@ class AutomationScheduler:
         with self._lock:
             self._paused = False
             self._pause_reason = ""
+        self._clear_circuit_breakers(self._now().strftime("%Y-%m-%d"))
         self._push_notice("info", "自动化已继续")
         return self.status()
 
@@ -141,7 +158,9 @@ class AutomationScheduler:
         plan = store.load_plan()
         plan["enabled"] = False
         store.save_plan(plan)
-        self._stop_event.set()
+        with self._lock:
+            self._restart_requested = False
+            self._stop_event.set()
         if cancel_running and self._running_job:
             try:
                 from webui.run_manager import runner
@@ -155,13 +174,25 @@ class AutomationScheduler:
 
     def _loop(self):
         log.info("自动化调度器已启动（tick=%ss）", self._tick_seconds)
-        while not self._stop_event.is_set():
-            try:
-                self._tick()
-            except Exception:          # noqa: BLE001
-                log.exception("自动化 tick 异常（已忽略，下一轮继续）")
-            self._sleep(self._tick_seconds)
-        log.info("自动化调度器已退出")
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self._tick()
+                except Exception:          # noqa: BLE001
+                    log.exception("自动化 tick 异常（已忽略，下一轮继续）")
+                self._sleep(self._tick_seconds)
+        finally:
+            restart = False
+            with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                # run_now() 也允许总开关关闭时执行一次；最后一次 stop()
+                # 会清除此请求，不依赖 plan.enabled 判断是否恢复线程。
+                restart = self._restart_requested
+                self._restart_requested = False
+                if restart:
+                    self._start_thread_locked()
+            log.info("自动化调度器已退出%s", "；已按新的开始请求恢复" if restart else "")
 
     def _tick_manual_only(self, now, plan):
         """未开启时的 tick：只执行用户手动排进来的作业。
@@ -176,8 +207,9 @@ class AutomationScheduler:
                 return
         day = now.strftime("%Y-%m-%d")
         day_data = store.load_day(day)
+        self._expire_circuit_breakers(day, day_data, now, plan)
         due = [j for j in planner.due_jobs(now, day_data, plan)
-               if j.get("manual")]
+               if j.get("manual") and not self._circuit_open(j.get("type"), day_data, now)]
         if not due:
             return
         if plan.get("pause_when_user_busy"):
@@ -197,6 +229,7 @@ class AutomationScheduler:
                 return
         day = now.strftime("%Y-%m-%d")
         day_data = store.load_day(day)
+        self._expire_circuit_breakers(day, day_data, now, plan)
         # 仅恢复每日反馈刷新的持久化 running 状态。它是只读采集，且执行器
         # 会以同一 refresh_key 确认已成功节点，因而可在“站点已采到、进程尚未
         # 写完台账”时安全确认；其他任务含写作/发布副作用，绝不在这里猜测重跑。
@@ -230,7 +263,10 @@ class AutomationScheduler:
             from webui.browser_tasks import browser_busy
             if browser_busy():
                 return                     # 手动任务优先，等它跑完再派活
-        self._run_job(due[0], day, day_data, plan)
+        due = [j for j in due
+               if not self._circuit_open(j.get("type"), day_data, now)]
+        if due:
+            self._run_job(due[0], day, day_data, plan)
 
     def _recover_interrupted_feedback_refresh(self, now, plan, day, day_data):
         """把上次进程中断的当日反馈刷新恢复为同一条待确认作业。
@@ -341,6 +377,117 @@ class AutomationScheduler:
     def _should_stop(self):
         return self._stop_event.is_set()
 
+    # ---------------- 当日技术熔断 ----------------
+
+    @staticmethod
+    def _breaker_records(day_data):
+        value = day_data.get("circuit_breakers")
+        return value if isinstance(value, dict) else {}
+
+    def _expire_circuit_breakers(self, day, day_data, now, plan=None):
+        """到期后解除熔断，并为第三次失败留下一个受配额/窗口约束的探测重试。"""
+        breakers = self._breaker_records(day_data)
+        expired = []
+        for task_type, detail in breakers.items():
+            if not isinstance(detail, dict):
+                expired.append(task_type)
+                continue
+            try:
+                if datetime.fromisoformat(detail.get("until") or "") <= now:
+                    expired.append(task_type)
+            except (TypeError, ValueError):
+                # 旧/损坏状态不能把任务永久锁住。
+                expired.append(task_type)
+        for task_type in expired:
+            detail = breakers.pop(task_type, {})
+            if plan is not None and isinstance(detail, dict):
+                self._schedule_circuit_probe(now, plan, day_data, detail)
+        if breakers:
+            day_data["circuit_breakers"] = breakers
+        else:
+            day_data.pop("circuit_breakers", None)
+        if expired:
+            self._save_day_if_changed(day, day_data)
+        return bool(expired)
+
+    def _schedule_circuit_probe(self, now, plan, day_data, detail):
+        """冷却结束后只安排一次探测；仍由 planner 检查当天窗口、配额和跨午夜。"""
+        if not isinstance(detail, dict):
+            return False
+        failed = detail.get("last_failed_job") or {}
+        if not isinstance(failed, dict):
+            return False
+        task_type = failed.get("type")
+        if not task_type:
+            return False
+        if failed.get("dry_run"):
+            # 演练绝不能经后台恢复升级为真实发布。
+            return False
+        cfg = (plan.get("tasks") or {}).get(task_type) or {}
+        if not cfg.get("enabled"):
+            return False
+        meta = model.TASK_TYPES.get(task_type, {})
+        if meta.get("job_mode") == "fixed_daily":
+            # 固定反馈不能生成第二条责任；找回原条，只在当天结束前改为待执行。
+            day_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+            when = now + timedelta(minutes=5)
+            if when > day_end:
+                return False
+            for job in day_data.get("schedule", []):
+                if job.get("key") == failed.get("key") and job.get("status") == STATUS_FAILED:
+                    job["status"] = STATUS_PLANNED
+                    job["planned_at"] = when.replace(microsecond=0).isoformat()
+                    job["note"] = ((job.get("note") or "") + "（熔断冷却结束，安排一次探测重试）")
+                    return True
+            return False
+        # 非固定任务由 planner 造一个普通 retry 作业；daily_cap=1 时第三次失败
+        # 不会留下 planned 作业，这一步是恢复自愈所必需的，且不会增加已完成单位。
+        if int(cfg.get("daily_cap") or 0) <= 0:
+            return False
+        return planner.plan_retry(now, plan, day_data, failed, RETRY_DELAY_MINUTES)
+
+    @staticmethod
+    def _circuit_open(task_type, day_data, now):
+        detail = AutomationScheduler._breaker_records(day_data).get(task_type) or {}
+        if not isinstance(detail, dict):
+            return False
+        try:
+            return datetime.fromisoformat(detail.get("until") or "") > now
+        except (TypeError, ValueError):
+            return False
+
+    def _clear_circuit_breakers(self, day, task_type=""):
+        """用户显式开始/继续/立即执行时允许当前类型提前重试。"""
+        day_data = store.load_day(day)
+        breakers = self._breaker_records(day_data)
+        selected = {}
+        if task_type:
+            detail = breakers.pop(task_type, None)
+            changed = detail is not None
+            if detail:
+                selected[task_type] = detail
+        else:
+            changed = bool(breakers)
+            selected = dict(breakers)
+            breakers.clear()
+        if not changed:
+            return False
+        plan = store.load_plan()
+        for detail in selected.values():
+            self._schedule_circuit_probe(self._now(), plan, day_data, detail)
+        if breakers:
+            day_data["circuit_breakers"] = breakers
+        else:
+            day_data.pop("circuit_breakers", None)
+        if task_type:
+            self._fails[task_type] = 0
+        else:
+            self._fails.clear()
+        self._save_day_if_changed(day, day_data)
+        label = task_type or "全部任务"
+        self._push_notice("info", "%s 的技术熔断已按用户请求解除，允许重试" % label)
+        return True
+
     def _on_progress(self, st):
         with self._lock:
             self._run_progress = dict(st.get("progress") or {}) or {
@@ -349,6 +496,25 @@ class AutomationScheduler:
     # ---------------- 执行单个作业 ----------------
 
     def _run_job(self, job, day, day_data, plan):
+        """执行并保证任何阶段异常都不会遗留永久 busy 状态。"""
+        try:
+            return self._run_job_impl(job, day, day_data, plan)
+        except Exception as exc:       # noqa: BLE001
+            log.exception("自动化作业生命周期异常：%s", job.get("key"))
+            job["status"] = STATUS_FAILED
+            job["finished_at"] = self._now().strftime("%Y-%m-%dT%H:%M:%S")
+            try:
+                self._save_day_if_changed(day, day_data)
+            except Exception:          # noqa: BLE001
+                log.exception("自动化故障状态写入失败：%s", job.get("key"))
+            return {"ok": False, "units": 0, "status": STATUS_FAILED,
+                    "message": "调度生命周期异常：%s" % exc, "artifacts": []}
+        finally:
+            with self._lock:
+                self._running_job = None
+                self._run_progress = None
+
+    def _run_job_impl(self, job, day, day_data, plan):
         started = self._now()
         job["status"] = STATUS_RUNNING
         job["started_at"] = started.strftime("%Y-%m-%dT%H:%M:%S")
@@ -395,55 +561,68 @@ class AutomationScheduler:
             job["status"] = STATUS_FAILED
             result = {"ok": False, "units": 0, "status": STATUS_FAILED,
                       "message": str(exc), "artifacts": []}
-        finished = self._now()
-        job["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
-        final_status = result.get("status") or (STATUS_DONE if result.get("ok")
-                                               else STATUS_FAILED)
-        if job["status"] not in (STATUS_PLANNED, STATUS_NEEDS_HUMAN):
-            job["status"] = final_status
-        if final_status == STATUS_PLANNED:      # 排队顺延：保留原因，等下一轮
-            job["note"] = ((job.get("note") or "") + " "
-                           + (result.get("message") or ""))[:200]
-        else:
-            job["note"] = (result.get("message") or job.get("note") or "")[:200]
-        store.append_ledger({
-            "day": day, "key": job["key"], "type": job["type"],
-            "status": job["status"], "planned_at": job.get("planned_at"),
-            "started_at": job["started_at"], "finished_at": job["finished_at"],
-            "units": int(result.get("units") or 0),
-            "message": result.get("message") or "",
-            "artifacts": result.get("artifacts") or [],
-            "dry_run": bool(job.get("dry_run")),
-        })
-        with self._lock:
-            self._running_job = None
-            self._run_progress = None
-        self._ledgered_keys.add(job.get("key") or "")
-        before = self._fails.get(job["type"], 0)
-        # 有效巡检确认欠项：当日继续补位，但不因业务未达成停用次日任务。
-        # 浏览器/采集等技术失败仍沿用连续失败熔断。
-        if result.get("retry_without_failure"):
-            self._fails[job["type"]] = 0
-            before = 0
-        else:
-            self._update_failures(job["type"], job["status"], plan)
-        # 失败补位：熔断前先试着「当日完成」（用户口径：数量当日完成即可）
-        if (job["status"] == STATUS_FAILED and before + 1 < CIRCUIT_BREAK_AFTER
-                and planner.plan_retry(self._now(), plan, day_data, job,
-                                       RETRY_DELAY_MINUTES)):
-            self._push_notice("info", "%s 失败，已安排 %d 分钟后补位一次"
-                              % (job["type"], RETRY_DELAY_MINUTES))
-        self._save_day_if_changed(day, day_data)
-        if job["status"] == STATUS_DONE:
-            self._push_notice("info", "%s 完成：%s" % (job["type"],
-                              (result.get("message") or "")[:80]))
-        elif job["status"] == STATUS_FAILED:
-            self._push_notice("warn", "%s 失败：%s" % (job["type"],
-                              (result.get("message") or "")[:80]))
-        return result
+        try:
+            if not isinstance(result, dict):
+                raise TypeError("执行器未返回结果字典")
+            finished = self._now()
+            job["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+            final_status = result.get("status") or (STATUS_DONE if result.get("ok")
+                                                   else STATUS_FAILED)
+            if job["status"] not in (STATUS_PLANNED, STATUS_NEEDS_HUMAN):
+                job["status"] = final_status
+            if final_status == STATUS_PLANNED:      # 排队顺延：保留原因，等下一轮
+                job["note"] = ((job.get("note") or "") + " "
+                               + (result.get("message") or ""))[:200]
+            else:
+                job["note"] = (result.get("message") or job.get("note") or "")[:200]
+            store.append_ledger({
+                "day": day, "key": job["key"], "type": job["type"],
+                "status": job["status"], "planned_at": job.get("planned_at"),
+                "started_at": job["started_at"], "finished_at": job["finished_at"],
+                "units": int(result.get("units") or 0),
+                "message": result.get("message") or "",
+                "artifacts": result.get("artifacts") or [],
+                "dry_run": bool(job.get("dry_run")),
+            })
+            self._ledgered_keys.add(job.get("key") or "")
+            before = self._fails.get(job["type"], 0)
+            # 实际取消应是 skipped，既不累积失败，也绝不安排补位。
+            if result.get("retry_without_failure"):
+                self._fails[job["type"]] = 0
+                before = 0
+            else:
+                self._update_failures(job["type"], job["status"], plan, day_data, day, job)
+            # 失败补位只能在熔断尚未开启时创建，不能绕过冷却窗口。
+            if (job["status"] == STATUS_FAILED and before + 1 < CIRCUIT_BREAK_AFTER
+                    and not self._circuit_open(job["type"], day_data, self._now())
+                    and planner.plan_retry(self._now(), plan, day_data, job,
+                                           RETRY_DELAY_MINUTES)):
+                self._push_notice("info", "%s 失败，已安排 %d 分钟后补位一次"
+                                  % (job["type"], RETRY_DELAY_MINUTES))
+            self._save_day_if_changed(day, day_data)
+            if job["status"] == STATUS_DONE:
+                self._push_notice("info", "%s 完成：%s" % (job["type"],
+                                  (result.get("message") or "")[:80]))
+            elif job["status"] == STATUS_FAILED:
+                self._push_notice("warn", "%s 失败：%s" % (job["type"],
+                                  (result.get("message") or "")[:80]))
+            return result
+        except Exception as exc:       # noqa: BLE001
+            # 收尾也必须释放 busy 状态；否则一次异常会永久阻塞后续调度。
+            log.exception("自动化作业收尾异常：%s", job.get("key"))
+            job["status"] = STATUS_FAILED
+            job["finished_at"] = self._now().strftime("%Y-%m-%dT%H:%M:%S")
+            safe_result = {"ok": False, "units": 0, "status": STATUS_FAILED,
+                           "message": "调度收尾异常：%s" % exc, "artifacts": []}
+            self._save_day_if_changed(day, day_data)
+            return safe_result
+        finally:
+            with self._lock:
+                self._running_job = None
+                self._run_progress = None
 
-    def _update_failures(self, task_type, status, plan):
-        """成功清零；连续失败到阈值 → 熔断该类任务（停用 + 通知）。"""
+    def _update_failures(self, task_type, status, plan, day_data=None, day="", failed_job=None):
+        """成功清零；连续技术失败到阈值 → 当日熔断，绝不修改用户计划。"""
         if status == STATUS_DONE:
             self._fails[task_type] = 0
             return
@@ -453,14 +632,24 @@ class AutomationScheduler:
         self._fails[task_type] = n
         if n >= CIRCUIT_BREAK_AFTER:
             from automation.model import task_label
-            fresh = store.load_plan()
-            cfg = (fresh.get("tasks") or {}).get(task_type) or {}
-            if cfg.get("enabled"):
-                cfg["enabled"] = False
-                store.save_plan(fresh)
+            day = day or self._now().strftime("%Y-%m-%d")
+            day_data = day_data if day_data is not None else store.load_day(day)
+            until = self._now() + timedelta(minutes=CIRCUIT_COOLDOWN_MINUTES)
+            breakers = self._breaker_records(day_data)
+            day_data["circuit_breakers"] = breakers
+            last_failed = dict(failed_job or {})
+            # 只保存计划器恢复所需的字段，避免把运行中临时状态/大对象带进日文件。
+            last_failed = {k: last_failed.get(k) for k in
+                           ("key", "type", "params", "units", "dry_run", "manual")}
+            breakers[task_type] = {"failed_count": n,
+                                   "opened_at": self._now().replace(microsecond=0).isoformat(),
+                                   "until": until.replace(microsecond=0).isoformat(),
+                                   "last_failed_job": last_failed}
+            self._save_day_if_changed(day, day_data)
             self._fails[task_type] = 0
-            self._push_notice("error", "%s 连续失败 %d 次，已自动停用该类任务"
-                              % (task_label(task_type), CIRCUIT_BREAK_AFTER))
+            self._push_notice("error", "%s 连续失败 %d 次，已临时熔断至 %s；计划保持开启，可手动重试"
+                              % (task_label(task_type), CIRCUIT_BREAK_AFTER,
+                                 until.strftime("%H:%M")))
 
     # ---------------- 手动干预 ----------------
 
@@ -472,6 +661,8 @@ class AutomationScheduler:
         """
         now = self._now()
         day = now.strftime("%Y-%m-%d")
+        if task_type:
+            self._clear_circuit_breakers(day, task_type)
         plan = store.load_plan()
         day_data = store.load_day(day)
         day_data = planner.materialize_day(now, plan, day_data,
@@ -538,6 +729,19 @@ class AutomationScheduler:
             reason = self._pause_reason
             notices = list(self._notices)[-20:]
             fails = dict(self._fails)
+        breakers = {}
+        for task_type, detail in self._breaker_records(day_data).items():
+            if not isinstance(detail, dict):
+                continue
+            try:
+                if datetime.fromisoformat(detail.get("until") or "") > now:
+                    breakers[task_type] = {
+                        "until": detail.get("until"),
+                        "opened_at": detail.get("opened_at"),
+                        "failed_count": int(detail.get("failed_count") or 0),
+                    }
+            except (TypeError, ValueError):
+                continue
         try:
             from webui.browser_tasks import browser_busy
             busy = browser_busy()
@@ -575,6 +779,9 @@ class AutomationScheduler:
             "ledger": store.load_ledger(day)[-40:],
             "notices": notices,
             "fails": fails,
+            # {task_type: {until, opened_at, failed_count}}；均为本地 ISO 时间。
+            # 用户计划开关不受技术熔断影响，UI 可显示「冷却至」并提供立即执行重试。
+            "circuit_breakers": breakers,
             "browser_busy": busy,
             "notes": day_data.get("notes") or [],
             # 线上进度事实（校核快照）：UI 只渲染，不自己算

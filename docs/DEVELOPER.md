@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 |---|---|
 | **适用版本** | v5.0.8 起 |
-| **最后更新** | 2026-10-07 |
+| **最后更新** | 2026-10-16 |
 | **状态** | 活跃 |
 | **说明** | 架构分层、运行方式、CLI 命令、配置参考与扩展指南 |
 
@@ -247,9 +247,17 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 
 ### 6.4 Web 控制台结构
 
-- `webui/server.py`：FastAPI 单进程（127.0.0.1:8787，Host/Origin 白名单防跨站盲打）、TaskRunner 单任务线程、watchdog 卡死判定（240s 无进展 / 900s 总时长）、取消钩子注入 web_drivers/browser_pool（浏览器工厂由 browser_adapter 注册）
+- `webui/server.py`：FastAPI 单进程（127.0.0.1:8787，Host/Origin 白名单防跨站盲打）。`webui/run_manager.py` 管理 TaskRunner 单任务线程、绑定本次运行的 watchdog（240s 无进展 / 900s 总时长）；取消检查由任务线程通过 `web_drivers.browser_pool.cancellation_scope` 注册，不再安装服务级停止钩子。
 - `webui/log_capture.py`：root logger 捕获 + 里程碑解析 → SSE 事件
 - `webui/static/index.html`：单页控制台（运行控制 / 配置速览 / 实时日志 / 结果卡片 / 首启引导）
+
+### 6.5 自动化故障恢复（v5.4.1 起）
+
+- 写作超时保留 `timeout` 原因，用户停止标为 `stopped`；执行器等待 `worker_alive=false`，确保会话删除与浏览器释放完成后再派下一项。未成功的写作不记完成配额。
+- 每个自动化作业使用自己的取消上下文；停止只中断当前作业，并允许有界清理。正常完成的回执优先，不因最后一刻停止而丢失已完成结果。
+- 同类技术失败连续三次后，冷却状态写入当天排班，60 分钟内只阻止该类任务；用户计划中的开关、配额不变。重启保留剩余冷却，到期后在有效时段内重试，次日重新排班。手动开始/继续或指定立即执行可解除冷却。
+- 登录失效等必须人工处理的问题仍暂停并说明原因。发布等有副作用任务不会仅因遗留 `running` 状态就自动重放；只读反馈采集沿用同一任务键确认结果。
+- 排查安装版时读取 `%APPDATA%/AutoQuill/logs/` 与 `data/state/automation/`，不要只看源码目录日志。旧版已经关闭的任务开关需依据用户意图或事故证据恢复，不批量开启所有任务。
 
 ---
 

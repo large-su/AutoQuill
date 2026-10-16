@@ -2,6 +2,7 @@
 """已发布内容反馈刷新自动化处理器的状态与取消语义。"""
 
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -93,8 +94,15 @@ class FeedbackRefreshExecutorTest(unittest.TestCase):
         self.assertEqual(result["units"], 0)
 
     def test_stop_after_committed_refresh_preserves_the_completed_result(self):
-        stop = mock.Mock(side_effect=[False, True])
-        result = execute(self._job(), should_stop=stop)
+        stop = threading.Event()
+        committed = self.refresh.return_value
+
+        def finish_refresh(**kwargs):
+            stop.set()  # cancellation arrives after the refresh committed its observations
+            return committed
+
+        self.refresh.side_effect = finish_refresh
+        result = execute(self._job(), should_stop=stop.is_set)
         self.assertEqual(result['status'], planner.STATUS_DONE)
         self.assertEqual(result['units'], 1)
 

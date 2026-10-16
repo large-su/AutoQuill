@@ -84,6 +84,16 @@ class _RunSpec(BaseModel):
     count: int = 5     # collect 模式：本次最多新增篇数
 
 
+class _RunTerminal(Exception):
+    """Expected preflight failure whose terminal state is applied after cleanup."""
+
+    def __init__(self, state, message, guide=None):
+        super().__init__(message)
+        self.state = state
+        self.message = message
+        self.guide = guide
+
+
 class TaskRunner:
     """单任务后台运行器（同一时刻只允许一个任务）。
 
@@ -102,6 +112,8 @@ class TaskRunner:
         self.progress = None     # {text, pct}：阶段进度（SSE 断连时前端轮询）
         self.guide_needed = None # 运行前检测失败："deepseek_login" / "api_key"（前端据此弹引导）
         self._handler = None
+        self._run_seq = 0
+        self._active_control = None
 
     # ---------------- 状态 ----------------
 
@@ -114,6 +126,7 @@ class TaskRunner:
                 "story": self.last_story,
                 "progress": self.progress,
                 "guide_needed": self.guide_needed,
+                "worker_alive": bool(self._thread and self._thread.is_alive()),
             }
 
     def _set_state(self, state, message=""):
@@ -127,10 +140,24 @@ class TaskRunner:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 raise HTTPException(409, "已有任务在运行")
+            self._run_seq += 1
+            control = {
+                "id": self._run_seq,
+                "stop": threading.Event(),
+                "finished": threading.Event(),
+                "watchdog_stop": threading.Event(),
+                "timeout": None,
+            }
+            self._active_control = control
+            # Keep the attribute for existing integrations/tests, but every
+            # run receives a fresh event so an old watchdog cannot poison it.
+            self._stop_flag = control["stop"]
             self._thread = threading.Thread(
-                target=self._run_task, args=(spec,), daemon=True)
-            self._stop_flag.clear()
+                target=self._run_task, args=(spec, control), daemon=True)
             self.guide_needed = None  # 每次运行重新检测，清除上次引导标记
+            self.last_context = {}
+            self.last_story = {}
+            self.progress = None
             self._set_state("running", f"任务启动：{spec.mode}")
             self._thread.start()
 
@@ -144,99 +171,112 @@ class TaskRunner:
         超时后到检查点即抛 WorkflowCancelled，任务线程干净退出，
         finally 里同线程 close 浏览器。
         """
-        self._stop_flag.set()
+        with self._lock:
+            control = self._active_control
+            worker_alive = bool(self._thread and self._thread.is_alive())
+        if not worker_alive:
+            return {"ok": True, "message": "当前没有运行中的任务"}
+        (control or {"stop": self._stop_flag})["stop"].set()
         self._set_state("stopping", "正在停止…")
         return {"ok": True, "message": "停止请求已发出（浏览器操作完成后中断）"}
 
     # ---------------- 任务体 ----------------
 
-    def _run_task(self, spec: _RunSpec):
-        # 闭环兜底：LLM 任务（生成/提炼）运行前检测当前通道可用性——
-        # Web 通道查 DeepSeek 登录态、API 通道查 Key。检测失败不直接
-        # 报错收场，而是置 guide_needed 让前端弹引导（与切换通道时的
-        # 闭环预检同语义，覆盖「首启引导被跳过」的场景）。
-        # 此时任务浏览器尚未启动（首次 get_browser 在 _dispatch 里），
-        # 独立检测实例可安全使用同一 profile；运行中浏览器已占用，
-        # 该检测会锁冲突误报，故只在此处（运行前）检查一次。
-        if spec.mode in ("generate", "single", "clean", "batch",
-                         "profile", "general_profile"):
-            from config import LLM_MODE, WEB_DRIVER_NAME
-            if LLM_MODE == "web":
-                # 任务开始：清掉上一个任务遗留的网页会话（删除+关页），
-                # 确保「单条完整链路 = 一个全新会话」从零开始
-                from web_drivers import reset_driver
-                reset_driver()
-                from web_drivers import web_llm_logged_in
-                if not web_llm_logged_in():
-                    # 预检失败 = 未登录当前网页版大模型或 无头 Edge 启动失败
-                    # （残留 msedge 占用 profile 锁时会误报未登录）
-                    self._finish(
-                        "error",
-                        f"Web 通道预检未通过（无法确认已登录"
-                        f"{WEB_DRIVER_NAME} 网页版）。"
-                        "若日志里出现「浏览器启动失败 … Target page, context or "
-                        "browser has been closed」则是残留 Edge 进程占用 profile，"
-                        f"请重启 AutoQuill 或关闭残留 msedge 进程后重试；"
-                        f"否则请点右上角「设置」→「打开 Edge 登录"
-                        f"{WEB_DRIVER_NAME}」完成登录",
-                        guide="deepseek_login")
-                    return
-            else:
-                if not _llm_configured():
-                    self._finish(
-                        "error",
-                        "API 模式需要先配置 API Key："
-                        "请点右上角「设置」→ 引导窗口填写 API Key，"
-                        "完成后重新运行",
-                        guide="api_key")
-                    return
-        # 防卡死：workflow 内部有阻塞 input()（base.py:98 API 失败回退、
-        # zhihu.py:204 手动选题编号），Web 运行一律给默认值
+    def _run_task(self, spec: _RunSpec, control=None):
+        """Run one task and expose its terminal state only after cleanup."""
+        if control is None:  # direct unit-test / legacy caller compatibility
+            control = {"id": None, "stop": self._stop_flag,
+                       "finished": threading.Event(),
+                       "watchdog_stop": threading.Event(), "timeout": None}
+        from web_drivers.browser_pool import (WorkflowCancelled,
+                                              cancellation_scope, _check_cancel)
+        terminal = None
         _orig_input = builtins.input
-        builtins.input = lambda *a, **k: "1"
-        # 重装 capture handler（每次运行独立队列，避免 handler 堆积）
-        if self._handler is not None:
-            log_capture.uninstall(self._handler)
-        _last_log_ts[0] = time.time()
-        self._handler = _TimedHandler()
-        logging.getLogger().addHandler(self._handler)
-
-        watchdog = threading.Thread(
-            target=self._watchdog, args=(spec,), daemon=True)
-        watchdog.start()
-
+        watchdog = None
         try:
-            if self._stop_flag.is_set():
-                self._finish("stopped", "已取消")
-                return
-            result = self._dispatch(spec)
-            if self._stop_flag.is_set():
-                self._finish("stopped", "已中断")
+            # The scoped checker covers preflight as well as dispatch.  It is
+            # thread-local, so scheduler/CLI browser work is never cancelled
+            # by a completed web-console task.
+            def _run_cancel_reason():
+                return (f"任务超时：{control['timeout']}"
+                        if control["timeout"] else control["stop"].is_set())
+
+            with cancellation_scope(_run_cancel_reason):
+                _check_cancel()
+                # 防卡死：workflow 内部有阻塞 input()（base.py:98 API 失败回退、
+                # zhihu.py:204 手动选题编号），Web 运行一律给默认值
+                builtins.input = lambda *a, **k: "1"
+                if self._handler is not None:
+                    log_capture.uninstall(self._handler)
+                _last_log_ts[0] = time.time()
+                self._handler = _TimedHandler()
+                logging.getLogger().addHandler(self._handler)
+                watchdog = threading.Thread(
+                    target=self._watchdog, args=(spec, control), daemon=True)
+                watchdog.start()
+
+                # 闭环兜底：LLM 任务运行前检测当前通道可用性。预检异常也
+                # 必须经过 finally，以免状态显示结束但浏览器仍在清理。
+                if spec.mode in ("generate", "single", "clean", "batch",
+                                 "profile", "general_profile"):
+                    from config import LLM_MODE, WEB_DRIVER_NAME
+                    if LLM_MODE == "web":
+                        from web_drivers import reset_driver, web_llm_logged_in
+                        reset_driver()
+                        _check_cancel()
+                        if not web_llm_logged_in():
+                            raise _RunTerminal(
+                                "error",
+                                f"Web 通道预检未通过（无法确认已登录{WEB_DRIVER_NAME} 网页版）。"
+                                "请点右上角「设置」→ 登录当前网页版模型后重新运行",
+                                guide="deepseek_login")
+                    elif not _llm_configured():
+                        raise _RunTerminal(
+                            "error", "API 模式需要先配置 API Key：请点右上角「设置」→ 引导窗口填写 API Key，完成后重新运行",
+                            guide="api_key")
+
+                _check_cancel()
+                result = self._dispatch(spec)
+                if not result:
+                    _check_cancel()
+                    raise RuntimeError(f"任务执行未成功：{spec.mode}")
+                terminal = ("done", f"任务完成：{spec.mode}（成功）", None)
+        except _RunTerminal as exc:
+            terminal = (exc.state, exc.message, exc.guide)
+        except WorkflowCancelled as exc:
+            if control["timeout"]:
+                terminal = ("timeout", control["timeout"], None)
+            elif self.state == "timeout":  # legacy direct callers/tests
+                terminal = ("timeout", self.message, None)
             else:
-                self._finish("done",
-                             f"任务完成：{spec.mode} "
-                             f"({'成功' if result else '未成功'})")
+                terminal = ("stopped", f"已中断：{exc}", None)
         except BaseException as exc:
-            # BaseException：捕获 _StopInterrupt 注入（非 Exception 子类）
-            if self._stop_flag.is_set():
-                self._finish("stopped", f"已中断：{exc}")
+            if control["timeout"]:
+                terminal = ("timeout", control["timeout"], None)
+            elif control["stop"].is_set():
+                terminal = ("stopped", f"已中断：{exc}", None)
             else:
                 log.error("Web 任务异常：%s", exc, exc_info=True)
-                self._finish("error", str(exc))
+                terminal = ("error", str(exc), None)
         finally:
+            control["watchdog_stop"].set()
             builtins.input = _orig_input
-            # 完成后先删网页会话、关驱动页（仅删本任务创建/使用过的会话），
-            # 再关共享浏览器——删除需要页面/登录态仍在
+            # 任务拥有的浏览器只能由任务线程清理；状态留在 running/stopping
+            # 直到这两步完成，调度器不会误以为资源已可复用。
             try:
                 from web_drivers import reset_driver
                 reset_driver(delete_session=True)
             except Exception:
-                pass
+                log.exception("任务会话清理失败")
             try:
                 from web_drivers.browser_pool import close_shared_browser
                 close_shared_browser()
             except Exception:
-                pass
+                log.exception("任务浏览器清理失败")
+            control["finished"].set()
+            if terminal is None:
+                terminal = ("error", "任务未产生终态", None)
+            self._finish(*terminal)
 
     def _dispatch(self, spec: _RunSpec):
         from workflows.zhihu import ZhihuWorkflow
@@ -464,7 +504,12 @@ class TaskRunner:
 
     # ---------------- watchdog ----------------
 
-    def _watchdog(self, spec: _RunSpec):
+    def _watchdog(self, spec: _RunSpec, control=None):
+        """Watch only the control object that created this watchdog thread."""
+        if control is None:  # direct compatibility for targeted unit tests
+            control = {"id": None, "stop": self._stop_flag,
+                       "finished": threading.Event(),
+                       "watchdog_stop": threading.Event(), "timeout": None}
         # 批量模式放宽总时长上限（避免正常推进被一刀切误杀）
         # 批量/多轮纯净模式：总时长上限放宽（每轮约 2-4 分钟，防误杀）
         multi_round = (spec.mode in ("clean", "single")
@@ -477,24 +522,25 @@ class TaskRunner:
         stall = STALL_LIMIT * 3 if spec.mode in ("profile", "general_profile") \
             else STALL_LIMIT
         while True:
-            time.sleep(15)
-            if self._stop_flag.is_set():
+            if control["finished"].wait(15) or control["watchdog_stop"].is_set():
+                return
+            if control["stop"].is_set():
                 return
             with self._lock:
-                if self.state != "running":
+                if (control.get("id") is not None
+                        and self._active_control is not control):
                     return
             age = time.time() - _last_log_ts[0]
             if age > stall:
                 log.warning("watchdog：日志 %.0fs 无进展，判定卡死并中断（非用户操作）",
                             age)
-                self._stop_flag.set()  # 取消钩子生效，检查点抛异常
-                self._set_state("timeout",
-                                f"日志 {age:.0f}s 无进展，已判定卡死")
+                control["timeout"] = f"日志 {age:.0f}s 无进展，已判定卡死"
+                control["stop"].set()  # scoped cancel checker observes it
                 return
             if time.time() > deadline:
                 log.warning("watchdog：总时长超 %.0fs（非用户操作），强制中断", overall)
-                self._set_state("timeout", f"总时长超 {overall:.0f}s")
-                self._stop_flag.set()
+                control["timeout"] = f"总时长超 {overall:.0f}s"
+                control["stop"].set()
                 return
 
 

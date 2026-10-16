@@ -33,6 +33,22 @@ class WorkflowCancelled(Exception):
 
 _cancel_hook = None
 _cleanup_active = ContextVar("web_session_cleanup", default=False)
+_cancel_scope_unset = object()
+_cancel_scope_hook = ContextVar("web_cancel_scope", default=_cancel_scope_unset)
+
+
+@contextmanager
+def cancellation_scope(fn):
+    """Temporarily select this context's cancellation checker.
+
+    ``None`` deliberately disables cancellation in the current context. When
+    no scope is installed, callers retain the legacy ``set_cancel_hook`` path.
+    """
+    token = _cancel_scope_hook.set(fn)
+    try:
+        yield
+    finally:
+        _cancel_scope_hook.reset(token)
 
 
 @contextmanager
@@ -46,9 +62,10 @@ def session_cleanup():
 
 
 def set_cancel_hook(fn):
-    """设置取消检查钩子；fn() 返回 True 时后续浏览器操作抛 WorkflowCancelled。
+    """设置遗留的进程级取消检查钩子。
 
-    仅 Web 控制台设置（stop 置标志）；CLI 模式下无 hook，零影响。
+    未进入 ``cancellation_scope`` 的旧 CLI/测试调用仍使用它；任务线程
+    应改用上下文作用域，避免取消状态泄漏到无关操作。
     检查只允许在 Python 层（浏览器阻塞调用自带超时），绝不能跨线程
     注入异常——那会破坏 Playwright 协议层导致 close 挂起。"""
     global _cancel_hook
@@ -56,8 +73,18 @@ def set_cancel_hook(fn):
 
 
 def _check_cancel():
-    if not _cleanup_active.get() and _cancel_hook is not None and _cancel_hook():
-        raise WorkflowCancelled("已由用户停止")
+    if _cleanup_active.get():
+        return
+    hook = _cancel_scope_hook.get()
+    if hook is _cancel_scope_unset:
+        hook = _cancel_hook
+    if hook is not None:
+        reason = hook()
+        if reason:
+            # Scoped owners may return a precise reason (for example a
+            # watchdog timeout); legacy bool hooks retain the user-stop text.
+            raise WorkflowCancelled(reason if isinstance(reason, str)
+                                    else "已由用户停止")
 
 
 def safe_evaluate(page, js, *args, timeout=EVAL_TIMEOUT):

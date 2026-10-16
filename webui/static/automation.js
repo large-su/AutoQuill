@@ -181,6 +181,11 @@ function renderAutoState() {
       ? ("已暂停：" + (st.pause_reason || "") + "（点「继续」恢复）")
       : ("时段 " + (s.window_label || "-") + " · 今天已完成 " + (s.done_total || 0)
          + "/" + (s.plan_total || 0) + " 项 · 错过补做 " + (s.rescheduled || 0) + " 次");
+    const cooling = Object.entries(st.circuit_breakers || {}).map(([type, detail]) => {
+      const meta = (s.per_type || {})[type];
+      return (meta ? meta.label : type) + " 冷却至 " + String(detail.until || "").slice(11, 16);
+    });
+    if (cooling.length) hint.textContent += " · " + cooling.join("；") + "，到期自动重试";
   }
 }
 

@@ -114,7 +114,8 @@ def _full_chain(job, should_stop=None, progress=None):
                     progress(st)
                 except Exception:  # noqa: BLE001
                     pass
-            if state in ("done", "error", "stopped", "timeout", "idle"):
+            if (state in ("done", "error", "stopped", "timeout", "idle")
+                    and not st.get("worker_alive")):
                 break
             if should_stop and should_stop():
                 runner.stop()      # 用户停止：通知工作流在检查点中断
@@ -139,7 +140,8 @@ def _full_chain(job, should_stop=None, progress=None):
     return {
         "ok": ok,
         "units": 1 if ok else 0,
-        "status": STATUS_DONE if ok else STATUS_FAILED,
+        "status": (STATUS_DONE if ok else
+                   STATUS_SKIPPED if state == "stopped" else STATUS_FAILED),
         "message": message,
         "artifacts": [story.get("md_path")] if story.get("md_path") else [],
     }
@@ -507,8 +509,22 @@ _HANDLERS = {
 
 def execute(job, should_stop=None, progress=None):
     """执行一个作业。异常按语义抛出，由调度器统一记账。"""
+    from web_drivers.browser_pool import (
+        WorkflowCancelled, _check_cancel, cancellation_scope,
+    )
+
     handler = _HANDLERS.get(job.get("type"))
     if handler is None:
         return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
                 "message": "未知任务类型：%s" % job.get("type"), "artifacts": []}
-    return handler(job, should_stop=should_stop, progress=progress)
+    # 停止只属于当前作业。显式 None 也隔离旧的全局钩子，不能让上次
+    # TaskRunner 的超时/停止污染后续发布、打卡、回复或反馈采集。
+    with cancellation_scope(should_stop):
+        try:
+            _check_cancel()
+            return handler(job, should_stop=should_stop, progress=progress)
+        except WorkflowCancelled:
+            if not (should_stop and should_stop()):
+                raise
+            return {"ok": False, "units": 0, "status": STATUS_SKIPPED,
+                    "message": "自动化已停止，当前作业已取消", "artifacts": []}

@@ -530,7 +530,7 @@ class SchedulerTest(unittest.TestCase):
         self.assertIn("deepseek_login", st["pause_reason"])
         self.assertTrue(any(n["level"] != "info" for n in st["notices"]))
 
-    def test_circuit_breaker_disables_type_after_three_failures(self):
+    def test_circuit_breaker_cools_type_without_disabling_user_plan(self):
         store.save_plan(_only("full_chain", daily_cap=3))
         self.result = RuntimeError("模型无输出")
         # 失败会「当日补位」再试，最多补 2 次 → 第 3 次失败触发熔断；
@@ -539,8 +539,8 @@ class SchedulerTest(unittest.TestCase):
         for _ in range(40):
             self.sched._tick()
             self._advance(30)
-        self.assertFalse(store.load_plan()["tasks"]["full_chain"]["enabled"])
-        self.assertTrue(any("连续失败" in n["text"] for n in self.sched.status()["notices"]))
+        self.assertTrue(store.load_plan()["tasks"]["full_chain"]["enabled"])
+        self.assertTrue(any("临时熔断" in n["text"] for n in self.sched.status()["notices"]))
 
     def test_manual_run_works_outside_the_window(self):
         """「运行时段」只约束自动派活；用户手动点「立即执行」不受它限制。"""
