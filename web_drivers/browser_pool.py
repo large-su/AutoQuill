@@ -142,6 +142,10 @@ class ProfileBusy(RuntimeError):
     """浏览器 profile 正被其它实例独占（拿不到生命周期租约）。"""
 
 
+class WebLoginCheckError(RuntimeError):
+    """The browser could not determine login state; this is not a logout."""
+
+
 def acquire_profile(timeout=0.0, purpose=""):
     """申请 profile 独占租约；timeout 秒内拿不到返回 False（不阻塞调用方）。"""
     try:

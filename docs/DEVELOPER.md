@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 |---|---|
 | **适用版本** | v5.0.8 起 |
-| **最后更新** | 2026-10-16 |
+| **最后更新** | 2026-10-23 |
 | **状态** | 活跃 |
 | **说明** | 架构分层、运行方式、CLI 命令、配置参考与扩展指南 |
 
@@ -178,6 +178,10 @@ V4 起程序文件与用户数据分离：
 | `POST /api/setup/web-login` | 后台线程拉起可见 Edge 登录**当前网页版大模型**（DeepSeek / 豆包，前端轮询 status 收尾） |
 
 知乎登录逻辑抽为 `browser_adapter.login_zhihu_flow()`（CLI `--login` 与引导共用）；DeepSeek 网页版登录/判定在 `web_drivers/deepseek.web_llm_logged_in()` / `login_deepseek_web_flow()`（随驱动下沉 Layer 3，经 browser_pool 工厂创建独立实例）。
+
+DeepSeek 检查只在聊天界面已就绪时返回成功，在明确登录页返回未登录。浏览器或网络异常以 `WebLoginCheckError` 表示，运行前检测不会因此要求重新登录；`setup/status` 的 `web_llm_check_error` 提供暂时无法检测的提示，与按驱动保存的最近明确登录结果分开。异常缓存 3 秒，正常缓存 15 秒，均从检测结束计时。
+
+`SessionMixin` 对登录态快照采用同目录原子替换；损坏快照只记录警告并继续使用持久化 profile。启动失败会关闭上下文和驱动后释放租约，不保存失败状态。Windows 残留清理仅匹配完整 profile 参数，并对每个 PID 显式传入 `/PID`；清理失败日志不能当作锁已释放。
 
 ---
 

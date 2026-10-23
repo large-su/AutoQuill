@@ -627,23 +627,39 @@ def _has_deepseek_cookies(context):
     )
 
 
+_LOGIN_STATE_JS = r"""() => {
+    const signedOut = /(?:^|\/)(?:sign_in|sign-in|login)(?:\/|$)/i.test(location.pathname);
+    const inputs = document.querySelectorAll(%s);
+    const composer = [...inputs].some(e =>
+        !e.disabled && !e.readOnly && !!(e.offsetWidth || e.offsetHeight));
+    const token = localStorage.getItem('userToken');
+    return {signed_out: signedOut, ready: !signedOut &&
+        location.origin === 'https://chat.deepseek.com' && composer &&
+        !!token && token !== 'null' && token !== 'undefined'};
+}""" % json.dumps(",".join(_INPUT_SELECTORS))
+
+
+def _deepseek_login_state(page):
+    """Return True/False only for a ready chat or an explicit sign-in page."""
+    state = page.evaluate(_LOGIN_STATE_JS)
+    if isinstance(state, dict):
+        if state.get("signed_out"):
+            return False
+        if state.get("ready"):
+            return True
+    return None
+
+
 def web_llm_logged_in():
-    """网页版 LLM（chat.deepseek.com）是否真实可登录。
+    """Check the actual chat UI; infrastructure failures are not a logout.
 
-    判定 = deepseek.com cookie 存在 + 加载 chat.deepseek.com 未停在
-    登录页（URL 无 sign_in）。仅查 cookie 会假阳性：过期/无效 cookie
-    残留时预检放行，运行才撞登录页（线上：切 Web 成功但运行报
-    「找不到 DeepSeek 输入框」，页面停在 chat.deepseek.com/sign_in）。
-
-    用独立无头实例检查，不碰共享浏览器（get_browser）——首启引导轮询
-    setup/status 时不会反复弹出可见 Edge，也不影响任务浏览器的无头模式。
-    与共享浏览器用同一把 _browser_lock 串行启动：两者都依赖
-    USER_DATA_DIR 的持久化 cookie（临时目录读不到登录态），而
-    Chromium 单例锁禁止同目录并发——串行化后登录引导不再被此
-    检查挤掉（线上：Target page, context or browser has been closed）。
-    返回 True/False；浏览器无法启动等异常返回 False（不阻塞引导）。"""
+    DeepSeek keeps its account token in localStorage. Tracking cookies and a
+    stable URL alone do not establish login. A navigation timeout can occur
+    after the chat is usable, so inspect the page before rejecting the check.
+    """
     from web_drivers.browser_pool import (
         _browser_lock, create_browser, live_browsers, profile_in_use,
+        WebLoginCheckError, WorkflowCancelled,
     )
     if profile_in_use() or live_browsers() > 0:
         # ★ 2026-09-26：有浏览器在跑（任务/登录引导/抓取）就**不发起检测**。
@@ -655,31 +671,34 @@ def web_llm_logged_in():
     try:
         with _browser_lock:
             with create_browser(headless=True) as browser:
-                if not _has_deepseek_cookies(browser.context):
-                    return False
                 page = browser.context.new_page()
                 try:
-                    page.goto("https://chat.deepseek.com",
-                              wait_until="domcontentloaded", timeout=20000)
-                    # 等 SPA 跳转定局：已登录 → URL 稳定即返回（省 1.2s
-                    # 固定等待）；未登录 → 一旦跳到 /sign_in 立即判定
-                    deadline = time.time() + 1.5
-                    prev = page.url
-                    if "sign_in" in prev:
-                        return False
-                    while time.time() < deadline:
+                    from playwright.sync_api import TimeoutError as NavigationTimeout
+                    try:
+                        page.goto("https://chat.deepseek.com",
+                                  wait_until="domcontentloaded", timeout=20000)
+                    except NavigationTimeout:
+                        log.info("DeepSeek 导航等待超时，继续检查已渲染的聊天界面")
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline:
+                        state = _deepseek_login_state(page)
+                        if state is not None:
+                            return state
                         page.wait_for_timeout(250)
-                        cur = page.url
-                        if "sign_in" in cur:
-                            return False
-                        if cur == prev:
-                            return True
-                        prev = cur
-                    return "sign_in" not in page.url
+                    raise WebLoginCheckError(
+                        "DeepSeek 页面尚未就绪，可能正在加载或验证；请稍后重试检测")
                 finally:
-                    page.close()
-    except Exception:
-        return False
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+    except (WebLoginCheckError, WorkflowCancelled):
+        raise
+    except Exception as exc:
+        log.warning("DeepSeek 登录检查暂不可用：%s", type(exc).__name__)
+        raise WebLoginCheckError(
+            "DeepSeek 登录检查暂不可用（浏览器或网络异常），请稍后重试；"
+            "这不表示账号已退出登录") from exc
 
 
 def login_deepseek_web_flow(timeout=300):
@@ -707,25 +726,36 @@ def login_deepseek_web_flow(timeout=300):
         time.sleep(2)
         waited += 2
     try:
+        if profile_in_use():
+            from web_drivers.browser_pool import ProfileBusy
+            raise ProfileBusy("浏览器仍被其它任务占用，登录窗口尚未打开；请等待任务结束后重试")
         with _browser_lock:
             with create_browser(headless=False) as browser:
                 page = browser.context.new_page()
                 try:
-                    page.goto("https://chat.deepseek.com",
-                              wait_until="domcontentloaded",
-                              timeout=30000)
+                    from playwright.sync_api import TimeoutError as NavigationTimeout
+                    try:
+                        page.goto("https://chat.deepseek.com",
+                                  wait_until="domcontentloaded",
+                                  timeout=30000)
+                    except NavigationTimeout:
+                        log.info("DeepSeek 登录引导导航等待超时，继续等待页面就绪")
                     deadline = time.time() + timeout
                     while time.time() < deadline:
                         time.sleep(3)
                         page.wait_for_timeout(500)  # 等 SPA 跳回主页
-                        if (_has_deepseek_cookies(browser.context)
-                                and "sign_in" not in page.url):
+                        if _deepseek_login_state(page) is True:
+                            browser.save_storage_state()
                             return True, "检测到登录成功"
                     return False, f"超时（{timeout // 60} 分钟）未检测到登录"
                 finally:
                     page.close()
     except Exception as exc:
-        return False, f"登录引导失败：{exc}"
+        from web_drivers.browser_pool import ProfileBusy
+        if isinstance(exc, ProfileBusy):
+            return False, str(exc)
+        log.warning("DeepSeek 登录引导失败：%s", type(exc).__name__)
+        return False, "登录引导未能完成（浏览器或网络异常），请重试打开登录窗口"
 
 
 # 统一登录引导入口：web_drivers 分发器按 driver 调用（旧名保留兼容）

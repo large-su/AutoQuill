@@ -2225,26 +2225,32 @@ function selectModeCard(st) {
 
 function renderModeCardState(st) {
   const mcApi = $("mcApi"), mcWeb = $("mcWeb");
+  const checkError = st.web_llm_check_error;
+  const webErr = $("webErr");
+  webErr.textContent = "";
   mcApi.classList.toggle("done", !!st.llm_configured);
   mcApi.querySelector(".mc-d").textContent =
     st.llm_configured ? "✓ 已配置 API Key，可随时切换使用。" :
     "付费、响应快。DeepSeek 开放平台申请 API Key。";
   mcWeb.classList.toggle("done", !!st.web_llm_logged_in);
   const wd = st.web_driver || "DeepSeek";
-  mcWeb.querySelector(".mc-d").textContent =
-    st.web_llm_logged_in ? "✓ 已登录该网页版大模型，可直接使用。" :
-    "免费。登录网页版大模型后由浏览器自动操作。";
+  mcWeb.querySelector(".mc-d").textContent = checkError
+    ? "登录状态检测暂不可用，请稍后重试。"
+    : (st.web_llm_logged_in ? "✓ 已登录该网页版大模型，可直接使用。" :
+      "免费。登录网页版大模型后由浏览器自动操作。");
   if (st.login_running && st.login_kind === "deepseek") {
     const b = $("btnWebLogin");
     b.disabled = true;
     b.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
-    $("webErr").textContent = "";
+    webErr.textContent = checkError || "";
   } else {
     $("btnWebLogin").disabled = false;
     $("btnWebLogin").textContent = "打开 Edge 登录 " + wd;
   }
   if (st.login_error && st.login_kind === "deepseek") {
-    $("webErr").textContent = "登录未完成：" + st.login_error;
+    webErr.textContent = "登录未完成：" + st.login_error;
+  } else if (checkError) {
+    webErr.textContent = "登录状态检测暂不可用，请稍后重试。";
   }
 }
 

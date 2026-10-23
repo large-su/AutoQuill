@@ -469,6 +469,11 @@ class TestWebLlmLoggedIn(unittest.TestCase):
         class _Page:
             url = page_url
 
+            def evaluate(self, _js):
+                signed_out = "sign_in" in self.url
+                return {"signed_out": signed_out,
+                        "ready": bool(cookies) and not signed_out}
+
             def goto(self, *a, **k):
                 if goto_error:
                     raise goto_error
@@ -509,8 +514,8 @@ class TestWebLlmLoggedIn(unittest.TestCase):
                                return_value=_Browser(ctx)):
             return ds.web_llm_logged_in(), ctx
 
-    def test_no_cookies_false(self):
-        ok, _ = self._run([], "https://chat.deepseek.com/")
+    def test_no_cookies_and_signin_false(self):
+        ok, _ = self._run([], "https://chat.deepseek.com/sign_in")
         self.assertFalse(ok)
 
     def test_cookies_but_stuck_on_sign_in_false(self):
@@ -526,9 +531,10 @@ class TestWebLlmLoggedIn(unittest.TestCase):
             "https://chat.deepseek.com/")
         self.assertTrue(ok)
 
-    def test_browser_failure_false(self):
-        ok, _ = self._run([], "", goto_error=RuntimeError("boom"))
-        self.assertFalse(ok)
+    def test_browser_failure_is_not_logout(self):
+        from web_drivers.browser_pool import WebLoginCheckError
+        with self.assertRaises(WebLoginCheckError):
+            self._run([], "", goto_error=RuntimeError("boom"))
 
 
 class TestGetBrowserConcurrency(unittest.TestCase):

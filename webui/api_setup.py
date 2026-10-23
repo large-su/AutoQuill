@@ -35,6 +35,10 @@ _login_kind = ""  # 当前登录引导的站点："zhihu" / "deepseek" / ""
 # 切换网页版大模型后若沿用旧缓存会误放行（用户实测：切豆包不弹登录）。
 _WEB_LLM_CACHE_TTL = 15.0
 _web_llm_cache = {}           # {驱动名: {"ts": float, "ok": bool}}
+# 检查浏览器起不来/导航失败不等于退出登录。短时记住诊断，避免状态轮询反复
+# 拉起 Edge；与上面的登录事实缓存分开，不能覆盖最后一次明确判断结果。
+_WEB_LLM_CHECK_ERROR_TTL = 3.0
+_web_llm_check_errors = {}    # {驱动名: {"ts": float}}
 _web_llm_cache_lock = threading.Lock()
 
 
@@ -90,11 +94,25 @@ def _web_llm_logged_in_cached(driver=None):
         now = time.time()
         if entry and now - entry["ts"] < _WEB_LLM_CACHE_TTL:
             return entry["ok"]
+        check_error = _web_llm_check_errors.get(key)
+        if (check_error
+                and now - check_error["ts"] < _WEB_LLM_CHECK_ERROR_TTL):
+            return entry["ok"] if entry else False
         if not _browser_lock_free():
             # 登录引导/任务正独占 profile：直接返回（绝不排队等锁）
             return entry["ok"] if entry else False
-        ok = _web_llm_logged_in_for(key)
-        _web_llm_cache[key] = {"ts": now, "ok": ok}
+        try:
+            ok = _web_llm_logged_in_for(key)
+        except Exception as exc:
+            from web_drivers.browser_pool import WebLoginCheckError
+            if not isinstance(exc, WebLoginCheckError):
+                raise
+            # 真实检测可花几十秒；从它结束的时刻计 TTL，才不会让刚产生的
+            # 诊断在返回状态前就过期。
+            _web_llm_check_errors[key] = {"ts": time.time()}
+            return entry["ok"] if entry else False
+        _web_llm_cache[key] = {"ts": time.time(), "ok": ok}
+        _web_llm_check_errors.pop(key, None)
         return ok
 
 
@@ -106,8 +124,26 @@ def _web_llm_logged_in_for(driver):
         module_path, _cls = _DRIVER_REGISTRY[driver]
         mod = importlib.import_module(module_path)
         return bool(mod.web_llm_logged_in())
-    except Exception:
+    except Exception as exc:
+        from web_drivers.browser_pool import (
+            WebLoginCheckError, WorkflowCancelled,
+        )
+        if isinstance(exc, (WebLoginCheckError, WorkflowCancelled)):
+            raise
         return False
+
+
+def _web_llm_check_error(driver=None):
+    """返回仍有效的检查诊断；过期诊断不再影响页面或后续检查。"""
+    key = driver or _web_llm_cache_key()
+    with _web_llm_cache_lock:
+        entry = _web_llm_check_errors.get(key)
+        if not entry:
+            return None
+        if time.time() - entry["ts"] >= _WEB_LLM_CHECK_ERROR_TTL:
+            _web_llm_check_errors.pop(key, None)
+            return None
+        return "网页登录状态暂时无法检测，请稍后重试。"
 
 
 @router.get("/api/setup/status")
@@ -124,6 +160,7 @@ def api_setup_status():
     edge_ok = bool(EDGE_PATH)
     zhihu_logged_in = os.path.exists(STORAGE_STATE_PATH)
     web_ok = _web_llm_logged_in_cached() if edge_ok else False
+    web_check_error = _web_llm_check_error() if edge_ok else None
     login_running = (_login_thread is not None and _login_thread.is_alive())
     # 登录态失效标记（2026-09-19）：cookie 还在但服务端已不认时，抓取/删除链路
     # 会把页面跳登录页的事实记下来，这里带给前端提示「重新登录知乎」。
@@ -134,12 +171,14 @@ def api_setup_status():
         "edge_ok": edge_ok,
         "llm_configured": llm_configured,
         "web_llm_logged_in": web_ok,
+        "web_llm_check_error": web_check_error,
         "web_driver": WEB_DRIVER_NAME,
         "zhihu_logged_in": zhihu_logged_in,
         "zhihu_login_stale": bool(stale.get("stale")),
         "zhihu_login_stale_reason": stale.get("reason", ""),
         "login_running": login_running,
-        "login_kind": _login_kind if login_running else "",
+        # 登录线程结束后也保留来源，前端才知道 login_error 属于哪个按钮。
+        "login_kind": _login_kind,
         "login_error": _login_error,
         "setup_needed": not (edge_ok and zhihu_logged_in
                              and (llm_configured or web_ok)),
@@ -195,7 +234,7 @@ def api_setup_test_api():
     return {"ok": True, "detail": f"连接成功：{content[:60]}"}
 
 
-def _start_login_thread(kind, flow_call, log_name):
+def _start_login_thread(kind, flow_call, log_name, web_driver=None):
     """通用登录引导：后台线程拉起可见 Edge；前端轮询 setup/status 收尾。"""
     global _login_error, _login_thread, _login_kind
     if _login_thread is not None and _login_thread.is_alive():
@@ -213,10 +252,12 @@ def _start_login_thread(kind, flow_call, log_name):
             ok, msg = flow_call()
             log.info("首启引导：%s%s", log_name, "成功" if ok else f"失败：{msg}")
             if ok and kind == "deepseek":
-                # 清缓存：登录刚完成时 setup/status 的 15s 缓存可能仍为
-                # False，不立即反映会让切换/引导误判未登录
+                # 登录刚完成时立即写入该驱动的成功事实，并清除该驱动的短时
+                # 检查异常；其它驱动的登录状态和诊断不能被连带清掉。
+                key = web_driver or _web_llm_cache_key()
                 with _web_llm_cache_lock:
-                    _web_llm_cache.clear()
+                    _web_llm_cache[key] = {"ts": time.time(), "ok": True}
+                    _web_llm_check_errors.pop(key, None)
                 runner.guide_needed = None  # 登录完成：引导标记解除
             if ok and kind == "zhihu":
                 # 登录成功即清「登录态已失效」标记：不清的话设置页/首启引导
@@ -287,7 +328,8 @@ def api_setup_web_login():
     from config import WEB_DRIVER_NAME
     from web_drivers import login_web_flow
     _start_login_thread("deepseek", login_web_flow,
-                        f"{WEB_DRIVER_NAME} 网页版登录")
+                        f"{WEB_DRIVER_NAME} 网页版登录",
+                        web_driver=WEB_DRIVER_NAME)
     return {"ok": True,
             "message": f"请在弹出的 Edge 窗口中登录 {WEB_DRIVER_NAME} 网页版，"
                        "检测到登录后自动保存并关闭"}

@@ -8,6 +8,7 @@
 import json
 import logging
 import os
+import tempfile
 import time
 
 log = logging.getLogger(__name__)
@@ -55,22 +56,39 @@ def _kill_stale_profile_processes(user_data_dir):
             return
     except Exception:              # noqa: BLE001 拿不到计数就不清理（更安全）
         return
+    # PowerShell 单引号字符串中，单引号必须成对转义；按完整
+    # --user-data-dir 参数匹配，避免 profile 前缀相同的目录被误杀。
+    profile_literal = str(user_data_dir).replace("'", "''")
     script = (
+        f"$profile = '{profile_literal}'; "
         "Get-CimInstance Win32_Process | "
-        f"Where-Object {{ $_.Name -eq 'msedge.exe' -and "
-        f"$_.CommandLine -like '*{user_data_dir}*' }} | "
+        "Where-Object { $_.Name -eq 'msedge.exe' -and "
+        "$_.CommandLine -match ('--user-data-dir=\"?' + "
+        "[regex]::Escape($profile) + '\"?([ ]|$)') } | "
         "ForEach-Object { [int]$_.ProcessId }")
     try:
         from desktop_utils import run_process_silent
         out = run_process_silent(
-            ["powershell", "-NoProfile", "-Command", script], text=True)
+            ["powershell", "-NoProfile", "-Command", script],
+            text=True, timeout=15)
+        if getattr(out, "returncode", 1) != 0:
+            log.warning("查询残留 Edge 进程失败（不执行清理）: %s",
+                        (getattr(out, "stderr", "") or "").strip())
+            return
         pids = [ln.strip() for ln in (out.stdout or "").splitlines()
                 if ln.strip().isdigit()]
         if not pids:
             return
-        log.warning("清理残留 Edge 进程（占用 profile 锁）: %s",
+        log.warning("尝试清理残留 Edge 进程（占用 profile 锁）: %s",
                     ", ".join(pids))
-        run_process_silent(["taskkill", "/F", "/PID"] + pids)
+        kill_args = ["taskkill", "/F"]
+        for pid in pids:
+            kill_args.extend(["/PID", pid])
+        killed = run_process_silent(kill_args, text=True, timeout=15)
+        if getattr(killed, "returncode", 1) != 0:
+            log.error("清理残留 Edge 进程失败（未确认释放 profile 锁）: %s",
+                      (getattr(killed, "stderr", "") or "").strip())
+            return
         time.sleep(0.8)   # 等锁释放
     except Exception as exc:
         log.debug("清理残留 Edge 进程失败(不影响启动重试): %s", exc)
@@ -98,11 +116,25 @@ class SessionMixin:
                 "浏览器正被其它任务占用（同一 profile 只能开一个实例）；"
                 "若正在跑任务或登录引导，请等它结束再试。")
         self._lease_held = True
+        self._browser_opened = False
         try:
             return self._start_locked()
         except Exception:
+            self._cleanup_failed_start()
             self._release_lease()
             raise
+
+    def _cleanup_failed_start(self):
+        """清理启动半途创建的资源；失败路径不保存登录态。"""
+        context = getattr(self, "context", None)
+        self.context = None
+        if context:
+            try:
+                context.close()
+            except Exception:
+                log.debug("启动失败时关闭浏览器上下文失败", exc_info=True)
+        self.page = None
+        self._stop_driver()
 
     def _start_locked(self):
         """真正拉起浏览器（调用方已持有 profile 租约）。"""
@@ -168,6 +200,7 @@ class SessionMixin:
         self.load_storage_state()
         from web_drivers.browser_pool import note_browser_opened
         note_browser_opened()          # 活实例 +1：清理残留进程时据此自保
+        self._browser_opened = True
         log.info("browser_adapter: 浏览器就绪（共 %.1fs）", time.time() - t0)
         return self
 
@@ -190,7 +223,9 @@ class SessionMixin:
             note_browser_closed, release_profile,
         )
         release_profile()
-        note_browser_closed()
+        if getattr(self, "_browser_opened", None) is not False:
+            note_browser_closed()
+        self._browser_opened = False
 
     def close(self):
         """关闭浏览器：先落登录态、再关上下文与驱动、最后释放 profile 租约。
@@ -235,9 +270,27 @@ class SessionMixin:
     def save_storage_state(self, path=None):
         """把当前登录态保存到本地文件（含会话 Cookie，勿提交 git）。"""
         path = path or self.storage_state
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.context.storage_state(), f, ensure_ascii=False)
+        parent = os.path.dirname(path) or "."
+        os.makedirs(parent, exist_ok=True)
+        state = self.context.storage_state()
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=parent,
+                    prefix=os.path.basename(path) + ".",
+                    suffix=".tmp", delete=False) as f:
+                temporary = f.name
+                json.dump(state, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
         log.info("browser_adapter: 登录态已保存 → %s", path)
 
     def load_storage_state(self, path=None):
@@ -254,9 +307,17 @@ class SessionMixin:
         if not os.path.exists(path):
             log.info("browser_adapter: 无登录态文件 %s，需手动登录一次", path)
             return False
-        with open(path, encoding="utf-8") as f:
-            state = json.load(f)
-        saved = state.get("cookies", []) or []
+        try:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError, TypeError) as exc:
+            log.warning("browser_adapter: 登录态文件损坏，忽略快照并使用 profile: %s", exc)
+            return False
+        if not isinstance(state, dict) or not isinstance(state.get("cookies", []), list):
+            log.warning("browser_adapter: 登录态文件结构无效，忽略快照并使用 profile")
+            return False
+        saved = [c for c in (state.get("cookies", []) or [])
+                 if isinstance(c, dict)]
         try:
             live = {(c.get("name"), c.get("domain"), c.get("path"))
                     for c in self.context.cookies()}
@@ -264,8 +325,11 @@ class SessionMixin:
             live = set()
         missing = [c for c in saved
                    if (c.get("name"), c.get("domain"), c.get("path")) not in live]
-        if missing:
-            self.context.add_cookies(missing)
+        for cookie in missing:
+            try:
+                self.context.add_cookies([cookie])
+            except Exception as exc:  # noqa: BLE001 单条损坏不阻塞启动
+                log.warning("browser_adapter: 忽略无效登录态 cookie（%s）", type(exc).__name__)
         log.info("browser_adapter: 已恢复登录态（文件 %d 条，补入 %d 条，"
                  "profile 已有的不覆盖）", len(saved), len(missing))
         return True

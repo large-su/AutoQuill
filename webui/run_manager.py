@@ -222,9 +222,17 @@ class TaskRunner:
                     from config import LLM_MODE, WEB_DRIVER_NAME
                     if LLM_MODE == "web":
                         from web_drivers import reset_driver, web_llm_logged_in
+                        from web_drivers.browser_pool import WebLoginCheckError
                         reset_driver()
                         _check_cancel()
-                        if not web_llm_logged_in():
+                        try:
+                            logged_in = web_llm_logged_in()
+                        except WebLoginCheckError as exc:
+                            _check_cancel()
+                            raise _RunTerminal(
+                                "error", f"{WEB_DRIVER_NAME} 运行前检查暂不可用：{exc}。"
+                                "可稍后重试检测，无需据此重新登录") from exc
+                        if not logged_in:
                             raise _RunTerminal(
                                 "error",
                                 f"Web 通道预检未通过（无法确认已登录{WEB_DRIVER_NAME} 网页版）。"

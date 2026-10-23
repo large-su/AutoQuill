@@ -40,7 +40,14 @@ def web_llm_logged_in():
     """当前网页版大模型是否已登录（按当前驱动分发）。"""
     try:
         return bool(_current_driver_module().web_llm_logged_in())
-    except Exception:
+    except Exception as exc:
+        # 无法启动浏览器、导航失败等只能说明本次未能判定，不能伪装成
+        # "已登出"；调用方据此避免误导用户重新登录。
+        from web_drivers.browser_pool import (
+            WebLoginCheckError, WorkflowCancelled,
+        )
+        if isinstance(exc, (WebLoginCheckError, WorkflowCancelled)):
+            raise
         return False
 
 

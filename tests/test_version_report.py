@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """tools/version_feedback_report.py 的单元测试（解析/归因/关联）。"""
 import os
+import datetime
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from tools.version_feedback_report import (join, load_snapshot_latest,
                                            norm_title, parse_logs,
@@ -70,6 +73,19 @@ class VersionLabelTest(unittest.TestCase):
 
 
 class JoinAndSnapshotTest(unittest.TestCase):
+
+    def setUp(self):
+        # Fixture events must not age out of the report window as wall time moves.
+        class FixtureDate(datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 9, 1)
+
+        clock = SimpleNamespace(date=FixtureDate, datetime=datetime.datetime,
+                                timedelta=datetime.timedelta)
+        patcher = mock.patch("tools.version_feedback_report.datetime", clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_norm_title(self):
         self.assertEqual(norm_title("有没有好看的小说推荐？..."),
