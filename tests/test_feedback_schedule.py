@@ -157,9 +157,10 @@ class FeedbackScheduleTest(unittest.TestCase):
         self.scheduler._tick()
         self.assertEqual(self.calls, [])
         self.assertEqual(self._fixed(store.load_day("2026-10-14"))["status"], planner.STATUS_PLANNED)
-        plan = store.load_plan()
-        plan["enabled"] = True
-        store.save_plan(plan)
+        # Use the actual restart entry point: flipping plan.enabled alone does
+        # not revoke a previous stop request. Only mock physical thread startup.
+        with mock.patch("automation.scheduler.threading.Thread"):
+            self.scheduler.start()
         self.scheduler._execute = lambda *a, **k: {"ok": False, "units": 0,
                                                     "status": planner.STATUS_FAILED,
                                                     "message": "网络失败", "artifacts": []}

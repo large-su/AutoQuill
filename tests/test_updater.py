@@ -73,6 +73,14 @@ class ParseReleaseTest(unittest.TestCase):
         self.assertEqual(info["digest"], SHA)          # API 自带 sha256
         self.assertIn("回滚跨线程", info["notes"])
 
+    def test_malformed_installer_size_is_reported_not_crash(self):
+        for bad_size in ("not-a-number", -1, float("inf"), float("nan")):
+            payload = dict(RELEASE_JSON)
+            payload["assets"] = [dict(RELEASE_JSON["assets"][0], size=bad_size)]
+            info = updater.parse_release(payload)
+            self.assertFalse(info["ok"])
+            self.assertIn("大小", info["error"])
+
     def test_missing_installer_is_reported_not_crash(self):
         payload = {"tag_name": "v4.9.14", "assets": []}
         info = updater.parse_release(payload)
@@ -287,9 +295,11 @@ class DownloadTest(unittest.TestCase):
         self.dest = self.tmp / "AutoQuill-Setup-9.9.9.exe"
 
     class _Resp:
-        def __init__(self, blocks, length=None, boom=False):
+        def __init__(self, blocks, length=None, boom=False, encoding=None):
             self._blocks, self._boom = blocks, boom
             self.headers = {"Content-Length": str(length or 0)}
+            if encoding:
+                self.headers["Content-Encoding"] = encoding
         def __enter__(self):
             return self
         def __exit__(self, *a):
@@ -328,6 +338,30 @@ class DownloadTest(unittest.TestCase):
                          progress=lambda r, t: seen.append((r, t)))
         self.assertEqual(seen[-1], (4, 4))
 
+    def test_gzip_content_length_is_not_treated_as_decompressed_size(self):
+        for encoding in ("gzip", "deflate", "br", "zstd"):
+            with self.subTest(encoding=encoding):
+                s = self._Session(self._Resp([b"abcdef"], length=3,
+                                              encoding=encoding))
+                got = updater.download("http://x/pkg.exe", self.dest,
+                                       session=s)
+                self.assertTrue(got["ok"])
+                self.assertEqual(self.dest.read_bytes(), b"abcdef")
+                self.dest.unlink()
+
+        response = self._Resp([b"abcdef"], length=3, encoding="identity")
+        got = updater.download("http://x/pkg.exe", self.dest,
+                               session=self._Session(response), attempts=1)
+        self.assertFalse(got["ok"])
+
+    def test_expected_size_is_authoritative_without_content_length(self):
+        response = self._Resp([b"abcdef"], length=None)
+        response.headers.pop("Content-Length")
+        got = updater.download("http://x/pkg.exe", self.dest,
+                               session=self._Session(response), expected_size=6)
+        self.assertTrue(got["ok"])
+        self.assertEqual(self.dest.read_bytes(), b"abcdef")
+
     def test_retries_then_succeeds(self):
         """真实网络教训（2026-09-29）：43MB 包一次就成功并不可靠，必须重试。"""
         calls = {"n": 0}
@@ -344,6 +378,34 @@ class DownloadTest(unittest.TestCase):
         self.assertTrue(got["ok"])
         self.assertEqual(got["attempts"], 2)
         self.assertEqual(self.dest.read_bytes(), b"ok")
+
+    def test_truncated_known_size_retries_and_does_not_replace_destination(self):
+        self.dest.write_bytes(b"old installer")
+        calls = {"n": 0}
+
+        class TruncatedThenGood:
+            def get(self, *a, **k):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return DownloadTest._Resp([b"abc"], length=6)
+                return DownloadTest._Resp([b"abcdef"], length=6)
+
+        got = updater.download("http://x/pkg.exe", self.dest,
+                               session=TruncatedThenGood(), expected_size=6,
+                               retry_wait=0)
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["attempts"], 2)
+        self.assertEqual(self.dest.read_bytes(), b"abcdef")
+
+    def test_truncated_all_attempts_preserves_destination_and_cleans_part(self):
+        self.dest.write_bytes(b"old installer")
+        s = self._Session(self._Resp([b"abc"], length=6))
+        got = updater.download("http://x/pkg.exe", self.dest,
+                               session=s, expected_size=6, attempts=2,
+                               retry_wait=0)
+        self.assertFalse(got["ok"])
+        self.assertEqual(self.dest.read_bytes(), b"old installer")
+        self.assertFalse(self.dest.with_suffix(".exe.part").exists())
 
     def test_gives_up_after_attempts_and_leaves_nothing(self):
         class DeadSession:

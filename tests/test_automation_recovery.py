@@ -1,5 +1,6 @@
 """Deterministic scheduler recovery coverage (no browser or real automation)."""
 import tempfile
+import json
 import threading
 import time
 import unittest
@@ -159,9 +160,10 @@ class SchedulerRecoveryTest(unittest.TestCase):
                "params": {}, "units": 1}
         data = {"date": day, "schedule": [job], "counters": {}, "notes": []}
         scheduler._run_job(job, day, data, store.load_plan())
-        self.assertEqual(job["status"], planner.STATUS_SKIPPED)
+        persisted = store.load_day(day)
+        self.assertEqual(persisted["schedule"][0]["status"], planner.STATUS_SKIPPED)
         self.assertEqual(scheduler._fails.get("full_chain", 0), 0)
-        self.assertEqual(len(data["schedule"]), 1)
+        self.assertEqual(len(persisted["schedule"]), 1)
 
     def test_deferred_manual_thread_restart_works_with_plan_disabled(self):
         scheduler = self._scheduler()
@@ -207,6 +209,211 @@ class SchedulerRecoveryTest(unittest.TestCase):
         result = scheduler._run_job(job, day, data, store.load_plan())
         self.assertEqual(result["status"], planner.STATUS_FAILED)
         self.assertIsNone(scheduler.status()["running"])
+
+    def test_concurrent_manual_requests_preserve_both_queue_entries(self):
+        """Two API requests must not let the later stale day snapshot erase the first.
+
+        ``run_now`` is called by the web request thread while the scheduler owns
+        another thread.  A double click (or two UI clients) can therefore enter
+        this public method concurrently.
+        """
+        plan = _plan("full_chain")
+        plan["tasks"]["publish_drafts"] = {"enabled": True, "daily_cap": 1}
+        store.save_plan(plan)
+        scheduler = self._scheduler()
+        results, errors = [], []
+
+        def request(task_type):
+            try:
+                results.append(scheduler.run_now(task_type))
+            except Exception as exc:  # keep worker failures visible to the assertion
+                errors.append(exc)
+
+        workers = [threading.Thread(target=request, args=(task_type,))
+                   for task_type in ("full_chain", "publish_drafts")]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(3)
+
+        self.assertFalse(errors)
+        self.assertTrue(all(item.get("ok") for item in results))
+        day = self.now.strftime("%Y-%m-%d")
+        manual_types = {job["type"] for job in store.load_day(day)["schedule"]
+                        if job.get("manual")}
+        self.assertEqual(manual_types, {"full_chain", "publish_drafts"})
+
+    def test_completion_merge_preserves_manual_request_queued_while_running(self):
+        """Browser work must not hold the day lock or erase a later run_now."""
+        plan = _plan("full_chain")
+        plan["tasks"]["publish_drafts"] = {"enabled": True, "daily_cap": 1}
+        store.save_plan(plan)
+        entered, release = threading.Event(), threading.Event()
+
+        def blocking_executor(job, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {"ok": True, "status": planner.STATUS_DONE,
+                    "units": 1, "message": "done"}
+
+        scheduler = AutomationScheduler(executor=blocking_executor,
+                                        now_fn=lambda: self.now)
+        day = self.now.strftime("%Y-%m-%d")
+        snapshot = planner.materialize_day(self.now, plan, {}, {})
+        running = next(job for job in snapshot["schedule"]
+                       if job["type"] == "full_chain")
+        worker = threading.Thread(target=scheduler._run_job,
+                                  args=(running, day, snapshot, plan))
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        queued = scheduler.run_now("publish_drafts")
+        self.assertTrue(queued["ok"])
+        # pause/stop inspect only live state and must not wait for the executor.
+        self.assertTrue(scheduler.pause("test")["paused"])
+        scheduler.stop(cancel_running=False)
+        release.set()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        persisted = {job["type"]: job for job in store.load_day(day)["schedule"]}
+        self.assertEqual(persisted["full_chain"]["status"], planner.STATUS_DONE)
+        self.assertTrue(persisted["publish_drafts"].get("manual"))
+
+    def test_non_object_day_json_falls_back_without_overwriting_source(self):
+        """A valid JSON null/list is still invalid scheduler state, not a crash."""
+        day = self.now.strftime("%Y-%m-%d")
+        path = store.day_file(day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for raw in (None, [], {"schedule": None}, {"schedule": [None]},
+                    {"counters": []}, {"notes": {}}):
+            with self.subTest(raw=raw):
+                source = json.dumps(raw)
+                path.write_text(source, encoding="utf-8")
+                data = store.load_day(day)
+                self.assertEqual(data["date"], day)
+                self.assertEqual(data["schedule"], [])
+                self.assertEqual(path.read_text(encoding="utf-8"), source)
+
+    def test_tick_planning_cannot_erase_manual_request(self):
+        self.now = self.now.replace(hour=7)
+        plan = _plan("full_chain")
+        plan["tasks"]["publish_drafts"] = {"enabled": True, "daily_cap": 1}
+        store.save_plan(plan)
+        scheduler = self._scheduler()
+        entered, release, requested = threading.Event(), threading.Event(), threading.Event()
+        materialize = planner.materialize_day
+        failures = []
+
+        def blocked(now, plan, day_data, counts):
+            if threading.current_thread().name == "health-tick":
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test did not release planning")
+            return materialize(now, plan, day_data, counts)
+
+        def request():
+            requested.set()
+            try:
+                scheduler.run_now("publish_drafts")
+            except Exception as exc:
+                failures.append(exc)
+
+        with mock.patch.object(planner, "materialize_day", side_effect=blocked):
+            tick = threading.Thread(target=scheduler._tick, name="health-tick")
+            tick.start()
+            manual = threading.Thread(target=request)
+            try:
+                self.assertTrue(entered.wait(1))
+                manual.start()
+                self.assertTrue(requested.wait(1))
+                # Give the request a chance to collide with the paused planner.
+                manual.join(0.05)
+            finally:
+                release.set()
+                tick.join(3)
+                if manual.ident is not None:
+                    manual.join(3)
+            self.assertFalse(tick.is_alive())
+            self.assertFalse(manual.is_alive())
+        self.assertFalse(failures)
+        jobs = store.load_day(self.now.date().isoformat())["schedule"]
+        self.assertTrue(next(j for j in jobs if j["type"] == "publish_drafts").get("manual"))
+
+    def test_start_keeps_request_queued_after_job_selection(self):
+        plan = _plan("full_chain")
+        plan["tasks"]["publish_drafts"] = {"enabled": True, "daily_cap": 1}
+        store.save_plan(plan)
+        day = self.now.date().isoformat()
+        selected_snapshot = planner.materialize_day(self.now, plan, {}, {})
+        store.save_day(day, selected_snapshot)
+        selected_job = next(j for j in selected_snapshot["schedule"] if j["type"] == "full_chain")
+        scheduler = self._scheduler({"ok": True, "units": 1, "status": planner.STATUS_DONE})
+        self.assertTrue(scheduler.run_now("publish_drafts")["ok"])
+        scheduler._run_job(selected_job, day, selected_snapshot, plan)
+        jobs = store.load_day(day)["schedule"]
+        self.assertTrue(next(j for j in jobs if j["type"] == "publish_drafts").get("manual"))
+
+    def test_pause_after_selection_does_not_start_executor(self):
+        scheduler = self._scheduler()
+        scheduler._execute = mock.Mock()
+        day = self.now.date().isoformat()
+        plan = store.load_plan()
+        data = planner.materialize_day(self.now, plan, {}, {})
+        store.save_day(day, data)
+        scheduler.pause("manual")
+        scheduler._run_job(data["schedule"][0], day, data, plan)
+        scheduler._execute.assert_not_called()
+        self.assertEqual(store.load_day(day)["schedule"][0]["status"], planner.STATUS_PLANNED)
+
+    def test_completion_keeps_breakers_cleared_during_execution(self):
+        day = self.now.date().isoformat()
+        plan = store.load_plan()
+        data = planner.materialize_day(self.now, plan, {}, {})
+        job = data["schedule"][0]
+        data["circuit_breakers"] = {"reply_comments": {
+            "until": (self.now + timedelta(hours=1)).isoformat(),
+            "last_failed_job": {"type": "reply_comments", "key": "other"}}}
+        scheduler = self._scheduler()
+
+        def execute(*args, **kwargs):
+            scheduler.resume()
+            self.assertNotIn("circuit_breakers", store.load_day(day))
+            return {"ok": True, "units": 1, "status": planner.STATUS_DONE}
+
+        scheduler._execute = execute
+        scheduler._run_job(job, day, data, plan)
+        final = store.load_day(day)
+        self.assertNotIn("circuit_breakers", final)
+        keys = [j["key"] for j in final["schedule"]]
+        self.assertEqual(len(keys), len(set(keys)))
+
+    def test_parallel_day_writes_commit_each_writers_own_payload(self):
+        day = self.now.date().isoformat()
+        barrier = threading.Barrier(2)
+        original_replace = store.os.replace
+        writes = []
+        seen = set()
+
+        def replace(source, destination):
+            name = threading.current_thread().name
+            if name not in seen:
+                seen.add(name)
+                barrier.wait(timeout=3)
+            payload = json.loads(Path(source).read_text(encoding="utf-8"))
+            writes.append((name, payload["writer"]))
+            return original_replace(source, destination)
+
+        with mock.patch.object(store.os, "replace", side_effect=replace):
+            workers = [threading.Thread(name=name, target=store.save_day,
+                        args=(day, {"writer": name, "schedule": []}))
+                       for name in ("writer-a", "writer-b")]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+        self.assertEqual({a for a, b in writes}, {"writer-a", "writer-b"})
+        self.assertTrue(all(a == b for a, b in writes), writes)
+        self.assertEqual(list(store.day_file(day).parent.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

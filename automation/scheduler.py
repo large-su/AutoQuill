@@ -10,6 +10,7 @@
   - **续做**：再次 start 时按台账统计「今天已发布/已写多少」，只补差额。
 """
 
+import copy
 import hashlib
 import json
 import logging
@@ -51,6 +52,10 @@ class AutomationScheduler:
         self._restart_requested = False
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
+        # Day snapshots are shared by the tick thread and web requests.  This
+        # lock protects short read-modify-write transactions only; never hold it
+        # while an executor/browser job is running.
+        self._day_mutation_lock = threading.RLock()
         self._paused = False
         self._pause_reason = ""
         self._running_job = None
@@ -194,7 +199,7 @@ class AutomationScheduler:
                     self._start_thread_locked()
             log.info("自动化调度器已退出%s", "；已按新的开始请求恢复" if restart else "")
 
-    def _tick_manual_only(self, now, plan):
+    def _prepare_manual_job(self, now, plan):
         """未开启时的 tick：只执行用户手动排进来的作业。
 
         不做自动排班/补做/时段收尾——那些语义属于「已开启」。线上坑
@@ -216,14 +221,21 @@ class AutomationScheduler:
             from webui.browser_tasks import browser_busy
             if browser_busy():
                 return                     # 手动任务优先，等它跑完再派活
-        self._run_job(due[0], day, day_data, plan)
+        return due[0], day, day_data, plan
 
     def _tick(self):
+        # Only planning touches the shared day transaction. Browser execution
+        # stays outside this lock so run_now/resume/stop remain responsive.
+        with self._day_mutation_lock:
+            selected = self._prepare_tick()
+        if selected:
+            self._run_job(*selected)
+
+    def _prepare_tick(self):
         now = self._now()
         plan = store.load_plan()
         if not plan.get("enabled"):
-            self._tick_manual_only(now, plan)
-            return
+            return self._prepare_manual_job(now, plan)
         with self._lock:
             if self._paused or self._running_job:
                 return
@@ -266,7 +278,7 @@ class AutomationScheduler:
         due = [j for j in due
                if not self._circuit_open(j.get("type"), day_data, now)]
         if due:
-            self._run_job(due[0], day, day_data, plan)
+            return due[0], day, day_data, plan
 
     def _recover_interrupted_feedback_refresh(self, now, plan, day, day_data):
         """把上次进程中断的当日反馈刷新恢复为同一条待确认作业。
@@ -374,6 +386,26 @@ class AutomationScheduler:
             store.save_day(day, day_data)
             self._last_day_hash = key
 
+    def _current_day_job(self, day, day_data, job, *, finished=False):
+        """Bind one job to the newest day under _day_mutation_lock.
+
+        The executor owns its result fields; queued jobs and plan/breaker state
+        belong to the latest persisted snapshot, never the execution snapshot.
+        """
+        current = (store.load_day(day) if store.day_file(day).exists()
+                   else copy.deepcopy(day_data))
+        schedule = current.setdefault("schedule", [])
+        current_job = next((item for item in schedule
+                            if item.get("key") == job.get("key")), None)
+        if current_job is None:
+            current_job = dict(job)
+            schedule.append(current_job)
+        elif finished:
+            for key in ("status", "started_at", "finished_at", "note", "planned_at"):
+                if key in job:
+                    current_job[key] = job[key]
+        return current, current_job
+
     def _should_stop(self):
         return self._stop_event.is_set()
 
@@ -458,6 +490,10 @@ class AutomationScheduler:
 
     def _clear_circuit_breakers(self, day, task_type=""):
         """用户显式开始/继续/立即执行时允许当前类型提前重试。"""
+        with self._day_mutation_lock:
+            return self._clear_circuit_breakers_locked(day, task_type)
+
+    def _clear_circuit_breakers_locked(self, day, task_type=""):
         day_data = store.load_day(day)
         breakers = self._breaker_records(day_data)
         selected = {}
@@ -504,7 +540,9 @@ class AutomationScheduler:
             job["status"] = STATUS_FAILED
             job["finished_at"] = self._now().strftime("%Y-%m-%dT%H:%M:%S")
             try:
-                self._save_day_if_changed(day, day_data)
+                with self._day_mutation_lock:
+                    current, _ = self._current_day_job(day, day_data, job, finished=True)
+                    self._save_day_if_changed(day, current)
             except Exception:          # noqa: BLE001
                 log.exception("自动化故障状态写入失败：%s", job.get("key"))
             return {"ok": False, "units": 0, "status": STATUS_FAILED,
@@ -516,16 +554,22 @@ class AutomationScheduler:
 
     def _run_job_impl(self, job, day, day_data, plan):
         started = self._now()
-        job["status"] = STATUS_RUNNING
-        job["started_at"] = started.strftime("%Y-%m-%dT%H:%M:%S")
-        with self._lock:
-            self._running_job = dict(job)
-            self._run_progress = {"text": "启动…", "pct": None}
-        self._save_day_if_changed(day, day_data)
-        store.append_ledger({"day": day, "key": job["key"], "type": job["type"],
-                             "status": STATUS_RUNNING,
-                             "planned_at": job.get("planned_at"),
-                             "started_at": job["started_at"]})
+        with self._day_mutation_lock:
+            with self._lock:
+                if self._paused or self._stop_event.is_set():
+                    return {"ok": False, "status": STATUS_PLANNED, "units": 0,
+                            "message": "调度已暂停或停止，保留待执行作业"}
+            day_data, job = self._current_day_job(day, day_data, job)
+            job["status"] = STATUS_RUNNING
+            job["started_at"] = started.strftime("%Y-%m-%dT%H:%M:%S")
+            with self._lock:
+                self._running_job = dict(job)
+                self._run_progress = {"text": "启动…", "pct": None}
+            self._save_day_if_changed(day, day_data)
+            store.append_ledger({"day": day, "key": job["key"], "type": job["type"],
+                                 "status": STATUS_RUNNING,
+                                 "planned_at": job.get("planned_at"),
+                                 "started_at": job["started_at"]})
         log.info("自动化执行：%s（计划 %s）", job["type"],
                  (job.get("planned_at") or "")[11:16])
         result = None
@@ -562,51 +606,53 @@ class AutomationScheduler:
             result = {"ok": False, "units": 0, "status": STATUS_FAILED,
                       "message": str(exc), "artifacts": []}
         try:
-            if not isinstance(result, dict):
-                raise TypeError("执行器未返回结果字典")
-            finished = self._now()
-            job["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
-            final_status = result.get("status") or (STATUS_DONE if result.get("ok")
-                                                   else STATUS_FAILED)
-            if job["status"] not in (STATUS_PLANNED, STATUS_NEEDS_HUMAN):
-                job["status"] = final_status
-            if final_status == STATUS_PLANNED:      # 排队顺延：保留原因，等下一轮
-                job["note"] = ((job.get("note") or "") + " "
-                               + (result.get("message") or ""))[:200]
-            else:
-                job["note"] = (result.get("message") or job.get("note") or "")[:200]
-            store.append_ledger({
-                "day": day, "key": job["key"], "type": job["type"],
-                "status": job["status"], "planned_at": job.get("planned_at"),
-                "started_at": job["started_at"], "finished_at": job["finished_at"],
-                "units": int(result.get("units") or 0),
-                "message": result.get("message") or "",
-                "artifacts": result.get("artifacts") or [],
-                "dry_run": bool(job.get("dry_run")),
-            })
-            self._ledgered_keys.add(job.get("key") or "")
-            before = self._fails.get(job["type"], 0)
-            # 实际取消应是 skipped，既不累积失败，也绝不安排补位。
-            if result.get("retry_without_failure"):
-                self._fails[job["type"]] = 0
-                before = 0
-            else:
-                self._update_failures(job["type"], job["status"], plan, day_data, day, job)
-            # 失败补位只能在熔断尚未开启时创建，不能绕过冷却窗口。
-            if (job["status"] == STATUS_FAILED and before + 1 < CIRCUIT_BREAK_AFTER
-                    and not self._circuit_open(job["type"], day_data, self._now())
-                    and planner.plan_retry(self._now(), plan, day_data, job,
-                                           RETRY_DELAY_MINUTES)):
-                self._push_notice("info", "%s 失败，已安排 %d 分钟后补位一次"
-                                  % (job["type"], RETRY_DELAY_MINUTES))
-            self._save_day_if_changed(day, day_data)
-            if job["status"] == STATUS_DONE:
-                self._push_notice("info", "%s 完成：%s" % (job["type"],
-                                  (result.get("message") or "")[:80]))
-            elif job["status"] == STATUS_FAILED:
-                self._push_notice("warn", "%s 失败：%s" % (job["type"],
-                                  (result.get("message") or "")[:80]))
-            return result
+            with self._day_mutation_lock:
+                day_data, job = self._current_day_job(day, day_data, job, finished=True)
+                if not isinstance(result, dict):
+                    raise TypeError("执行器未返回结果字典")
+                finished = self._now()
+                job["finished_at"] = finished.strftime("%Y-%m-%dT%H:%M:%S")
+                final_status = result.get("status") or (STATUS_DONE if result.get("ok")
+                                                       else STATUS_FAILED)
+                if job["status"] not in (STATUS_PLANNED, STATUS_NEEDS_HUMAN):
+                    job["status"] = final_status
+                if final_status == STATUS_PLANNED:      # 排队顺延：保留原因，等下一轮
+                    job["note"] = ((job.get("note") or "") + " "
+                                   + (result.get("message") or ""))[:200]
+                else:
+                    job["note"] = (result.get("message") or job.get("note") or "")[:200]
+                store.append_ledger({
+                    "day": day, "key": job["key"], "type": job["type"],
+                    "status": job["status"], "planned_at": job.get("planned_at"),
+                    "started_at": job["started_at"], "finished_at": job["finished_at"],
+                    "units": int(result.get("units") or 0),
+                    "message": result.get("message") or "",
+                    "artifacts": result.get("artifacts") or [],
+                    "dry_run": bool(job.get("dry_run")),
+                })
+                self._ledgered_keys.add(job.get("key") or "")
+                before = self._fails.get(job["type"], 0)
+                # 实际取消应是 skipped，既不累积失败，也绝不安排补位。
+                if result.get("retry_without_failure"):
+                    self._fails[job["type"]] = 0
+                    before = 0
+                else:
+                    self._update_failures(job["type"], job["status"], plan, day_data, day, job)
+                # 失败补位只能在熔断尚未开启时创建，不能绕过冷却窗口。
+                if (job["status"] == STATUS_FAILED and before + 1 < CIRCUIT_BREAK_AFTER
+                        and not self._circuit_open(job["type"], day_data, self._now())
+                        and planner.plan_retry(self._now(), plan, day_data, job,
+                                               RETRY_DELAY_MINUTES)):
+                    self._push_notice("info", "%s 失败，已安排 %d 分钟后补位一次"
+                                      % (job["type"], RETRY_DELAY_MINUTES))
+                self._save_day_if_changed(day, day_data)
+                if job["status"] == STATUS_DONE:
+                    self._push_notice("info", "%s 完成：%s" % (job["type"],
+                                      (result.get("message") or "")[:80]))
+                elif job["status"] == STATUS_FAILED:
+                    self._push_notice("warn", "%s 失败：%s" % (job["type"],
+                                      (result.get("message") or "")[:80]))
+                return result
         except Exception as exc:       # noqa: BLE001
             # 收尾也必须释放 busy 状态；否则一次异常会永久阻塞后续调度。
             log.exception("自动化作业收尾异常：%s", job.get("key"))
@@ -614,7 +660,9 @@ class AutomationScheduler:
             job["finished_at"] = self._now().strftime("%Y-%m-%dT%H:%M:%S")
             safe_result = {"ok": False, "units": 0, "status": STATUS_FAILED,
                            "message": "调度收尾异常：%s" % exc, "artifacts": []}
-            self._save_day_if_changed(day, day_data)
+            with self._day_mutation_lock:
+                current, _ = self._current_day_job(day, day_data, job, finished=True)
+                self._save_day_if_changed(day, current)
             return safe_result
         finally:
             with self._lock:
@@ -659,6 +707,13 @@ class AutomationScheduler:
         dry_run=True → 只演练（当前仅发布草稿支持：不点发布按钮），
         用于用户首次验证链路，避免不可逆动作。
         """
+        # A manual request reads, changes and saves one day snapshot.  Serialise
+        # that short transaction without blocking stop/progress or browser work.
+        with self._day_mutation_lock:
+            return self._run_now_locked(task_type, dry_run)
+
+    def _run_now_locked(self, task_type="", dry_run=False):
+        """Implementation of run_now; caller holds _day_mutation_lock."""
         now = self._now()
         day = now.strftime("%Y-%m-%d")
         if task_type:

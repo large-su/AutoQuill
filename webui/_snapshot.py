@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
@@ -50,12 +52,26 @@ def prune_rows(data_dir: Path, pattern: str, key: str, values) -> int:
     removed = len(rows) - len(keep)
     if removed <= 0:
         return 0
+    tmp = None
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        # 写入失败时保留原快照；直接截断原文件会使下一次读取丢失所有行。
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=path.parent, suffix=".tmp",
+                                         delete=False) as f:
+            tmp = Path(f.name)
             json.dump(keep, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except Exception as exc:      # noqa: BLE001
         log.warning("快照写回失败（本地剔除未生效）：%s", exc)
         return 0
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
     log.info("快照本地剔除 %d 行（%s，主键 %s）", removed, path.name, key)
     return removed
 
@@ -92,6 +108,9 @@ def load_snapshot(data_dir: Path, pattern: str,
         except Exception as exc:
             log.warning("快照读取失败 %s：%s", path.name, exc)
             continue
+        if not isinstance(raw, list):
+            log.warning("快照格式无效 %s：根节点必须是数组", path.name)
+            continue
         rows = []
         for r in raw:
             if not isinstance(r, dict) or not any(r.get(k) for k in id_keys):
@@ -102,20 +121,25 @@ def load_snapshot(data_dir: Path, pattern: str,
                 continue
             if row:
                 rows.append(row)
-        loaded.append((path, rows))
+        try:
+            score = quality_of(rows)
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("快照字段无效 %s：%s", path.name, exc)
+            continue
+        loaded.append((path, rows, score))
     if not loaded:
         return {"rows": [], "total": 0, "generated_at": None, "source_file": None}
 
     best = loaded[0]
     if len(loaded) > 1:
-        scores = [quality_of(rows) for _, rows in loaded]
+        scores = [score for _, _, score in loaded]
         threshold = max(scores) * minimal_ratio
-        for path, rows in loaded:
-            if quality_of(rows) >= threshold:
-                best = (path, rows)
+        for path, rows, score in loaded:
+            if score >= threshold:
+                best = (path, rows, score)
                 break
 
-    path, rows = best
+    path, rows, _ = best
     return {
         "rows": rows,
         "total": len(rows),

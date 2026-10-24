@@ -925,21 +925,22 @@
     {
       "version": "5.5.0",
       "tag": "v5.5.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "3845c2342da5318dd3272f4f225711dc6016097d",
+      "source_commit": "3845c2342da5318dd3272f4f225711dc6016097d",
       "parent": "d774b1fe7c957d50584d2ce947b001b3dbd71b15",
       "date": "2026-10-24",
       "summary": "v5.5.0: 让故事结构服从题意并建立新一轮效果基线",
       "summaries": [
         "v5.5.0: 让故事结构服从题意并建立新一轮效果基线"
       ],
-      "changed_file_count": 17,
+      "changed_file_count": 18,
       "changed_files": [
         "CHANGELOG.md",
         "README.md",
         "applications/zhihu_story/prompts.py",
         "config/story.py",
         "core/evolution.py",
+        "core/evolution_history.json",
         "core/version.py",
         "docs/FEEDBACK-OBSERVATIONS.md",
         "docs/GROWTH-EXPERIMENTS.md",
@@ -959,6 +960,43 @@
         "config/story.py",
         "story_prompt.py"
       ],
+      "writing_code_id": "e22a0771f2ca10d4199395d7ecea19615fb0ef8d0a90f4eb8cb28b6b9030c7e0",
+      "provenance": "git-tag"
+    },
+    {
+      "version": "5.5.1",
+      "tag": "v5.5.1",
+      "commit": null,
+      "source_commit": null,
+      "parent": "3845c2342da5318dd3272f4f225711dc6016097d",
+      "date": "2026-10-24",
+      "summary": "v5.5.1: 修复全面体检发现的调度状态竞争与数据、日志和下载容错问题",
+      "summaries": [
+        "v5.5.1: 修复全面体检发现的调度状态竞争与数据、日志和下载容错问题"
+      ],
+      "changed_file_count": 18,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "automation/scheduler.py",
+        "automation/store.py",
+        "core/evolution_history.json",
+        "core/updater.py",
+        "core/version.py",
+        "installer/AutoQuill.iss",
+        "tests/test_automation_core.py",
+        "tests/test_automation_recovery.py",
+        "tests/test_feedback_schedule.py",
+        "tests/test_log_streams.py",
+        "tests/test_snapshot_resilience.py",
+        "tests/test_updater.py",
+        "tools/auto_test.py",
+        "webui/_snapshot.py",
+        "webui/api_runs.py",
+        "webui/log_capture.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
       "writing_code_id": "e22a0771f2ca10d4199395d7ecea19615fb0ef8d0a90f4eb8cb28b6b9030c7e0",
       "provenance": "working-tree",
       "pending": true

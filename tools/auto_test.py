@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -122,10 +123,18 @@ def test_frontend(port):
         "srv.run(host='127.0.0.1', port=%d)\n" % (
             root_esc, port, port, port, port, port))
     boot.close()
-    server_log = Path(tempfile.mkdtemp(prefix="aq_uitest_")) / "server.log"
+    test_root = Path(tempfile.mkdtemp(prefix="aq_uitest_"))
+    server_log = test_root / "server.log"
+    # The test server starts the real scheduler. Give it a fresh data directory
+    # even when the caller has enabled automation in their source installation.
+    private_data = test_root / "data"
+    (private_data / "config").mkdir(parents=True)
+    shutil.copy2(ROOT / "config" / "llm_providers.example.json",
+                 private_data / "config" / "llm_providers.json")
+    env = dict(os.environ, AQ_DATA_DIR=str(private_data))
     proc = subprocess.Popen(
         [sys.executable, boot.name], cwd=str(ROOT),
-        stdout=open(server_log, "ab"), stderr=subprocess.STDOUT)
+        stdout=open(server_log, "ab"), stderr=subprocess.STDOUT, env=env)
     try:
         if not _wait_http("http://127.0.0.1:%d/" % port):
             check("前端 UI 回归", False, "测试服务启动失败")
@@ -278,8 +287,8 @@ def test_frontend(port):
             check("首页加载", "AutoQuill" in pg.title())
             check("样式生效", "rgb(11, 14, 20)" in pg.evaluate("() => getComputedStyle(document.body).backgroundColor"))
             modes = pg.evaluate("() => Array.from(document.querySelectorAll('#leftModeSel option')).map(o => o.text)")
-            check("五大模式",
-                  modes == ["工作台", "作者蒸馏", "已发布内容看板", "草稿箱素材", "自动化"],
+            check("六个功能入口",
+                  modes == ["工作台", "作者蒸馏", "已发布内容看板", "演进记录", "草稿箱素材", "自动化"],
                   json.dumps(modes, ensure_ascii=False))
 
             pg.click("#btnSetup"); pg.wait_for_timeout(600)

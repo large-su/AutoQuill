@@ -9,6 +9,7 @@
 """
 import tempfile
 import shutil
+import json
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -136,12 +137,21 @@ class StoreAtomicWriteTest(unittest.TestCase):
         self.assertIn("ok", target.read_text(encoding="utf-8"))
         self.assertGreaterEqual(calls["n"], 2)
 
-    def test_temp_name_is_process_unique(self):
-        """临时文件名必须带 pid：固定名就是撞锁的根因。"""
-        import inspect
-        src = inspect.getsource(store._atomic_write)
-        self.assertIn("getpid()", src)
-        self.assertNotIn('suffix + ".tmp"', src)
+    def test_temp_name_is_unique_per_write(self):
+        """同一进程的连续写入也不能复用临时文件名。"""
+        target = self.tmp / "day.json"
+        replace = store.os.replace
+        names = []
+
+        def record(source, destination):
+            names.append(source)
+            return replace(source, destination)
+
+        with mock.patch.object(store.os, "replace", side_effect=record):
+            store._atomic_write(target, '{"value": 1}')
+            store._atomic_write(target, '{"value": 2}')
+        self.assertEqual(len(set(names)), 2)
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["value"], 2)
 
     def test_write_never_raises_on_failure(self):
         """写盘失败只告警不抛：当日排班丢了能重建，不该让自动化崩掉。"""

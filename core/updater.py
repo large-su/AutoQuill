@@ -119,8 +119,18 @@ def parse_release(payload):
         if not url:
             continue
         if name == want:
+            try:
+                size = int(a.get("size") or 0)
+            except (TypeError, ValueError, OverflowError):
+                return {"ok": False, "version": version,
+                        "page_url": payload.get("html_url") or "",
+                        "error": "安装包资产大小格式异常"}
+            if size < 0:
+                return {"ok": False, "version": version,
+                        "page_url": payload.get("html_url") or "",
+                        "error": "安装包资产大小格式异常"}
             installer = {"name": name, "url": url,
-                         "size": int(a.get("size") or 0),
+                         "size": size,
                          "digest": parse_digest(a.get("digest"))}
         elif name == want_sha:
             sha_asset = {"name": name, "url": url}
@@ -213,7 +223,17 @@ def download(url, dest, *, progress=None, timeout=(30, 60),
             with getter(url, stream=True, timeout=timeout,
                         headers={"User-Agent": "AutoQuill"}) as r:
                 r.raise_for_status()
-                total = int(r.headers.get("Content-Length") or expected_size or 0)
+                headers = getattr(r, "headers", {}) or {}
+                try:
+                    content_length = int(headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    content_length = 0
+                encoding = str(headers.get("Content-Encoding") or "").lower()
+                # requests yields decompressed bytes for gzip responses, so its
+                # Content-Length describes the wire payload, not written bytes.
+                known_size = int(expected_size or 0) or (
+                    content_length if encoding in ("", "identity") else 0)
+                total = known_size
                 with open(part, "wb") as f:
                     for block in r.iter_content(chunk_size=chunk):
                         if not block:
@@ -225,6 +245,9 @@ def download(url, dest, *, progress=None, timeout=(30, 60),
                                 progress(written, total)
                             except Exception:   # noqa: BLE001
                                 pass
+                if known_size and written != known_size:
+                    raise IOError("下载大小不完整：收到 %d 字节，期望 %d 字节" %
+                                  (written, known_size))
             os.replace(part, dest)
             return {"ok": True, "bytes": written, "path": str(dest),
                     "error": None, "attempts": attempt}

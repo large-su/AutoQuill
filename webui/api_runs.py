@@ -4,6 +4,7 @@
 # 行为守护：tests/test_webui_server 全量端点断言。
 # ============================================================
 
+import asyncio
 import json
 import logging
 import os
@@ -80,27 +81,30 @@ def api_logs_latest(lines: int = 100):
 
 
 @router.get("/api/events")
-def api_events():
+def api_events(request: Request = None):
     """SSE 流：日志行 + 状态事件。断开自动清理。"""
 
-    def event_stream():
+    async def event_stream():
+        q = log_capture.subscribe()
         last_state = None
         try:
             while True:
+                if request is not None and await request.is_disconnected():
+                    break
                 if runner.state != last_state:
                     yield _sse("state", {"state": runner.state,
                                          "message": runner.message,
                                          "guide_needed": runner.guide_needed})
                     last_state = runner.state
-                for line in log_capture.drain():
+                for line in log_capture.drain(q):
                     parsed = log_capture.parse_line(line)
                     if parsed:
                         ev, payload = parsed
                         payload["raw"] = line
                         yield _sse(ev, payload)
-                time.sleep(0.3)
-        except Exception:
-            return
+                await asyncio.sleep(0.3)
+        finally:
+            log_capture.unsubscribe(q)
 
     return StreamingResponse(event_stream(),
                              media_type="text/event-stream",

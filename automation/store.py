@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def day_file(day: str) -> Path:
 def _atomic_write(path: Path, text: str, attempts: int = 3):
     """原子写：先写临时文件再替换；Windows 上偶发被句柄/杀软占用 → 退避重试。
 
-    ★ 临时文件必须用**进程唯一名**（2026-09-29 全量测试抓到）：
+    ★ 临时文件必须用每次写入唯一名（同进程的多个线程也可能并发）：
       固定名 `.tmp` 在「同一进程内两次写同一文件」或「两个进程同时写」时会撞锁，
       直接 `PermissionError` 把当日排班写丢。这是同一类问题的第三处
       （另两处在 core/progress.py 与 core/update_stage.py，已一并统一）。
@@ -51,7 +52,7 @@ def _atomic_write(path: Path, text: str, attempts: int = 3):
     """
     import time as _time
     for attempt in range(max(1, attempts)):
-        tmp = path.with_suffix("%s.%d.%d.tmp" % (path.suffix, os.getpid(), attempt))
+        tmp = path.with_suffix("%s.%s.tmp" % (path.suffix, uuid.uuid4().hex))
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(text)
@@ -104,6 +105,14 @@ def load_day(day: str) -> dict:
         log.warning("当日排班读取失败，按空骨架处理：%s", exc)
         return {"date": day, "plan_hash": "", "schedule": [], "counters": {},
                 "rescheduled": 0, "notes": ["读取失败：" + str(exc)]}
+    if (not isinstance(data, dict)
+            or not isinstance(data.get("schedule", []), list)
+            or not all(isinstance(job, dict) for job in data.get("schedule", []))
+            or not isinstance(data.get("counters", {}), dict)
+            or not isinstance(data.get("notes", []), list)):
+        log.warning("当日排班字段类型无效，按空骨架处理：%s", path.name)
+        return {"date": day, "plan_hash": "", "schedule": [], "counters": {},
+                "rescheduled": 0, "notes": ["读取失败：排班字段类型无效"]}
     data.setdefault("schedule", [])
     data.setdefault("counters", {})
     data.setdefault("notes", [])

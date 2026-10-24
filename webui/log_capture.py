@@ -18,8 +18,38 @@
 import logging
 import queue
 import re
+import threading
 
-_QUEUE = queue.Queue()
+MAX_PENDING_LINES = 2000
+_QUEUE = queue.Queue(maxsize=MAX_PENDING_LINES)
+_SUBSCRIBERS = set()
+_SUBSCRIBERS_LOCK = threading.Lock()
+
+
+def _put_latest(q, line):
+    """Keep recent UI logs without blocking a workflow or growing indefinitely."""
+    while True:
+        try:
+            q.put_nowait(line)
+            return
+        except queue.Full:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+
+
+def subscribe():
+    """Each open console owns its live queue; history is read from the log file."""
+    q = queue.Queue(maxsize=MAX_PENDING_LINES)
+    with _SUBSCRIBERS_LOCK:
+        _SUBSCRIBERS.add(q)
+    return q
+
+
+def unsubscribe(q):
+    with _SUBSCRIBERS_LOCK:
+        _SUBSCRIBERS.discard(q)
 
 _FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
@@ -46,12 +76,17 @@ class CaptureHandler(logging.Handler):
 
     def __init__(self, q=None):
         super().__init__(level=logging.INFO)
-        self._queue = q or _QUEUE
+        self._queue = q if q is not None else _QUEUE
+        self._broadcast = q is None
 
     def emit(self, record):
         try:
             line = self.format(record)
-            self._queue.put_nowait(line)
+            _put_latest(self._queue, line)
+            if self._broadcast:
+                with _SUBSCRIBERS_LOCK:
+                    for q in _SUBSCRIBERS:
+                        _put_latest(q, line)
         except Exception:
             pass
 
