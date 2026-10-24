@@ -604,9 +604,18 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     返回：(user_message, mode_str)
     """
-    from applications.zhihu_story.prompts import STORY_SYSTEM_PROMPT
+    from applications.zhihu_story.prompts import (
+        READER_CONTRACT_STORY_RECIPE_PROMPT,
+        READER_CONTRACT_STORY_SYSTEM_PROMPT,
+        STORY_RECIPE_PROMPT,
+        STORY_SYSTEM_PROMPT,
+    )
+    from config.story import READER_CONTRACT_ENABLE, STORY_MATERIAL_MODE
 
-    from config.story import STORY_MATERIAL_MODE
+    system_template = (READER_CONTRACT_STORY_SYSTEM_PROMPT
+                       if READER_CONTRACT_ENABLE else STORY_SYSTEM_PROMPT)
+    recipe_template = (READER_CONTRACT_STORY_RECIPE_PROMPT
+                       if READER_CONTRACT_ENABLE else STORY_RECIPE_PROMPT)
 
     # 预先格式化 meta 节（占位符注入 + 追加节 两种路径共用）
     _meta_text_for_placeholder = ""  # 填进 {meta_knowledge} 占位符的完整文本
@@ -673,11 +682,10 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     # === 模式1：纯配方 ===
     if STORY_MATERIAL_MODE == "recipe" and recipe:
-        from applications.zhihu_story.prompts import STORY_RECIPE_PROMPT
-        recipe_prompt = _format_recipe(STORY_RECIPE_PROMPT, recipe,
+        recipe_prompt = _format_recipe(recipe_template, recipe,
                                        reference_section="")
         recipe_prompt, injected = _maybe_append_meta(
-            recipe_prompt, STORY_RECIPE_PROMPT
+            recipe_prompt, recipe_template
         )
         user_message = f"{recipe_prompt}\n\n请为以下知乎问题创作一个全新的故事：\n\n{question_title}"
         meta_tag = " +心法" if injected else ""
@@ -685,7 +693,6 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     # === 模式2：配方 + 参考文章 ===
     elif STORY_MATERIAL_MODE == "recipe_and_reference" and recipe:
-        from applications.zhihu_story.prompts import STORY_RECIPE_PROMPT
         ref_section = (
             "\n## 参考文章\n\n"
             "以下\"高赞文章\"重点学习其\"开头引入\"的手法与风格（第一句如何抛钩子、"
@@ -693,10 +700,10 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
             "注意：必须是全新构思的故事，情节设定必须完全避开参考文章！"
             "绝不允许搬运任何情节或角色！\n"
         )
-        recipe_prompt = _format_recipe(STORY_RECIPE_PROMPT, recipe,
+        recipe_prompt = _format_recipe(recipe_template, recipe,
                                        reference_section=ref_section)
         recipe_prompt, injected = _maybe_append_meta(
-            recipe_prompt, STORY_RECIPE_PROMPT
+            recipe_prompt, recipe_template
         )
         user_message = f"""{recipe_prompt}
 
@@ -716,7 +723,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         from core.story_text import sample_reference_sections
         sample = sample_reference_sections(reference_answer) \
             if reference_answer else ""
-        system_body = STORY_SYSTEM_PROMPT
+        system_body = system_template
         injected = False
         if _has_meta:
             system_body = system_body + _meta_section_for_append
@@ -750,7 +757,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     else:
         # 参考文章模式：STORY_SYSTEM_PROMPT 里没有 recipe 占位符，
         # 直接追加心法节即可
-        system_body = STORY_SYSTEM_PROMPT
+        system_body = system_template
         injected = False
         if _has_meta:
             system_body = system_body + _meta_section_for_append
@@ -824,6 +831,8 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
     # === 问题优先 + 命名约束 + 行文去AI味守则 + 发布前自检（公共：所有模式生效） ===
     user_message += QUESTION_FIRST_RULE
+    # 经典模式 already contains the contract by replacing its conflicting
+    # template block; avoid a duplicate appended rule here.
     user_message += _reader_experience_rule()
     user_message += _craft_learning_rule()
     user_message += NAMING_CONSTRAINT

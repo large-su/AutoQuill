@@ -133,6 +133,24 @@ class EvolutionFeedbackTest(unittest.TestCase):
             evolution_feedback.main(['--output', str(state)])
         self.assertEqual(state.read_bytes(), before)
 
+    def test_cli_frozen_cutoff_excludes_future_observations_without_editing_history(self):
+        self.record('1', {'赞同': '3'}, '2024-01-08')
+        self.record('1', {'赞同': '8'}, '2024-01-09')
+        before = evolution._path().read_bytes()
+        output = self.root / 'reports' / 'frozen-baseline.json'
+        with patch('builtins.print'):
+            self.assertEqual(evolution_feedback.main([
+                '--data-root', str(self.root), '--as-of', '2024-01-08',
+                '--horizon', '7', '--output', str(output)]), 0)
+        report = json.loads(output.read_text(encoding='utf-8'))
+        self.assertEqual(report['query']['as_of'], '2024-01-08')
+        self.assertEqual(len(report['articles'][0]['observations']), 1)
+        self.assertEqual(report['articles'][0]['horizon_observation']['likes'], 3)
+        self.assertEqual(evolution._path().read_bytes(), before)
+        with self.assertRaises(SystemExit), patch('sys.stderr'):
+            evolution_feedback.main(['--as-of', 'invalid'])
+        self.assertEqual(evolution._path().read_bytes(), before)
+
     def test_corrupt_state_is_preserved_and_query_errors_are_explicit(self):
         evolution._path().parent.mkdir(parents=True)
         evolution._path().write_text('{bad', encoding='utf-8')

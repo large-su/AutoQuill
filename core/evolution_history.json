@@ -879,13 +879,15 @@
     {
       "version": "5.4.2",
       "tag": "v5.4.2",
-      "commit": null,
-      "source_commit": null,
+      "commit": "d774b1fe7c957d50584d2ce947b001b3dbd71b15",
+      "source_commit": "d774b1fe7c957d50584d2ce947b001b3dbd71b15",
       "parent": "5e3937868dcf4bbeadc7468675d08aef3c4f3b64",
       "date": "2026-10-23",
-      "summary": "v5.4.2: 修复DeepSeek误判登录与浏览器启动失败恢复",
+      "summary": "v5.4.2: 修复DeepSeek误判登录与浏览器启动失败恢复；v5.4.1: 修复报告编码并将 CI 结果纳入发布验收；v5.4.1: 统一 Windows CI 的中文输出编码",
       "summaries": [
-        "v5.4.2: 修复DeepSeek误判登录与浏览器启动失败恢复"
+        "v5.4.2: 修复DeepSeek误判登录与浏览器启动失败恢复",
+        "v5.4.1: 修复报告编码并将 CI 结果纳入发布验收",
+        "v5.4.1: 统一 Windows CI 的中文输出编码"
       ],
       "changed_file_count": 25,
       "changed_files": [
@@ -918,6 +920,46 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
+      "provenance": "git-tag"
+    },
+    {
+      "version": "5.5.0",
+      "tag": "v5.5.0",
+      "commit": null,
+      "source_commit": null,
+      "parent": "d774b1fe7c957d50584d2ce947b001b3dbd71b15",
+      "date": "2026-10-24",
+      "summary": "v5.5.0: 让故事结构服从题意并建立新一轮效果基线",
+      "summaries": [
+        "v5.5.0: 让故事结构服从题意并建立新一轮效果基线"
+      ],
+      "changed_file_count": 17,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "applications/zhihu_story/prompts.py",
+        "config/story.py",
+        "core/evolution.py",
+        "core/version.py",
+        "docs/FEEDBACK-OBSERVATIONS.md",
+        "docs/GROWTH-EXPERIMENTS.md",
+        "docs/archive/RESEARCH-2026-10-24-STORY-ENGAGEMENT.md",
+        "installer/AutoQuill.iss",
+        "story_prompt.py",
+        "tests/test_browser_startup.py",
+        "tests/test_evolution_feedback.py",
+        "tests/test_reader_contract.py",
+        "tests/test_reader_contract_tracking.py",
+        "tools/evolution_feedback.py",
+        "webui/server.py"
+      ],
+      "change_kind": "mixed",
+      "writing_files_changed": [
+        "applications/zhihu_story/prompts.py",
+        "config/story.py",
+        "story_prompt.py"
+      ],
+      "writing_code_id": "e22a0771f2ca10d4199395d7ecea19615fb0ef8d0a90f4eb8cb28b6b9030c7e0",
       "provenance": "working-tree",
       "pending": true
     }

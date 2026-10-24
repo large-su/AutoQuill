@@ -208,6 +208,9 @@ def run(host=HOST, port=PORT):
     # 放这里而不是 FastAPI startup 事件：测试用 TestClient 直接拿 app，
     # 不该被拉起后台调度线程。
     try:
+        # 浏览器工厂由应用层注册；调度恢复可能立即执行到期任务，
+        # 因此必须先完成注册，再让调度线程开始工作。
+        import applications.zhihu_story.browser_adapter  # noqa: F401
         from automation.scheduler import get_scheduler
         get_scheduler().ensure_running()
     except Exception:          # noqa: BLE001 自动化起不来不能拖垮控制台

@@ -182,6 +182,11 @@ STORY_MATERIAL_MODE = "sample"
 # False 可恢复原提示词行为；状态进入演进方案指纹，便于后续对照。
 READER_EXPERIENCE_ENABLE = True
 
+# 读者承诺实验：用题意驱动的阅读承诺替换经典模板中的通用爽文硬套路。
+# 纯净模式已有独立读者自检，不额外叠加。False 时逐字使用此前的经典模板，
+# 便于和旧方案做可归因对照；不影响 READER_EXPERIENCE/CRAFT 的独立开关。
+READER_CONTRACT_ENABLE = True
+
 # 阅读学习实验：人物选择、细节变义和规则代价，只注入抽象技法。
 # 与读者自检独立；False 可撤回本轮指导，保留 v5.2.0 的叙事兑现指导。
 # 不读取本地会员正文/学习笔记，不增加模型请求。
