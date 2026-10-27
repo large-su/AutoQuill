@@ -1242,7 +1242,7 @@
       "writing_files_changed": [],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
       "provenance": "git-tag",
-      "interval_end": "2026-10-27T13:59:59+00:00"
+      "interval_end": "2026-10-27T14:04:54+00:00"
     },
     {
       "version": "5.8.0",
@@ -1251,18 +1251,20 @@
       "source_commit": null,
       "parent": "ea265e250420e0f8db72f5fcd4ccf4220fb1924b",
       "date": "2026-10-27",
-      "released_at": "2026-10-27T13:59:59+00:00",
+      "released_at": "2026-10-27T14:04:54+00:00",
       "release_time_source": "build-time-estimate",
       "summary": "v5.8.0: 每日原始快照只追加归档并支持本地演进重建",
       "summaries": [
         "v5.8.0: 每日原始快照只追加归档并支持本地演进重建"
       ],
-      "changed_file_count": 18,
+      "changed_file_count": 20,
       "changed_files": [
+        ".gitignore",
         "CHANGELOG.md",
         "README.md",
         "automation/model.py",
         "core/evolution.py",
+        "core/evolution_history.json",
         "core/feedback_archive.py",
         "core/version.py",
         "docs/EVOLUTION-MODULE.md",
