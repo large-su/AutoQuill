@@ -23,6 +23,7 @@ __all__ = [
     # 格式与素材
     "ENABLE_FORMAT_RETRY", "STORY_MATERIAL_MODE",
     "READER_EXPERIENCE_ENABLE", "CRAFT_LEARNING_ENABLE",
+    "REFERENCE_NARRATIVE_SAMPLE_ENABLE",
     # 知识库
     "KB_MAX_PER_GENRE", "KB_MERGE_TRIGGER", "KB_ENABLE", "RECIPE_VERBOSE_MODE",
     # reader_score
@@ -177,6 +178,10 @@ ENABLE_FORMAT_RETRY = True
 #   "reference"            纯参考文章（旧模式，用 STORY_SYSTEM_PROMPT + 参考文章）
 #   "recipe_and_reference" 配方 + 参考文章结合（配方指引 + 参考文章风格借鉴）
 STORY_MATERIAL_MODE = "sample"
+
+# 仅 sample 模式：同一 3000 字符总预算覆盖开头/中部/原文末段。
+# False 精确恢复旧开头采样；不改纯净、全参考或配方模式，不增加模型调用。
+REFERENCE_NARRATIVE_SAMPLE_ENABLE = True
 
 # 读者体验实验：同一次生成内提示开篇承诺、选择后果与结尾兑现。
 # False 可恢复原提示词行为；状态进入演进方案指纹，便于后续对照。

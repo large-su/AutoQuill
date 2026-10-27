@@ -19,6 +19,7 @@ _FILES = (
     'story_prompt.py',
     'story_generation.py',
     'story_scoring.py',
+    'core/reference_sample.py',
     'config/story.py',
     'applications/zhihu_story/prompts.py',
     'workflows/workflow_generation.py',
@@ -33,6 +34,7 @@ _KEYS = (
     'READER_EXPERIENCE_ENABLE',
     'CRAFT_LEARNING_ENABLE',
     'READER_CONTRACT_ENABLE',
+    'REFERENCE_NARRATIVE_SAMPLE_ENABLE',
     'SCORE_STORY_HEAD_CHARS',
     'SCORE_STORY_MIDDLE_CHARS',
     'SCORE_STORY_TAIL_CHARS',
@@ -153,6 +155,10 @@ def _code_id():
     found = False
     for rel in sorted(_FILES):
         p = Path(paths.program(*rel.split('/')))
+        # This module did not exist before v5.6; do not change old code IDs
+        # merely by adding a new file to the provenance schema.
+        if rel == 'core/reference_sample.py' and not p.is_file():
+            continue
         data = p.read_bytes().replace(b'\r\n', b'\n') if p.is_file() else b'<missing>'
         h.update(rel.encode() + b'\x00' + data + b'\x00')
         found = found or p.is_file()

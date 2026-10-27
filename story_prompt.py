@@ -580,7 +580,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     根据 STORY_MATERIAL_MODE 构建故事生成 prompt。
 
     四种模式：
-      - "sample"               参考文章开头截取（默认）：前 3000 字直接注入，零 LLM 提炼
+      - "sample"               参考文章有界采样（默认）：开头/中部/末段，零 LLM 提炼
       - "recipe"               配方驱动（从当前文章提炼配方，不附参考原文）
       - "reference"            参考文章模式（整篇注入，旧逻辑）
       - "recipe_and_reference" 配方 + 参考文章结合
@@ -610,7 +610,8 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         STORY_RECIPE_PROMPT,
         STORY_SYSTEM_PROMPT,
     )
-    from config.story import READER_CONTRACT_ENABLE, STORY_MATERIAL_MODE
+    from config.story import (READER_CONTRACT_ENABLE, STORY_MATERIAL_MODE,
+                              REFERENCE_NARRATIVE_SAMPLE_ENABLE)
 
     system_template = (READER_CONTRACT_STORY_SYSTEM_PROMPT
                        if READER_CONTRACT_ENABLE else STORY_SYSTEM_PROMPT)
@@ -718,11 +719,21 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         mode_str = (f"配方+参考{meta_tag} [{recipe.get('genre', '?')}] {recipe.get('perspective', '?')} "
                     f"hook={recipe.get('hook', '?')[:15]}（参考{len(reference_answer or '')}字）")
 
-    # === 模式3：参考文章采样（默认：开头 3000 字截取注入，零 LLM 提炼） ===
+    # === 模式3：参考文章采样（总预算 3000 字符，零 LLM 提炼） ===
     elif STORY_MATERIAL_MODE == "sample":
         from core.story_text import sample_reference_sections
-        sample = sample_reference_sections(reference_answer) \
-            if reference_answer else ""
+        from core.reference_sample import sample_reference_narrative
+        sampler = (sample_reference_narrative if REFERENCE_NARRATIVE_SAMPLE_ENABLE
+                   else sample_reference_sections)
+        sample = sampler(reference_answer) if reference_answer else ""
+        reference_heading = ('参考文章（高赞回答开头——重点学习其"开头引入"的手法：第一句如何抛钩子、用什么视角/语气引入人物与事件；其余仅供感受语感与节奏，严禁借鉴情节）')
+        if REFERENCE_NARRATIVE_SAMPLE_ENABLE:
+            reference_heading = (
+                '参考文章（仅学习表达手法，严禁借鉴情节）\n\n'
+                '长参考按开头、中部、原文末段摘录，省略处不连续；短参考完整保留。'
+                '学习开场怎样建立关注、场内怎样用动作和对话推进、末段怎样处理语气与余味。'
+                '原文可能未完，末段不等于完整结局；不得推测省略情节、续写参考或照搬人物、事件与结构顺序。'
+                '标记仅说明摘录位置，不写入新故事；新故事按题意独立构思并兑现主线。')
         system_body = system_template
         injected = False
         if _has_meta:
@@ -736,7 +747,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
 
 {question_title}
 
-## 参考文章（高赞回答开头——重点学习其"开头引入"的手法：第一句如何抛钩子、用什么视角/语气引入人物与事件；其余仅供感受语感与节奏，严禁借鉴情节）
+## {reference_heading}
 
 {sample}
 

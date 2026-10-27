@@ -6,6 +6,7 @@
 
 import tempfile
 import unittest
+from unittest import mock
 
 from applications.zhihu_story.author_profiler import (
     render_style_section,
@@ -91,25 +92,32 @@ class TestBuildStoryPromptInjection(unittest.TestCase):
 
     def test_sample_mode_uses_sampled_reference(self):
         from llm_api import build_story_prompt
-        # 长参考文章 → 只注入开头 max_chars 字（默认 3000）
+        # 长参考文章 → 注入开头/中部/末段，总预算 max_chars（默认 3000）
         ans = ("参考段0号的内容。" + "\n\n" +
-               ("填充内容。" * 400))
-        user_message, mode_str = build_story_prompt(
-            "测试问题标题？",
-            reference_answer=ans,
-            author_profile=FAKE_PROFILE,
-        )
+               ("填充内容。" * 700) + "原文尾部独有标记。")
+        with mock.patch("config.story.REFERENCE_NARRATIVE_SAMPLE_ENABLE", True), \
+             mock.patch("config.story.STORY_MATERIAL_MODE", "sample"):
+            user_message, mode_str = build_story_prompt(
+                "测试问题标题？",
+                reference_answer=ans,
+                author_profile=FAKE_PROFILE,
+            )
         self.assertIn("采样模式", mode_str)
-        self.assertIn("仅供感受语感与节奏", user_message)
+        self.assertIn("仅学习表达手法，严禁借鉴情节", user_message)
         self.assertIn("严禁搬运", user_message)
+        self.assertIn("不得推测省略情节", user_message)
+        self.assertIn("【开头片段】", user_message)
+        self.assertIn("【中部片段】", user_message)
+        self.assertIn("【原文末段】", user_message)
         self.assertIn("作者风格签名", user_message)
         self.assertIn("测试问题标题", user_message)
-        # 注入的是参考文章开头，且截断在 3000 字内
+        # 注入的是三段参考采样，且总采样内容在 3000 字内
         self.assertIn("参考段0号的内容。", user_message)
-        self.assertIn("参考文章（高赞回答开头", user_message)
-        idx = user_message.find("参考段0号的内容。")
-        end = user_message.find("请根据以上要求", idx)
-        self.assertLessEqual(end - idx, 3000)
+        self.assertIn("原文尾部独有标记。", user_message)
+        sample_start = user_message.find("【开头片段】")
+        sample_end = user_message.find("请根据以上要求", sample_start)
+        self.assertGreater(sample_end, sample_start)
+        self.assertLessEqual(len(user_message[sample_start:sample_end].rstrip()), 3000)
 
     def test_sample_mode_without_reference(self):
         from llm_api import build_story_prompt

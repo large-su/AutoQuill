@@ -966,8 +966,8 @@
     {
       "version": "5.5.1",
       "tag": "v5.5.1",
-      "commit": null,
-      "source_commit": null,
+      "commit": "f9a3dcb556e8818071116b25fbb746f46cf73ce5",
+      "source_commit": "f9a3dcb556e8818071116b25fbb746f46cf73ce5",
       "parent": "3845c2342da5318dd3272f4f225711dc6016097d",
       "date": "2026-10-24",
       "summary": "v5.5.1: 修复全面体检发现的调度状态竞争与数据、日志和下载容错问题",
@@ -998,6 +998,45 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "e22a0771f2ca10d4199395d7ecea19615fb0ef8d0a90f4eb8cb28b6b9030c7e0",
+      "provenance": "git-tag"
+    },
+    {
+      "version": "5.6.0",
+      "tag": "v5.6.0",
+      "commit": null,
+      "source_commit": null,
+      "parent": "f9a3dcb556e8818071116b25fbb746f46cf73ce5",
+      "date": "2026-10-27",
+      "summary": "v5.6.0: 在同预算内学习参考故事的开头中段与收束表达",
+      "summaries": [
+        "v5.6.0: 在同预算内学习参考故事的开头中段与收束表达"
+      ],
+      "changed_file_count": 16,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "config/story.py",
+        "core/evolution.py",
+        "core/evolution_history.json",
+        "core/reference_sample.py",
+        "core/version.py",
+        "docs/GROWTH-EXPERIMENTS.md",
+        "docs/STORY-LEARNING.md",
+        "docs/research/REFERENCE-COVERAGE.md",
+        "installer/AutoQuill.iss",
+        "story_prompt.py",
+        "tests/test_author_inject.py",
+        "tests/test_reference_sample.py",
+        "tests/test_reference_sampling_integration.py",
+        "tools/evolution_history.py"
+      ],
+      "change_kind": "mixed",
+      "writing_files_changed": [
+        "config/story.py",
+        "core/reference_sample.py",
+        "story_prompt.py"
+      ],
+      "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
       "provenance": "working-tree",
       "pending": true
     }
