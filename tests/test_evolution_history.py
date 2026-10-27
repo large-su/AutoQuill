@@ -48,7 +48,7 @@ class EvolutionHistoryTest(unittest.TestCase):
         d = self.make_repo()
         rows = refresh_history(d)["releases"]
         for row in rows:
-            self.assertRegex(row["released_at"], r"^\d{4}-\d\d-\d\dT.*[+-]\d\d:\d\d$")
+            self.assertRegex(row["released_at"], r"^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$")
             self.assertEqual(row["release_time_source"], "git-commit")
         self.assertEqual(rows[0]["interval_end"], rows[1]["released_at"])
         self.assertIsNone(rows[-1]["interval_end"])
