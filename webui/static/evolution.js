@@ -2,7 +2,7 @@
 
 // 版本时间窗和真实反馈的本地可视化。网络抓取只由用户主动点击触发。
 window.AutoQuillEvolution = (() => {
-  let data = null, view = "release", selected = null, distribution = null, requestNumber = 0;
+  let data = null, archive = null, view = "release", selected = null, distribution = null, requestNumber = 0, archiveLoadedAt = 0;
   const metricNames = {likes: "赞同", reads: "阅读", comments: "评论", collects: "收藏", favors: "喜欢"};
   const reasons = {daily_release_window: "按发布日推定", time_window: "按发布时间推定", boundary_ambiguous: "处于版本边界", before_history: "早于可用版本历史", missing_publish_time: "缺少发布时间", missing_public_snapshot: "缺少公开快照", verified_chain: "证据已确认", manual: "人工确认", manual_clear: "人工清除", missing_content_evidence: "缺少正文一致性证据", missing_generation: "缺少生成记录", ambiguous_generation: "生成记录有歧义", conflicting_receipt: "发布回执冲突"};
   const el = (id) => document.getElementById(id);
@@ -24,6 +24,43 @@ window.AutoQuillEvolution = (() => {
     : a.node_id === selected;
   const publicLink = (url) => { try { const p = new URL(url); return p.protocol === "https:" && /(^|\.)zhihu\.com$/.test(p.hostname) ? p.href : ""; } catch (_) { return ""; } };
 
+  function archiveText(a) {
+    if (!a) return "尚未读取本地快照状态。";
+    const state = a.today_status === "recorded" ? "今日已记录" : a.today_status === "missing" ? "今日缺失" : "今日待记录";
+    const gaps = Array.isArray(a.missing_dates) && a.missing_dates.length ? " · 缺口 " + a.missing_dates.slice(0, 6).join("、") + (a.missing_dates.length > 6 ? " 等" : "") : " · 无已发现缺口";
+    const stateCount = a.state_import_count ? " · 旧台账归档 " + num(a.state_import_count) + " 条" : "";
+    return state + " · " + num(a.snapshot_count || 0) + " 份快照 · " + num(a.day_count || 0) + " 个记录日 · 最近成功 " + (a.last_success_date || "暂无") + " · 连续 " + num(a.consecutive_days || 0) + " 天" + stateCount + gaps;
+  }
+  function renderArchive() {
+    [el("evoArchiveSummary"), el("autoArchiveStatus")].forEach((box) => { if (box) box.textContent = archiveText(archive); });
+    const state = el("evoArchiveState"); if (state) state.textContent = archive ? (archive.today_status === "recorded" ? "已记录" : archive.today_status === "missing" ? "今日缺失" : "待记录") : "";
+    const warnings = [];
+    if (archive?.invalid_count) warnings.push("校验异常 " + num(archive.invalid_count) + " 份，已跳过，不参与重算。");
+    if (archive?.legacy_count) warnings.push("历史导入 " + num(archive.legacy_count) + " 份；仅知日期，完整性未知，不补造采集时刻。");
+    if (archive?.state_import_count) warnings.push("旧台账观测归档 " + num(archive.state_import_count) + " 条；不计为新的采集。");
+    if (Array.isArray(archive?.warnings)) warnings.push(...archive.warnings);
+    if (Array.isArray(archive?.missing_dates) && archive.missing_dates.length) warnings.push("缺口日期：" + archive.missing_dates.slice(0, 30).join("、"));
+    const latest = archive?.refreshes?.latest;
+    const success = archive?.refreshes?.last_success;
+    if (success) warnings.push("最近成功：" + String(success.finished_at || success.observed_at || "").replace("T", " ").slice(0, 19) + " · " + num(success.count || 0) + " 条");
+    if (latest && ["error", "failed", "interrupted", "stopped"].includes(latest.status)) warnings.push("最近失败：" + String(latest.finished_at || latest.started_at || "").replace("T", " ").slice(0, 19) + " · " + (latest.message || latest.error || "未完成"));
+    const text = warnings.join("\n") || "未发现校验异常。缺口只表示当天没有可用快照，不代表当天没有发表内容。";
+    [el("evoArchiveWarnings"), el("autoArchiveWarnings")].forEach((box) => { if (box) box.textContent = text; });
+    [el("evoArchive"), el("autoArchiveGaps")].forEach((box) => { if (box) box.hidden = false; });
+  }
+  async function loadArchive(force) {
+    if (!force && archiveLoadedAt && Date.now() - archiveLoadedAt < 60000) return archive;
+    try { const r = await fetch("/api/evolution/archive"); if (!r.ok) throw new Error("HTTP " + r.status); archive = await r.json(); archiveLoadedAt = Date.now(); renderArchive(); }
+    catch (error) { const box = el("evoArchiveSummary"); if (box) box.textContent = "本地快照状态读取失败：" + error.message; }
+    return archive;
+  }
+  async function rebuildArchive(button) {
+    if (button) { button.disabled = true; button.textContent = "重建中…"; }
+    try { const r = await fetch("/api/evolution/rebuild", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"}); const v = await r.json(); if (!r.ok || !v.ok) throw new Error(v.message || "本地重建未完成"); archive = v.archive || archive; archiveLoadedAt = Date.now(); renderArchive(); if (!await load()) throw new Error("归档已保存，但演进结果读取失败，请重试"); const box = button?.id === "autoArchiveRebuild" ? el("autoArchiveStatus") : el("evoStatus"); if (box) box.textContent = "本地快照更新完成。" + (archiveText(archive) || ""); }
+    catch (error) { const box = button?.id === "autoArchiveRebuild" ? el("autoArchiveStatus") : el("evoStatus"); if (box) { box.textContent = "本地快照更新未完成：" + error.message; box.classList.add("evo-error"); } }
+    finally { if (button) { button.disabled = false; button.textContent = "从本地快照更新"; } }
+  }
+
   async function load() {
     const request = ++requestNumber;
     el("evoStatus").textContent = "正在读取本地版本、时间窗和反馈记录…";
@@ -35,10 +72,12 @@ window.AutoQuillEvolution = (() => {
       const result = await response.json();
       if (request !== requestNumber) return false;
       data = result;
+      archive = result.archive || archive;
+      if (archive) { archiveLoadedAt = Date.now(); renderArchive(); }
       const ids = (view === "release" ? releases() : nodes()).map((x) => view === "release" ? x.tag : x.id);
       if (!ids.includes(selected)) selected = ids.at(-1) || null;
       render(); return true;
-    } catch (error) { if (request === requestNumber) { el("evoStatus").textContent = "读取未完成：" + error.message + "。可点击刷新本地记录重试。"; el("evoStatus").classList.add("evo-error"); } return false; }
+    } catch (error) { if (request === requestNumber) { el("evoStatus").textContent = "读取未完成：" + error.message + "。可点击从本地快照更新重试。"; el("evoStatus").classList.add("evo-error"); } return false; }
   }
 
   function render() {
@@ -101,8 +140,10 @@ window.AutoQuillEvolution = (() => {
 
   function chart(values) { const samples = values.filter((a) => belongs(a) && metric(a)[key()] != null).sort((a,b) => metric(a)[key()] - metric(b)[key()]); el("evoDistribution").hidden = !samples.length; if (!samples.length || !window.echarts) return; if (!distribution) distribution = echarts.init(el("evoDistribution")); distribution.setOption({animation:false,title:{text:"所选" + (view === "release" ? "版本" : "方案") + " · 每篇作品阶段" + name(),textStyle:{color:"#dbe3f0",fontSize:12}},grid:{left:48,right:18,top:42,bottom:30},xAxis:{type:"category",data:samples.map((_,i)=>i+1),axisLabel:{color:"#7d8aa3"}},yAxis:{type:"value",axisLabel:{color:"#7d8aa3"},splitLine:{lineStyle:{color:"#232b3d"}}},series:[{type:"bar",data:samples.map((a)=>metric(a)[key()]),itemStyle:{color:"#818cf8"}}]},true); distribution.resize(); }
   async function save(aid, button) { const select = [...el("evoArticles").querySelectorAll("select[data-evo-aid]")].find((x)=>x.dataset.evoAid===aid); if (!select) return; button.disabled=true; button.textContent="保存中…"; try { const r=await fetch("/api/evolution/assign",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({aid,node_id:select.value||null})}), result=await r.json(); if (!r.ok) throw new Error(result.detail||"保存失败"); await load(); } catch(error) { el("evoStatus").textContent="方案归属未保存："+error.message; el("evoStatus").classList.add("evo-error"); button.disabled=false; button.textContent="确认"; } }
-  el("evoRefresh").addEventListener("click",load); ["evoHorizon","evoMetric","evoSince","evoUntil"].forEach((id)=>el(id).addEventListener("change",load)); el("evoOnlySelected").addEventListener("change",()=>data&&articles());
+  el("evoRefresh").textContent="从本地快照更新"; el("evoRefresh").addEventListener("click",()=>rebuildArchive(el("evoRefresh")));
+  el("autoArchiveRebuild")?.addEventListener("click",()=>rebuildArchive(el("autoArchiveRebuild")));
+  ["evoHorizon","evoMetric","evoSince","evoUntil"].forEach((id)=>el(id).addEventListener("change",load)); el("evoOnlySelected").addEventListener("change",()=>data&&articles());
   el("evoReleaseRefresh").addEventListener("click",async()=>{const b=el("evoReleaseRefresh"); b.disabled=true;b.textContent="同步中…";try{const r=await fetch("/api/evolution/releases/refresh",{method:"POST"}),v=await r.json();if(!r.ok||!v.ok)throw new Error(v.message||"同步未完成");await load();}catch(e){el("evoSyncStatus").textContent="版本时间同步未完成："+e.message;}finally{b.disabled=false;b.textContent="同步版本时间";}});
   el("evoFeedbackRefresh").addEventListener("click",async()=>{const b=el("evoFeedbackRefresh");b.disabled=true;try{const r=await fetch("/api/dashboard/refresh",{method:"POST"}),v=await r.json();if(!r.ok||!v.ok)throw new Error(v.message||"刷新未启动");el("evoFeedbackStatus").textContent="正在从知乎采集反馈，可离开此页；完成后会保存新的观测节点。";while(true){await new Promise((ok)=>setTimeout(ok,3000));const s=await(await fetch("/api/dashboard/refresh/status")).json();if(s.status==="running"){el("evoFeedbackStatus").textContent=s.progress||"正在采集…";continue;}if(!await load()||s.status!=="done")throw new Error(s.error||"本次采集未完成，已有观测仍保留");break;}}catch(e){el("evoFeedbackStatus").textContent="反馈采集未完成："+e.message;}finally{b.disabled=false;}});
-  el("evoViewSwitch").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-view]");if(!b)return;view=b.dataset.evoView;el("evoViewSwitch").querySelectorAll("button").forEach((x)=>{x.classList.toggle("sel",x===b);x.setAttribute("aria-selected",String(x===b));});el("evoOnlySelected").parentElement.lastChild.textContent="只看所选"+(view==="release"?"版本":"方案");selected=null;if(data){selected=(view==="release"?releases().at(-1)?.tag:nodes().at(-1)?.id)||null;render();}}); el("evoNodeList").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-node]");if(b){selected=b.dataset.evoNode;timeline();detail();articles();}}); el("evoArticles").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-save]");if(b)save(b.dataset.evoSave,b);}); window.addEventListener("resize",()=>{if(!el("pane-evolution").hidden)distribution?.resize();}); return {load};
+  el("evoViewSwitch").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-view]");if(!b)return;view=b.dataset.evoView;el("evoViewSwitch").querySelectorAll("button").forEach((x)=>{x.classList.toggle("sel",x===b);x.setAttribute("aria-selected",String(x===b));});el("evoOnlySelected").parentElement.lastChild.textContent="只看所选"+(view==="release"?"版本":"方案");selected=null;if(data){selected=(view==="release"?releases().at(-1)?.tag:nodes().at(-1)?.id)||null;render();}}); el("evoNodeList").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-node]");if(b){selected=b.dataset.evoNode;timeline();detail();articles();}}); el("evoArticles").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-save]");if(b)save(b.dataset.evoSave,b);}); loadArchive(); window.addEventListener("resize",()=>{if(!el("pane-evolution").hidden)distribution?.resize();}); return {load};
 })();

@@ -520,6 +520,8 @@ def scrape(progress=None, stop_flag=None, result_meta=None):
         if isinstance(result_meta, dict):
             result_meta.update(values)
 
+    from core import feedback_archive
+    feedback_archive.initialize(archive_dir=_DATA_DIR / 'feedback_archive')
     b = ZhihuBrowser(headless=True)
     try:
         b.start()
@@ -617,8 +619,19 @@ def scrape(progress=None, stop_flag=None, result_meta=None):
             _meta(error="抓取结果质量异常，已保留上次快照")
             return []
 
-        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        from core import feedback_archive, release_windows
+        stamp = datetime.now(release_windows.ZH_TZ).isoformat(timespec="microseconds")
         path = _DATA_DIR / f"published_answers_{stamp[:10]}.json"
+        # The daily dashboard mirror can be replaced or pruned. Commit the
+        # original observation independently before updating any derived state.
+        try:
+            feedback_archive.import_legacy(archive_dir=_DATA_DIR / 'feedback_archive',
+                                           data_dir=_DATA_DIR)
+            archived = feedback_archive.save(raw_dedup, stamp,
+                                             archive_dir=_DATA_DIR / 'feedback_archive')
+        except (OSError, ValueError) as exc:
+            _meta(error="原始快照归档失败，未更新台账或替换看板：%s" % exc, count=0)
+            return []
         ingest_error = None
         try:
             from core import evolution
@@ -653,7 +666,8 @@ def scrape(progress=None, stop_flag=None, result_meta=None):
                 feedback_loop.attach_snapshot_rows(raw_dedup, observed=stamp)
         except Exception:
             log.debug("反馈闭环入账失败（不影响快照）", exc_info=True)
-        _meta(observed_at=stamp, source_file=str(path), count=len(dedup), error=ingest_error)
+        _meta(observed_at=stamp, source_file=str(path), count=len(dedup), error=ingest_error,
+              archive_file=archived.get('path'), archive_sha256=archived.get('sha256'))
         return dedup
     finally:
         b.close()

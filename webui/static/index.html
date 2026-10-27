@@ -156,6 +156,13 @@
           <div class="empty-note">暂无通知</div>
         </div>
       </div>
+      <div class="card auto-archive-card">
+        <h2><span class="badge">▣</span>已发表内容快照</h2>
+        <p class="auto-hint">每天 23:00 的“每日内容快照”会追加一份本地快照。这里仅查看本地记录，不会重新打开知乎。</p>
+        <div id="autoArchiveStatus" class="auto-archive-status">正在读取快照状态…</div>
+        <details id="autoArchiveGaps"><summary>记录缺口与校验问题</summary><div id="autoArchiveWarnings" class="auto-hint"></div></details>
+        <button class="btn ghost" id="autoArchiveRebuild" type="button">从本地快照更新演进记录</button>
+      </div>
     </div>
 
     <!-- 模式：工作台 -->
@@ -303,7 +310,7 @@
         <div class="evo-heading">
           <div><h2>演进记录 <span class="evo-badge">反馈积累</span></h2>
               <p class="evo-muted">以自然日为最小评价间隔：当天多次发布合并到最后版本，再按发布年龄比较真实反馈。</p></div>
-          <div class="evo-actions"><button class="btn ghost" id="evoRefresh">刷新本地记录</button>
+          <div class="evo-actions"><button class="btn ghost" id="evoRefresh">从本地快照更新</button>
             <button class="btn ghost" id="evoReleaseRefresh">同步版本时间</button>
             <button class="btn primary" id="evoFeedbackRefresh">从知乎更新反馈</button></div>
         </div>
@@ -326,6 +333,11 @@
           <label>至 <input id="evoUntil" type="date" aria-label="作品发布结束日期"></label>
         </div>
         <div id="evoStatus" class="evo-muted" role="status">进入此页后加载本地记录。</div>
+        <div class="evo-archive" id="evoArchive" hidden>
+          <div class="evo-archive-head"><b>本地反馈快照</b><span id="evoArchiveState" class="evo-muted"></span></div>
+          <p id="evoArchiveSummary" class="evo-muted"></p>
+          <details id="evoArchiveGaps"><summary>记录缺口与校验问题</summary><div id="evoArchiveWarnings" class="evo-muted"></div></details>
+        </div>
         <div id="evoWarnings" class="evo-note" hidden></div>
         <div class="evo-workspace">
           <div class="evo-graph-wrap">

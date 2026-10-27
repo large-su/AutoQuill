@@ -65,7 +65,7 @@ const SA_ROLE = [
 ];
 const SA_STAGE_CHAR = { 1: "\u2460", 2: "\u2461", 3: "\u2462", 4: "\u2463" };
 const SA_STAGE_TEXT = { reply_comment: "先回复", checkin: "后检查",
-                        feedback_refresh: "独立刷新" };
+                        feedback_refresh: "每日内容快照" };
 
 function saShapeOf(t) { return SA_SHAPE[t] || "circle"; }
 function saColorOf(s) { return AUTO_STATUS_COLOR[s] || "#818cf8"; }
@@ -116,6 +116,25 @@ async function loadAutomation() {
   renderAutoTaskConfig();
   renderAutoNotices();
   renderAutoHistory();
+  loadAutoArchive();
+}
+
+let autoArchiveLoadedAt = 0;
+async function loadAutoArchive(force) {
+  if (!force && autoArchiveLoadedAt && Date.now() - autoArchiveLoadedAt < 60000) return;
+  const box = $("autoArchiveStatus");
+  if (!box) return;
+  try {
+    const r = await fetch("/api/evolution/archive");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const a = await r.json(); autoArchiveLoadedAt = Date.now();
+    const state = a.today_status === "recorded" ? "今日已记录" : a.today_status === "missing" ? "今日缺失" : "今日待记录";
+    const gaps = Array.isArray(a.missing_dates) && a.missing_dates.length ? " · 缺口 " + a.missing_dates.slice(0, 6).join("、") + (a.missing_dates.length > 6 ? " 等" : "") : " · 无已发现缺口";
+    const stateCount = a.state_import_count ? " · 旧台账归档 " + a.state_import_count + " 条" : "";
+    box.textContent = state + " · " + (a.snapshot_count || 0) + " 份快照 · " + (a.day_count || 0) + " 个记录日 · 最近成功 " + (a.last_success_date || "暂无") + " · 连续 " + (a.consecutive_days || 0) + " 天" + stateCount + gaps;
+    const latest = a.refreshes && a.refreshes.latest, success = a.refreshes && a.refreshes.last_success;
+    const warning = $("autoArchiveWarnings"); if (warning) warning.textContent = [].concat(a.invalid_count ? ["校验异常 " + a.invalid_count + " 份，已跳过。"] : [], a.legacy_count ? ["历史导入 " + a.legacy_count + " 份；仅知日期，完整性未知。"] : [], a.state_import_count ? ["旧台账观测归档 " + a.state_import_count + " 条，不计为新的采集。"] : [], success ? ["最近成功：" + String(success.finished_at || success.observed_at || "").replace("T", " ").slice(0, 19) + " · " + (success.count || 0) + " 条"] : [], latest && ["error", "failed", "interrupted", "stopped"].includes(latest.status) ? ["最近失败：" + String(latest.finished_at || latest.started_at || "").replace("T", " ").slice(0, 19) + " · " + (latest.message || latest.error || "未完成")] : [], a.warnings || [], a.missing_dates?.length ? ["缺口只表示没有可用快照，不代表当天没有发表内容。"] : []).join("\n") || "未发现校验异常。";
+  } catch (e) { box.textContent = "本地快照状态读取失败：" + e.message; }
 }
 
 // 进度事实：今天到底发了几篇，以**线上**为准（本地台账只作审计）。

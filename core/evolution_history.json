@@ -1203,20 +1203,21 @@
       "writing_files_changed": [],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
       "provenance": "git-tag",
-      "interval_end": "2026-10-27T12:26:53+00:00"
+      "interval_end": "2026-10-27T20:29:07+08:00"
     },
     {
       "version": "5.7.1",
       "tag": "v5.7.1",
-      "commit": null,
-      "source_commit": null,
+      "commit": "ea265e250420e0f8db72f5fcd4ccf4220fb1924b",
+      "source_commit": "ea265e250420e0f8db72f5fcd4ccf4220fb1924b",
       "parent": "d8e907997deebb9699ac371dfd552c56739fafa1",
       "date": "2026-10-27",
-      "released_at": "2026-10-27T12:26:53+00:00",
-      "release_time_source": "build-time-estimate",
-      "summary": "v5.7.1: 以自然日汇总同日版本动作与作品评价",
+      "released_at": "2026-10-27T20:29:07+08:00",
+      "release_time_source": "git-commit",
+      "summary": "v5.7.1: 以自然日汇总同日版本动作与作品评价；v5.7.0: 接受 Git 在 UTC 环境输出的 Z 时区",
       "summaries": [
-        "v5.7.1: 以自然日汇总同日版本动作与作品评价"
+        "v5.7.1: 以自然日汇总同日版本动作与作品评价",
+        "v5.7.0: 接受 Git 在 UTC 环境输出的 Z 时区"
       ],
       "changed_file_count": 16,
       "changed_files": [
@@ -1234,6 +1235,46 @@
         "tests/test_evolution_history.py",
         "tests/test_evolution_ui.py",
         "tests/test_release_windows.py",
+        "webui/static/evolution.js",
+        "webui/static/index.html"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
+      "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
+      "provenance": "git-tag",
+      "interval_end": "2026-10-27T13:59:59+00:00"
+    },
+    {
+      "version": "5.8.0",
+      "tag": "v5.8.0",
+      "commit": null,
+      "source_commit": null,
+      "parent": "ea265e250420e0f8db72f5fcd4ccf4220fb1924b",
+      "date": "2026-10-27",
+      "released_at": "2026-10-27T13:59:59+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.8.0: 每日原始快照只追加归档并支持本地演进重建",
+      "summaries": [
+        "v5.8.0: 每日原始快照只追加归档并支持本地演进重建"
+      ],
+      "changed_file_count": 18,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "automation/model.py",
+        "core/evolution.py",
+        "core/feedback_archive.py",
+        "core/version.py",
+        "docs/EVOLUTION-MODULE.md",
+        "installer/AutoQuill.iss",
+        "tests/test_archive_ui.py",
+        "tests/test_evolution_archive.py",
+        "tests/test_feedback_archive.py",
+        "tests/test_feedback_refresh_integration.py",
+        "webui/evolution_api.py",
+        "webui/published.py",
+        "webui/static/automation.js",
+        "webui/static/evolution.css",
         "webui/static/evolution.js",
         "webui/static/index.html"
       ],

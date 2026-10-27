@@ -12,7 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 from core import paths
 from core.version import VERSION
-from core import release_windows
+from core import release_windows, feedback_archive
 
 
 _LOCK = threading.RLock()
@@ -485,10 +485,12 @@ def find_refresh(refresh_key, source='automation'):
                 return {k: v for k, v in node.items() if k != 'run_id'}
     return None
 
-def _legacy():
+def _legacy(excluded_files=()):
     out = {}
     root = Path(paths.data('data'))
     for p in sorted(root.glob('published_answers_*.json')):
+        if p.name in excluded_files:
+            continue
         m = re.search('(\\d{4}-\\d\\d-\\d\\d)', p.name)
         if not m:
             continue
@@ -545,8 +547,51 @@ def _nodes(d):
         runtime[-1]['current'] = True
     return out + runtime
 
-def _merged(d):
-    out = _legacy()
+def _archive_articles(entries):
+    out = {}
+    for entry in entries:
+        stamp = entry['observed_at']
+        legacy = entry['source'] == 'legacy-import'
+        if legacy:
+            # Keep the historical observation key; the envelope's timezone
+            # normalization must not turn the same day-only record into two.
+            stamp = release_windows.timestamp(stamp).date().isoformat() + 'T00:00:00+00:00'
+        for raw in entry['rows']:
+            aid = str(raw.get('aid') or '')
+            if not aid:
+                continue
+            a = out.setdefault(aid, {'aid': aid, 'observations': [], 'public_seen': True})
+            for k in ('url', 'title'):
+                if raw.get(k) is not None:
+                    a[k] = raw[k]
+            _set_publication(a, raw, stamp)
+            source = raw.get('metrics') if isinstance(raw.get('metrics'), dict) else raw
+            original = raw.get('_observation') if entry['source'] == 'state-import' else None
+            obs = dict(original) if isinstance(original, dict) else {
+                'observed_at': stamp, 'source': 'legacy' if legacy else 'fresh',
+                'date_precision': entry['precision']}
+            if legacy:
+                obs['quality'] = 'raw' if isinstance(raw.get('metrics'), dict) else 'legacy-normalized'
+            if not isinstance(original, dict):
+                for k, label in _METRICS.items():
+                    value = _number(source.get(k, source.get(label)))
+                    obs[k] = None if legacy and obs['quality'] == 'legacy-normalized' and value == 0 else value
+            a['observations'].append(obs)
+    return out
+
+
+def _merged(d, archive_entries=None):
+    entries = feedback_archive.load()[0] if archive_entries is None else archive_entries
+    excluded = {e.get('legacy_file') for e in entries if e.get('legacy_file')}
+    # Once an original capture exists, the mutable daily dashboard is not an
+    # additional source of evidence, even after local deletion or another refresh.
+    excluded.update('published_answers_' + release_windows.timestamp(e['observed_at']).date().isoformat() + '.json'
+                    for e in entries if e['source'] == 'capture')
+    out = _legacy(excluded)
+    for aid, archived in _archive_articles(entries).items():
+        a = out.setdefault(aid, {'aid': aid, 'observations': []})
+        a.update({k: v for k, v in archived.items() if k != 'observations'})
+        a['observations'].extend(archived['observations'])
     for aid, s in d['articles'].items():
         a = out.setdefault(aid, {'aid': aid, 'observations': []})
         preserved_time = {k: a.get(k) for k in ('publish_date', 'publish_time', 'publish_date_precision')}
@@ -556,7 +601,7 @@ def _merged(d):
             a.update(preserved_time)
         a['observations'].extend(s.get('observations', []))
     for a in out.values():
-        a['observations'] = sorted({(x.get('observed_at'), x.get('source')): x for x in a['observations']}.values(), key=lambda x: x.get('observed_at', ''))
+        a['observations'] = sorted({_observation_key(a['aid'], x): x for x in a['observations']}.values(), key=lambda x: x.get('observed_at', ''))
         fresh_mirrors = {(_date(o.get('observed_at')), tuple(_number(o.get(k)) for k in _METRICS))
                          for o in a['observations'] if o.get('source') == 'fresh'}
         # 每日看板文件是同一次采集的副本。已有同日同指标的精确观测时，
@@ -565,6 +610,55 @@ def _merged(d):
                              if o.get('source') != 'legacy'
                              or (_date(o.get('observed_at')), tuple(_number(o.get(k)) for k in _METRICS)) not in fresh_mirrors]
     return out
+
+
+def _observation_key(aid, observation):
+    stamp = release_windows.timestamp(observation.get('observed_at'))
+    return aid, stamp.isoformat() if stamp else observation.get('observed_at'), observation.get('source')
+
+
+def archive_status(entries=None, warnings=None, refresh_data=None):
+    return dict(feedback_archive.status(entries=entries, warnings=warnings),
+                refreshes=_refresh_payload(refresh_data) if refresh_data is not None else refresh_status())
+
+
+def rebuild_local():
+    """Freeze existing local evidence and recompute without network or state reset."""
+    with _LOCK:
+        data, warnings = _load()
+        if data is None:
+            raise ValueError(warnings[0])
+        feedback_archive.initialize()
+        imported = feedback_archive.import_legacy()
+        entries, archive_warnings = feedback_archive.load()
+        known = {_observation_key(aid, o)
+                 for aid, a in _archive_articles(entries).items() for o in a['observations']}
+        groups = {}
+        for aid, article in data['articles'].items():
+            for observation in article.get('observations', []):
+                if _observation_key(aid, observation) in known:
+                    continue
+                key = (observation['observed_at'], observation.get('date_precision') or 'day', observation.get('source'))
+                raw = {k: article[k] for k in ('aid', 'url', 'title', 'publish_date') if k in article}
+                if article.get('publish_time'):
+                    raw['publish'] = article['publish_time']
+                raw['metrics'] = {k: observation.get(k) for k in _METRICS}
+                raw['_observation'] = dict(observation)
+                groups.setdefault(key, []).append(raw)
+        for (stamp, precision, _source), rows in groups.items():
+            feedback_archive.save(rows, stamp, source='state-import',
+                                  precision=precision, completeness='unknown')
+        report = contract(attribution_basis='publication')
+        coverage = archive_status()
+        coverage['warnings'].extend(imported.get('warnings', []))
+        invalid = coverage.get('invalid_count', 0)
+        incomplete = invalid or bool(imported.get('warnings'))
+        return {'ok': not bool(incomplete),
+                'message': ('本地资料存在校验或导入异常，请查看记录；有效资料仍保留' if incomplete else
+                            '已从本地快照与版本记录更新演进，未访问知乎或 GitHub'),
+                'archive': coverage, 'imported': imported,
+                'state_observation_groups_preserved': len(groups),
+                'articles': report['summary']['articles'], 'warnings': archive_warnings}
 
 def _ledger_versions():
     """Only an aid explicitly recorded with a version is usable as a hint."""
@@ -729,6 +823,8 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
     with _LOCK:
         d, warnings = _load()
         d = d or _blank()
+        archive_entries, archive_warnings = feedback_archive.load()
+        warnings.extend(archive_warnings)
         nodes = _nodes(d)
         by = {n['id']: n for n in nodes}
         gens = {g['id']: g for g in d['generations']}
@@ -739,7 +835,7 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                                    if any(str(m.get('version') or '').lstrip('vV') == filter_version
                                           for m in r['included_releases'])), filter_version)
         articles = []
-        for a in _merged(d).values():
+        for a in _merged(d, archive_entries).values():
             pub = _date(a.get('publish_date'))
             if aid and a['aid'] != str(aid):
                 continue
@@ -878,6 +974,7 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                           'evaluation_version': evaluation_version if attribution_basis == 'publication' else None,
                           'as_of': today.isoformat(), 'window_slack_days': 3},
                 'release_sync': release_windows.status(),
+                'archive': archive_status(archive_entries, archive_warnings, d),
                 'release_history': history,
                 'refreshes': _refresh_payload(d), 'quality': quality, 'nodes': nodes, 'releases': releases,
                 'edges': [{'source': nodes[i - 1]['id'], 'target': n['id'], 'label': '演进'}

@@ -24,6 +24,10 @@ data/usage_history.jsonl
 data/usage_report.png
 # 已发布内容管理快照（从知乎创作中心导出的用户数据）
 data/published_answers_*.json
+# 原始反馈归档与公共版本时间缓存（均为本机运行资料）
+data/feedback_archive/
+data/state/release_times.json
+data/state/release_times.tmp
 # 草稿箱快照（用户草稿数据，不入库）
 data/drafts_*.json
 

@@ -86,7 +86,7 @@ TASK_TYPES = {
         "params": {"mode": "single", "rounds": 1},   # single=经典链路，clean=纯净链路
     },
     "feedback_refresh": {
-        "label": "反馈刷新",
+        "label": "每日内容快照",
         "unit": "次",
         "lane": 4,
         "implemented": True,
@@ -96,7 +96,7 @@ TASK_TYPES = {
         "axis": "single",
         "default_cap": 1,
         "default_at": "23:00",
-        "desc": "刷新已发布内容的点赞、收藏和评论反馈快照，供后续演进评估使用",
+        "desc": "每日保存已发表内容的原始快照与真实指标，留存在本地供演进重算；不占写作发布配额",
         "params": {},
         "cap_fixed": True,
     },

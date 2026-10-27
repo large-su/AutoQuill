@@ -32,6 +32,19 @@ def api_refreshes():
     return evolution.refresh_status()
 
 
+@router.get('/api/evolution/archive')
+def api_archive():
+    return evolution.archive_status()
+
+
+@router.post('/api/evolution/rebuild')
+def api_rebuild():
+    try:
+        return evolution.rebuild_local()
+    except (OSError, ValueError) as exc:
+        return {'ok': False, 'message': '本地更新未完成，原始记录保留：' + str(exc)}
+
+
 @router.post('/api/evolution/releases/refresh')
 def api_release_times_refresh():
     return release_windows.sync_releases()

@@ -155,6 +155,29 @@ class FeedbackRefreshIntegrationTest(unittest.TestCase):
         self.assertEqual(rows, payload)
         self.assertNotIn('评论', rows[0]['metrics'])
 
+    def test_archive_failure_preserves_derived_state_and_dashboard(self):
+        from core import evolution
+        _FakeBrowser.payload = [{'aid': 'new', 'metrics': {'阅读': '2'}}]
+        _FakeBrowser.counts = [1, 1, 1, 1]
+        with mock.patch('core.feedback_archive.save', side_effect=OSError('archive disk failure')):
+            result = published.refresh_feedback(source='manual')
+        self.assertFalse(result['ok'])
+        self.assertIn('归档失败', result['message'])
+        self.assertEqual(evolution._load()[0]['articles'], {})
+        self.assertEqual(list((self.tmp/'data').glob('published_answers_*.json')), [])
+
+    def test_failed_derived_write_keeps_original_for_offline_reconstruction(self):
+        from core import evolution, feedback_archive
+        _FakeBrowser.payload = [{'aid': 'new', 'metrics': {'阅读': '2'}}]
+        _FakeBrowser.counts = [1, 1, 1, 1]
+        with mock.patch('core.evolution.ingest_snapshot', side_effect=OSError('state disk failure')):
+            result = published.refresh_feedback(source='manual')
+        self.assertFalse(result['ok'])
+        entries, warnings = feedback_archive.load()
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(warnings)
+        self.assertEqual(evolution.contract()['quality']['public_articles'], 1)
+
     def test_mirror_failure_reports_partial_save_and_retains_real_observation(self):
         _FakeBrowser.payload = [{'aid': 'new', 'metrics': {'阅读': '2'}}]
         _FakeBrowser.counts = [1, 1, 1, 1]
