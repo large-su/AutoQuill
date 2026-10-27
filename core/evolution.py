@@ -12,6 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 from core import paths
 from core.version import VERSION
+from core import release_windows
 
 
 _LOCK = threading.RLock()
@@ -167,7 +168,7 @@ def _history():
                     row['provenance'] = 'build-info'
         except (OSError, ValueError, AttributeError):
             pass
-        return releases
+        return release_windows.overlay(releases)
     except (OSError, ValueError, json.JSONDecodeError):
         return []
 
@@ -357,6 +358,36 @@ def _publish(v, observed):
     except ValueError:
         return ''
 
+def _set_publication(article, raw, observed):
+    """Preserve Zhihu's publication time, independently of receipt/collection time."""
+    candidates = []
+    explicit = str(raw.get('publish_date') or '')
+    explicit_day = explicit[:10] if re.match(r'^\d{4}-\d{2}-\d{2}', explicit) else ''
+    for value in (raw.get('publish_date'), raw.get('publish')):
+        day = _publish(value, observed)
+        if explicit_day and re.match(r'^\d{2}-\d{2}', str(value or '')):
+            if explicit_day[5:] != str(value)[:5]:
+                continue  # Conflicting raw labels must not invent a newer year/date.
+            day = explicit_day
+        if not day or _date(day) is None:
+            continue
+        match = re.search(r'[T\s](\d{2}:\d{2}(?::\d{2})?)(Z|[+-]\d{2}:\d{2})?$', str(value or '').strip())
+        if match:
+            stamp = release_windows.timestamp(day + 'T' + match.group(1) + (match.group(2) or '+08:00'))
+            if stamp:
+                precision = 'second' if len(match.group(1)) == 8 else 'minute'
+                candidates.append((2 if precision == 'second' else 1, stamp.date().isoformat(), stamp.isoformat(), precision))
+        else:
+            candidates.append((0, day, None, 'day'))
+    if not candidates:
+        return
+    rank, day, stamp, precision = max(candidates, key=lambda x: x[0])
+    old_rank = {'day': 0, 'minute': 1, 'second': 2}.get(article.get('publish_date_precision'), 0)
+    if article.get('publish_date') == day and old_rank > rank:
+        return
+    article.update(publish_date=day, publish_time=stamp, publish_date_precision=precision)
+
+
 def ingest_snapshot(rows, observed_at=None):
     observed_at = observed_at or _now()
     with _LOCK:
@@ -374,10 +405,7 @@ def ingest_snapshot(rows, observed_at=None):
             for k in ('url', 'title'):
                 if raw.get(k) is not None:
                     a[k] = raw[k]
-            pub = _publish(raw.get('publish_date') or raw.get('publish'), observed_at)
-            if pub:
-                a['publish_date'] = pub
-                a['publish_date_precision'] = 'day'
+            _set_publication(a, raw, observed_at)
             a['public_seen'] = True
             for draft in d['drafts']:
                 if a.get('generation_id') and draft.get('generation_id') == a['generation_id']:
@@ -481,10 +509,7 @@ def _legacy():
             for k in ('url', 'title'):
                 if raw.get(k) is not None:
                     a[k] = raw[k]
-            pub = _publish(raw.get('publish_date') or raw.get('publish'), stamp)
-            if pub:
-                a['publish_date'] = pub
-                a['publish_date_precision'] = 'day'
+            _set_publication(a, raw, stamp)
             obs = {'observed_at': stamp, 'source': 'legacy', 'date_precision': 'day', 'quality': 'legacy-normalized' if flat else 'raw'}
             for k, label in _METRICS.items():
                 v = _number(source.get(k, source.get(label)))
@@ -524,7 +549,11 @@ def _merged(d):
     out = _legacy()
     for aid, s in d['articles'].items():
         a = out.setdefault(aid, {'aid': aid, 'observations': []})
+        preserved_time = {k: a.get(k) for k in ('publish_date', 'publish_time', 'publish_date_precision')}
         a.update({k: v for k, v in s.items() if k != 'observations' and v is not None})
+        if (preserved_time['publish_time'] and s.get('publish_date') == preserved_time['publish_date']
+                and not s.get('publish_time')):
+            a.update(preserved_time)
         a['observations'].extend(s.get('observations', []))
     for a in out.values():
         a['observations'] = sorted({(x.get('observed_at'), x.get('source')): x for x in a['observations']}.values(), key=lambda x: x.get('observed_at', ''))
@@ -579,7 +608,7 @@ def assign_article(aid, node_id):
         a = d['articles'].setdefault(str(aid), {'aid': str(aid), 'observations': []})
         # 确认时留存已有观测，之后清理看板快照也不会从方案中删掉低表现样本。
         a['observations'] = [dict(observation) for observation in article.get('observations', [])]
-        for k in ('url', 'title', 'publish_date', 'publish_date_precision'):
+        for k in ('url', 'title', 'publish_date', 'publish_time', 'publish_date_precision'):
             if article.get(k):
                 a[k] = article[k]
         a.update({'node_id': node_id, 'assignment_source': 'manual' if node_id else 'manual_clear', 'attribution': 'confirmed' if node_id else 'unassigned'})
@@ -679,7 +708,7 @@ def _observation_change(observations):
                         for k in _METRICS}}
 
 
-def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='', as_of=None, version=''):
+def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='', as_of=None, version='', attribution_basis='evidence'):
     try:
         horizon = int(horizon)
     except (ValueError, TypeError):
@@ -695,6 +724,8 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
     filter_version = str(version or '').removeprefix('v')
     if filter_version and not re.fullmatch(r'\d+(?:\.\d+){1,3}', filter_version):
         raise ValueError('无效的生成版本')
+    if attribution_basis not in ('publication', 'evidence'):
+        raise ValueError('无效的版本归属口径')
     with _LOCK:
         d, warnings = _load()
         d = d or _blank()
@@ -702,6 +733,8 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
         by = {n['id']: n for n in nodes}
         gens = {g['id']: g for g in d['generations']}
         ledger = _ledger_versions()
+        history = _history()
+        release_intervals = release_windows.intervals(history)
         articles = []
         for a in _merged(d).values():
             pub = _date(a.get('publish_date'))
@@ -723,14 +756,19 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
             hov = hovs[metric]
             generation = gens.get(a.get('generation_id'), {})
             node, attribution, assignment_source, reason, version_confirmed = _resolve_attribution(a, d, gens, by, bool(obs))
+            time_attribution = release_windows.infer(a, release_intervals, bool(obs))
             suggested = None if a.get('assignment_source') == 'manual_clear' else node or gens.get(a.get('generation_id'), {}).get('episode')
             if not suggested and a.get('assignment_source') != 'manual_clear' and a['aid'] in ledger:
                 tag = 'v' + ledger[a['aid']].lstrip('v')
                 suggested = next((n['id'] for n in nodes if tag in n['releases']), None)
             if node_id and node != node_id:
                 continue
-            if filter_version and (not version_confirmed or str(generation.get('version') or '').lstrip('v') != filter_version):
-                continue
+            if filter_version:
+                if attribution_basis == 'publication':
+                    if time_attribution['version'] != filter_version:
+                        continue
+                elif not version_confirmed or str(generation.get('version') or '').lstrip('v') != filter_version:
+                    continue
             age = (today - pub).days if pub else None
             windows = {str(h): {k: _window_observation(obs, h, k) for k in _METRICS}
                        for h in (7, 14, 30)}
@@ -747,6 +785,8 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
             item = {'aid': a['aid'], 'url': a.get('url', ''), 'title': a.get('title', ''),
                     'publish_date': a.get('publish_date', ''), 'published_at': a.get('published_at'),
                     'publish_date_precision': a.get('publish_date_precision'),
+                    'publish_time': a.get('publish_time'),
+                    'attributed_version': time_attribution['version'], 'time_attribution': time_attribution,
                     'attribution': attribution, 'assignment_source': assignment_source,
                     'attribution_reason': reason, 'version_confirmed': version_confirmed,
                     'node_id': node, 'suggested_node_id': suggested if suggested in by else None,
@@ -776,7 +816,8 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                 'by_date': {day: sum(a['publish_date'] == day for a in assigned)
                             for day in sorted({a['publish_date'] for a in assigned if a['publish_date']})}}
         releases = []
-        for r in _history():
+        window_by_tag = {w.get('tag'): w for w in release_intervals}
+        for r in history:
             x = {k: r.get(k) for k in ('version', 'tag', 'date', 'change_kind', 'writing_code_id', 'writing_files_changed', 'changed_files', 'pending')}
             version = str(r.get('version') or r.get('tag') or '').lstrip('v')
             assigned = [a for a in articles if a['version_confirmed']
@@ -784,7 +825,13 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
             candidates = [a for a in articles if not a['version_confirmed']
                           and a['attribution_reason'] == 'missing_content_evidence' and a['observations']
                           and str(a.get('generation_version') or '').lstrip('v') == version]
+            time_assigned = [a for a in articles if a['attributed_version'] == version]
+            w = window_by_tag.get(r.get('tag'), {})
             x.update(commit=r.get('commit') or r.get('source_commit'),
+                     released_at=w.get('released_at'), interval_end=w.get('interval_end'),
+                     release_time_source=w.get('release_time_source'),
+                     time_article_ids=[a['aid'] for a in time_assigned],
+                     time_metrics=_feedback_statistics(time_assigned, horizon, metric),
                      summary=r.get('summary') or r.get('summaries') or [],
                      node_id=next((n['id'] for n in nodes if r.get('tag') in n['releases']), None),
                      article_ids=[a['aid'] for a in assigned],
@@ -797,6 +844,9 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
         reasons = {reason: sum(a['attribution_reason'] == reason for a in public)
                    for reason in {a['attribution_reason'] for a in public}}
         quality = {'public_articles': len(public),
+                   'time_attributed': sum(bool(a['attributed_version']) for a in public),
+                   'time_ambiguous': sum(a['time_attribution']['reason'] == 'boundary_ambiguous' for a in public),
+                   'time_unassigned': sum(not a['attributed_version'] for a in public),
                    'confirmed': sum(a['attribution'] == 'confirmed' for a in public),
                    'candidates': reasons.get('missing_content_evidence', 0),
                    'conflicts': reasons.get('conflicting_receipt', 0),
@@ -811,13 +861,15 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                                       for key in _METRICS},
                    'unavailable': {'followers': '尚无可核验的账号新增关注观测，问题关注数不是账号关注数',
                                    'per_run_hour': '尚无完整的版本运行暴露时间，不能计算每小时回报'}}
-        warnings.append('旧记录缺正文一致性证据时仅列候选；台账运行版本不作为生成版本。')
+        warnings.append('版本表现默认按作品发布时间落入发布区间推定；发布时间不等于本机升级时间。生成证据另行保留，边界精度不足不强行分配。')
         return {'schema_version': 1, 'current_version': VERSION,
                 'objective': '比较逐作品发布年龄窗口的真实反馈；保留缺失和归属证据，不作因果判断。',
                 'horizon': horizon, 'horizons': [7, 14, 30, 90],
                 'metric': metric, 'metrics_available': dict(_METRICS),
                 'query': {'since': since, 'until': until, 'aid': aid, 'node_id': node_id, 'version': filter_version,
+                          'attribution_basis': attribution_basis,
                           'as_of': today.isoformat(), 'window_slack_days': 3},
+                'release_sync': release_windows.status(),
                 'refreshes': _refresh_payload(d), 'quality': quality, 'nodes': nodes, 'releases': releases,
                 'edges': [{'source': nodes[i - 1]['id'], 'target': n['id'], 'label': '演进'}
                           for i, n in enumerate(nodes) if i],

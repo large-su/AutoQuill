@@ -9,6 +9,8 @@
       "source_commit": "156f361aa8543cff7603e1cba9973c81f4bca81a",
       "parent": "076d55af4a5549f0bf14e391c9b814d7315b3d54",
       "date": "2026-09-28",
+      "released_at": "2026-09-28T14:03:42Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v4.9.12；v4.9.12: 修「界面报发布失败、账号里却真有新回答」",
       "summaries": [
         "chore: 安装器版本号同步 v4.9.12",
@@ -27,7 +29,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-09-28T15:00:51Z"
     },
     {
       "version": "4.9.13",
@@ -36,6 +39,8 @@
       "source_commit": "44ea6875fe800d69c7acc988b0358bee7144fa6a",
       "parent": "156f361aa8543cff7603e1cba9973c81f4bca81a",
       "date": "2026-09-28",
+      "released_at": "2026-09-28T15:00:51Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v4.9.13；v4.9.13: 进度校核——计数只认线上，本地台账降级为审计日志",
       "summaries": [
         "chore: 安装器版本号同步 v4.9.13",
@@ -67,7 +72,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-09-29T04:03:22Z"
     },
     {
       "version": "4.9.14",
@@ -76,6 +82,8 @@
       "source_commit": "ef629f574be92389300f2700eaec0a173f0e2434",
       "parent": "44ea6875fe800d69c7acc988b0358bee7144fa6a",
       "date": "2026-09-29",
+      "released_at": "2026-09-29T04:03:22Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v4.9.14；v4.9.14: 回滚跨线程唤醒浏览器的回归 + 稳定期收口",
       "summaries": [
         "chore: 安装器版本号同步 v4.9.14",
@@ -94,7 +102,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-09-29T06:26:34Z"
     },
     {
       "version": "4.9.15",
@@ -103,6 +112,8 @@
       "source_commit": "9d9f03d75c68822fdfb1ee4728223fbbcd59c495",
       "parent": "ef629f574be92389300f2700eaec0a173f0e2434",
       "date": "2026-09-29",
+      "released_at": "2026-09-29T06:26:34Z",
+      "release_time_source": "github-release",
       "summary": "test: 修 CI 上的平台相关断言（安装目录探测用例）；v4.9.15 补修：原子写并发撞锁 + 冻结态换装入口分流；v4.9.15: 一键自动更新 P1（下载→校验→安装→重启→清理）",
       "summaries": [
         "test: 修 CI 上的平台相关断言（安装目录探测用例）",
@@ -132,7 +143,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-09-29T15:28:01Z"
     },
     {
       "version": "4.9.16",
@@ -141,6 +153,8 @@
       "source_commit": "ed44f735ec12571b59d9d6c24a6a201114e32f80",
       "parent": "9d9f03d75c68822fdfb1ee4728223fbbcd59c495",
       "date": "2026-09-29",
+      "released_at": "2026-09-29T15:28:01Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v4.9.16；v4.9.16: 打卡「发布评论」兜底（最后一班在参考故事下补一条）",
       "summaries": [
         "chore: 安装器版本号同步 v4.9.16",
@@ -165,7 +179,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-09-29T15:42:29Z"
     },
     {
       "version": "4.9.17",
@@ -174,6 +189,8 @@
       "source_commit": "b021b89a24a5c216672f77338f10340d374a1063",
       "parent": "ed44f735ec12571b59d9d6c24a6a201114e32f80",
       "date": "2026-09-29",
+      "released_at": "2026-09-29T15:42:29Z",
+      "release_time_source": "github-release",
       "summary": "v4.9.17: 修好「重启并安装」黑框循环 + CI/发版提速",
       "summaries": [
         "v4.9.17: 修好「重启并安装」黑框循环 + CI/发版提速"
@@ -195,7 +212,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-09-29T15:50:55Z"
     },
     {
       "version": "4.9.18",
@@ -204,6 +222,8 @@
       "source_commit": "d8359c680155223e746c49c1bfffe9e2e78b39b3",
       "parent": "b021b89a24a5c216672f77338f10340d374a1063",
       "date": "2026-09-29",
+      "released_at": "2026-09-29T15:50:55Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v4.9.18；v4.9.18: 修好换装宿主起不来（v4.9.17 引入）+ 发版脚本中文乱码",
       "summaries": [
         "chore: 安装器版本号同步 v4.9.18",
@@ -219,7 +239,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T04:24:01Z"
     },
     {
       "version": "5.0.0",
@@ -228,6 +249,8 @@
       "source_commit": "7c78daa1c18716267d21eb63018186b22a5e2419",
       "parent": "d8359c680155223e746c49c1bfffe9e2e78b39b3",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T04:24:01Z",
+      "release_time_source": "github-release",
       "summary": "test: 修跨午夜必挂的日期用例（CI 于 2026-10-01 00:0x 真实命中）；chore: 安装器版本号同步 v5.0.0；v5.0.0: 打卡评论状态自愈 + 任务设置精简 + 深色标题栏加固",
       "summaries": [
         "test: 修跨午夜必挂的日期用例（CI 于 2026-10-01 00:0x 真实命中）",
@@ -255,7 +278,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T04:55:19Z"
     },
     {
       "version": "5.0.1",
@@ -264,6 +288,8 @@
       "source_commit": "24b1ed2840d30c96bd623450383a33504a89fdd5",
       "parent": "7c78daa1c18716267d21eb63018186b22a5e2419",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T04:55:19Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v5.0.1；v5.0.1: 修好「重启并安装」后程序关了没装也没重启（真根因）",
       "summaries": [
         "chore: 安装器版本号同步 v5.0.1",
@@ -283,7 +309,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T05:07:12Z"
     },
     {
       "version": "5.0.2",
@@ -292,6 +319,8 @@
       "source_commit": "a2b13a2a38a1cb16b81ac7dae99d8114dc1148a2",
       "parent": "24b1ed2840d30c96bd623450383a33504a89fdd5",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T05:07:12Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v5.0.2；v5.0.2: 发布校验版（release validation build）",
       "summaries": [
         "chore: 安装器版本号同步 v5.0.2",
@@ -307,7 +336,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T05:27:10Z"
     },
     {
       "version": "5.0.3",
@@ -316,6 +346,8 @@
       "source_commit": "97a028be2db31458adca9f9b94cf390c8a7f572c",
       "parent": "a2b13a2a38a1cb16b81ac7dae99d8114dc1148a2",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T05:27:10Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v5.0.3；v5.0.3: 修复应用内安装失败（HTTP 500）",
       "summaries": [
         "chore: 安装器版本号同步 v5.0.3",
@@ -334,7 +366,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T05:42:47Z"
     },
     {
       "version": "5.0.4",
@@ -343,6 +376,8 @@
       "source_commit": "e48ddcd269f96d64b4a3bf1f046f2826fccfac86",
       "parent": "97a028be2db31458adca9f9b94cf390c8a7f572c",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T05:42:47Z",
+      "release_time_source": "github-release",
       "summary": "chore: 安装器版本号同步 v5.0.4；docs: 仓库与文档规范化",
       "summaries": [
         "chore: 安装器版本号同步 v5.0.4",
@@ -394,7 +429,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T07:20:54Z"
     },
     {
       "version": "5.0.5",
@@ -403,6 +439,8 @@
       "source_commit": "b3a300a9ae8410ff26c15f13cc3b6da67860ca6f",
       "parent": "e48ddcd269f96d64b4a3bf1f046f2826fccfac86",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T07:20:54Z",
+      "release_time_source": "github-release",
       "summary": "fix: 修复应用内更新安装交接与自动重启",
       "summaries": [
         "fix: 修复应用内更新安装交接与自动重启"
@@ -435,7 +473,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T12:21:26Z"
     },
     {
       "version": "5.0.6",
@@ -444,6 +483,8 @@
       "source_commit": "047c51e5e4939e4d12cac5e4039c010ac5e0404f",
       "parent": "b3a300a9ae8410ff26c15f13cc3b6da67860ca6f",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T12:21:26Z",
+      "release_time_source": "github-release",
       "summary": "fix: 修复打卡单项完成状态并发布 v5.0.6",
       "summaries": [
         "chore: 同步 v5.0.6 安装器版本号",
@@ -462,7 +503,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T13:43:39Z"
     },
     {
       "version": "5.0.7",
@@ -471,6 +513,8 @@
       "source_commit": "6e65a0a4f231f63d170e9d01a88c10b96dec0287",
       "parent": "047c51e5e4939e4d12cac5e4039c010ac5e0404f",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T13:43:39Z",
+      "release_time_source": "github-release",
       "summary": "v5.0.7: 更新只需一次确认，增加启动提醒并精简发布流程",
       "summaries": [
         "v5.0.7: 更新只需一次确认，增加启动提醒并精简发布流程"
@@ -499,7 +543,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-01T14:09:33Z"
     },
     {
       "version": "5.0.8",
@@ -508,6 +553,8 @@
       "source_commit": "25d569ff06fa79649370651e3c7e8cf454fd1994",
       "parent": "6e65a0a4f231f63d170e9d01a88c10b96dec0287",
       "date": "2026-10-01",
+      "released_at": "2026-10-01T14:09:33Z",
+      "release_time_source": "github-release",
       "summary": "v5.0.8: 规范发布入口，清理退役源码并补充 CI 日期边界回归",
       "summaries": [
         "v5.0.8: 规范发布入口，清理退役源码并补充 CI 日期边界回归"
@@ -558,7 +605,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-02T01:00:31Z"
     },
     {
       "version": "5.1.0",
@@ -567,6 +615,8 @@
       "source_commit": "0d89721f6712ea9296e9b13c1479adcb80994e85",
       "parent": "25d569ff06fa79649370651e3c7e8cf454fd1994",
       "date": "2026-10-02",
+      "released_at": "2026-10-02T01:00:31Z",
+      "release_time_source": "github-release",
       "summary": "v5.1.0: 新增演进记录与作品反馈观察",
       "summaries": [
         "v5.1.0: 新增演进记录与作品反馈观察"
@@ -606,7 +656,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-02T02:05:33Z"
     },
     {
       "version": "5.1.1",
@@ -615,6 +666,8 @@
       "source_commit": "3fda1f6248d3f707858af0c26629b72d32d76f89",
       "parent": "0d89721f6712ea9296e9b13c1479adcb80994e85",
       "date": "2026-10-02",
+      "released_at": "2026-10-02T02:05:33Z",
+      "release_time_source": "github-release",
       "summary": "v5.1.1: 修复退出时托盘图标清理与退出竞态",
       "summaries": [
         "v5.1.1: 修复退出时托盘图标清理与退出竞态"
@@ -632,7 +685,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-07T03:20:59Z"
     },
     {
       "version": "5.1.2",
@@ -641,6 +695,8 @@
       "source_commit": "2f1faad61fde2b3071b6b91416e7a195c8a332a8",
       "parent": "3fda1f6248d3f707858af0c26629b72d32d76f89",
       "date": "2026-10-07",
+      "released_at": "2026-10-07T03:20:59Z",
+      "release_time_source": "github-release",
       "summary": "v5.1.2: 修复评论漏做，改为每日检查与读取故事补评",
       "summaries": [
         "v5.1.2: 修复评论漏做，改为每日检查与读取故事补评"
@@ -671,7 +727,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "5d3cf2221d7a9edb9f476e6a767a87c3a32a659df9947da951bb05d56b95c8e6",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-08T16:24:00Z"
     },
     {
       "version": "5.2.0",
@@ -680,6 +737,8 @@
       "source_commit": "7857c7018670ec9f9df6dd8b0df940dbb9be1db3",
       "parent": "2f1faad61fde2b3071b6b91416e7a195c8a332a8",
       "date": "2026-10-09",
+      "released_at": "2026-10-08T16:24:00Z",
+      "release_time_source": "github-release",
       "summary": "v5.2.0: 改进叙事兑现与中段评分，建立增长对照基线",
       "summaries": [
         "v5.2.0: 改进叙事兑现与中段评分，建立增长对照基线"
@@ -712,7 +771,8 @@
         "story_scoring.py"
       ],
       "writing_code_id": "58578342aef6bb9a698f7dd0e5dc8ca3099a3bd8f7ca51051e50199f898668af",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-09T05:50:35Z"
     },
     {
       "version": "5.3.0",
@@ -721,6 +781,8 @@
       "source_commit": "a5598bacf78033a140347b0f4c55a3cf341f6a49",
       "parent": "7857c7018670ec9f9df6dd8b0df940dbb9be1db3",
       "date": "2026-10-09",
+      "released_at": "2026-10-09T05:50:35Z",
+      "release_time_source": "github-release",
       "summary": "v5.3.0: 将故事阅读技法融入生成并建立本地学习台账",
       "summaries": [
         "v5.3.0: 将故事阅读技法融入生成并建立本地学习台账"
@@ -748,7 +810,8 @@
         "story_prompt.py"
       ],
       "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-10T02:01:17Z"
     },
     {
       "version": "5.3.1",
@@ -757,6 +820,8 @@
       "source_commit": "d5e34c8b42e86d76c9164b1f4f8667bb437e2c44",
       "parent": "a5598bacf78033a140347b0f4c55a3cf341f6a49",
       "date": "2026-10-10",
+      "released_at": "2026-10-10T02:01:17Z",
+      "release_time_source": "github-release",
       "summary": "v5.3.1: 修复网页模型任务结束后残留对话",
       "summaries": [
         "v5.3.1: 修复网页模型任务结束后残留对话"
@@ -789,7 +854,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-14T00:22:23Z"
     },
     {
       "version": "5.4.0",
@@ -798,6 +864,8 @@
       "source_commit": "c4903846ba2a7333d23b2cc13d68e44a35aa97c6",
       "parent": "d5e34c8b42e86d76c9164b1f4f8667bb437e2c44",
       "date": "2026-10-14",
+      "released_at": "2026-10-14T00:22:23Z",
+      "release_time_source": "github-release",
       "summary": "v5.4.0: 每日积累作品反馈并按发布年龄查询演进效果",
       "summaries": [
         "v5.4.0: 每日积累作品反馈并按发布年龄查询演进效果"
@@ -837,7 +905,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-16T00:43:24Z"
     },
     {
       "version": "5.4.1",
@@ -846,6 +915,8 @@
       "source_commit": "5e3937868dcf4bbeadc7468675d08aef3c4f3b64",
       "parent": "c4903846ba2a7333d23b2cc13d68e44a35aa97c6",
       "date": "2026-10-16",
+      "released_at": "2026-10-16T00:43:24Z",
+      "release_time_source": "github-release",
       "summary": "v5.4.1: 修复超时取消串扰和自动化重启后停工",
       "summaries": [
         "v5.4.1: 修复超时取消串扰和自动化重启后停工"
@@ -874,7 +945,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-23T15:59:51Z"
     },
     {
       "version": "5.4.2",
@@ -883,6 +955,8 @@
       "source_commit": "d774b1fe7c957d50584d2ce947b001b3dbd71b15",
       "parent": "5e3937868dcf4bbeadc7468675d08aef3c4f3b64",
       "date": "2026-10-23",
+      "released_at": "2026-10-23T15:59:51Z",
+      "release_time_source": "github-release",
       "summary": "v5.4.2: 修复DeepSeek误判登录与浏览器启动失败恢复；v5.4.1: 修复报告编码并将 CI 结果纳入发布验收；v5.4.1: 统一 Windows CI 的中文输出编码",
       "summaries": [
         "v5.4.2: 修复DeepSeek误判登录与浏览器启动失败恢复",
@@ -920,7 +994,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "d620d95ace5f3fa811b43dd0a072b2082875b9e086ea5b178b0ac6fa1790497e",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-24T00:48:34Z"
     },
     {
       "version": "5.5.0",
@@ -929,6 +1004,8 @@
       "source_commit": "3845c2342da5318dd3272f4f225711dc6016097d",
       "parent": "d774b1fe7c957d50584d2ce947b001b3dbd71b15",
       "date": "2026-10-24",
+      "released_at": "2026-10-24T00:48:34Z",
+      "release_time_source": "github-release",
       "summary": "v5.5.0: 让故事结构服从题意并建立新一轮效果基线",
       "summaries": [
         "v5.5.0: 让故事结构服从题意并建立新一轮效果基线"
@@ -961,7 +1038,8 @@
         "story_prompt.py"
       ],
       "writing_code_id": "e22a0771f2ca10d4199395d7ecea19615fb0ef8d0a90f4eb8cb28b6b9030c7e0",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-24T08:40:29Z"
     },
     {
       "version": "5.5.1",
@@ -970,6 +1048,8 @@
       "source_commit": "f9a3dcb556e8818071116b25fbb746f46cf73ce5",
       "parent": "3845c2342da5318dd3272f4f225711dc6016097d",
       "date": "2026-10-24",
+      "released_at": "2026-10-24T08:40:29Z",
+      "release_time_source": "github-release",
       "summary": "v5.5.1: 修复全面体检发现的调度状态竞争与数据、日志和下载容错问题",
       "summaries": [
         "v5.5.1: 修复全面体检发现的调度状态竞争与数据、日志和下载容错问题"
@@ -998,7 +1078,8 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "e22a0771f2ca10d4199395d7ecea19615fb0ef8d0a90f4eb8cb28b6b9030c7e0",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-27T10:51:45Z"
     },
     {
       "version": "5.6.0",
@@ -1007,6 +1088,8 @@
       "source_commit": "d19acde21d0543d097040e8450a4dd3aa982d876",
       "parent": "f9a3dcb556e8818071116b25fbb746f46cf73ce5",
       "date": "2026-10-27",
+      "released_at": "2026-10-27T10:51:45Z",
+      "release_time_source": "github-release",
       "summary": "v5.6.0: 在同预算内学习参考故事的开头中段与收束表达",
       "summaries": [
         "v5.6.0: 在同预算内学习参考故事的开头中段与收束表达"
@@ -1037,25 +1120,29 @@
         "story_prompt.py"
       ],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
-      "provenance": "git-tag"
+      "provenance": "git-tag",
+      "interval_end": "2026-10-27T11:38:50Z"
     },
     {
       "version": "5.6.1",
       "tag": "v5.6.1",
-      "commit": null,
-      "source_commit": null,
+      "commit": "c123cb7bfd72b046e25138d6158d9d3d0cce50fa",
+      "source_commit": "c123cb7bfd72b046e25138d6158d9d3d0cce50fa",
       "parent": "d19acde21d0543d097040e8450a4dd3aa982d876",
       "date": "2026-10-27",
+      "released_at": "2026-10-27T11:38:50Z",
+      "release_time_source": "github-release",
       "summary": "v5.6.1: 补齐作品版本归属证据与真实反馈质量诊断",
       "summaries": [
         "v5.6.1: 补齐作品版本归属证据与真实反馈质量诊断"
       ],
-      "changed_file_count": 19,
+      "changed_file_count": 20,
       "changed_files": [
         "CHANGELOG.md",
         "README.md",
         "applications/zhihu_story/browser_write.py",
         "core/evolution.py",
+        "core/evolution_history.json",
         "core/version.py",
         "docs/FEEDBACK-OBSERVATIONS.md",
         "installer/AutoQuill.iss",
@@ -1075,8 +1162,49 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
+      "provenance": "git-tag",
+      "interval_end": "2026-10-27T12:09:45+00:00"
+    },
+    {
+      "version": "5.7.0",
+      "tag": "v5.7.0",
+      "commit": null,
+      "source_commit": null,
+      "parent": "c123cb7bfd72b046e25138d6158d9d3d0cce50fa",
+      "date": "2026-10-27",
+      "released_at": "2026-10-27T12:09:45+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.7.0: 按发布时间区间归属作品并重构演进记录",
+      "summaries": [
+        "v5.7.0: 按发布时间区间归属作品并重构演进记录"
+      ],
+      "changed_file_count": 18,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "core/evolution.py",
+        "core/evolution_history.json",
+        "core/release_windows.py",
+        "core/version.py",
+        "docs/EVOLUTION-MODULE.md",
+        "installer/AutoQuill.iss",
+        "tests/test_evolution_history.py",
+        "tests/test_evolution_query.py",
+        "tests/test_evolution_ui.py",
+        "tests/test_release_windows.py",
+        "tools/evolution_feedback.py",
+        "tools/evolution_history.py",
+        "webui/evolution_api.py",
+        "webui/static/evolution.css",
+        "webui/static/evolution.js",
+        "webui/static/index.html"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
+      "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
       "provenance": "working-tree",
-      "pending": true
+      "pending": true,
+      "interval_end": null
     }
   ]
 }

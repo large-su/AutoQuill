@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 import subprocess
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,6 +34,48 @@ def _tags(root):
 
 def _files(root, old, tag):
     return [x for x in _git(root, "diff", "--name-only", old, tag).splitlines() if x]
+
+
+def _commit_time(root, commit):
+    """Return the commit's committer ISO timestamp with offset.
+
+    Git is the offline source of truth used by the bundled manifest.  Keep the
+    offset emitted by Git so article timestamps can be compared without
+    silently applying the machine's local timezone.
+    """
+    return _git(root, "show", "-s", "--format=%cI", commit).strip() or None
+
+
+def _preserved_release_time(existing, tag, commit):
+    """Keep an explicitly imported GitHub release time across refreshes.
+
+    A history refresh is intentionally offline.  If a maintainer imported a
+    GitHub publication timestamp into the manifest, rebuilding from Git must
+    not downgrade that evidence to a commit timestamp.
+    """
+    if not isinstance(existing, dict):
+        return None
+    for row in existing.get("releases", []):
+        if not isinstance(row, dict) or row.get("tag") != tag:
+            continue
+        # Imported release metadata is tied to the exact source commit.  A
+        # tag may be moved or recreated, so a matching tag name alone is not
+        # sufficient to retain the timestamp.
+        if not commit or not (
+                row.get("commit") == commit or row.get("source_commit") == commit):
+            continue
+        source = str(row.get("release_time_source") or "")
+        value = row.get("released_at")
+        if source != "github-release" or not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            continue
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            continue
+        return str(value), source
+    return None
 
 
 def _fingerprint(root, tag):
@@ -101,7 +143,9 @@ def refresh_history(root=ROOT, output=None, current_version=None, pending_summar
     previous_id = _git(root, "rev-list", "-n", "1", previous).strip() if previous else None
     for tag in tags:
         commit = _git(root, "rev-list", "-n", "1", tag).strip()
-        release_date = _git(root, "show", "-s", "--format=%ad", "--date=short", tag).strip()
+        preserved = _preserved_release_time(existing, tag, commit)
+        released_at, release_time_source = preserved or (_commit_time(root, commit), "git-commit")
+        release_date = datetime.fromisoformat(released_at).astimezone(timezone(timedelta(hours=8))).date().isoformat()
         base = previous or _git(root, "rev-list", "--max-parents=0", tag).strip()
         subjects = [x for x in _git(root, "log", "--format=%s", f"{base}..{tag}").splitlines() if x]
         paths = _files(root, base, tag)
@@ -111,7 +155,9 @@ def refresh_history(root=ROOT, output=None, current_version=None, pending_summar
         summary = "；".join((substantive or subjects or ["release"])[:3])
         releases.append({"version": tag.removeprefix("v"), "tag": tag,
                          "commit": commit, "source_commit": commit, "parent": previous_id,
-                         "date": release_date, "summary": summary, "summaries": subjects[:12],
+                         "date": release_date, "released_at": released_at,
+                         "release_time_source": release_time_source,
+                         "summary": summary, "summaries": subjects[:12],
                          "changed_file_count": len(paths), "changed_files": paths[:40],
                          "change_kind": kind, "writing_files_changed": writing_changed,
                          "writing_code_id": _fingerprint(root, tag), "provenance": "git-tag"})
@@ -132,13 +178,20 @@ def refresh_history(root=ROOT, output=None, current_version=None, pending_summar
             pending_kind = "writing" if writing_pending and all(p in WRITING_FILES for p in pending_paths) else ("mixed" if writing_pending else "engineering")
             releases.append({"version": current, "tag": "v" + current, "commit": None,
                              "source_commit": None, "parent": previous_id,
-                             "date": date.today().isoformat(), "summary": pending_summary or "待发布版本",
+                             "date": date.today().isoformat(),
+                             "released_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                             "release_time_source": "build-time-estimate",
+                             "summary": pending_summary or "待发布版本",
                              "summaries": [pending_summary or "待发布版本"],
                              "changed_file_count": len(pending_paths), "changed_files": pending_paths[:40], "change_kind": pending_kind,
                              "writing_files_changed": writing_pending, "writing_code_id": current_writing_code_id(root),
                              "provenance": "working-tree", "pending": True})
     except (ImportError, ValueError):
         pass
+    # Make the attribution interval explicit.  The right edge is exclusive;
+    # the final release remains open until the next published tag appears.
+    for index, row in enumerate(releases):
+        row["interval_end"] = releases[index + 1].get("released_at") if index + 1 < len(releases) else None
     manifest = {"schema_version": 1, "baseline_tag": baseline, "releases": releases}
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

@@ -302,13 +302,16 @@
       <div class="card evo-card">
         <div class="evo-heading">
           <div><h2>演进记录 <span class="evo-badge">反馈积累</span></h2>
-            <p class="evo-muted">关注多数作品是否稳定改善，持续记录早期表现与长尾。</p></div>
-          <button class="btn ghost" id="evoRefresh">刷新本地记录</button>
+            <p class="evo-muted">用每篇作品的发布时间对齐版本区间，再按发布年龄比较真实反馈。</p></div>
+          <div class="evo-actions"><button class="btn ghost" id="evoRefresh">刷新本地记录</button>
+            <button class="btn ghost" id="evoReleaseRefresh">同步版本时间</button>
+            <button class="btn primary" id="evoFeedbackRefresh">从知乎更新反馈</button></div>
         </div>
+        <div class="evo-flow" aria-label="反馈归属方法"><span>1. GitHub 发布时点</span><b>→</b><span>2. 知乎发布时间</span><b>→</b><span>3. 版本区间推定</span><b>→</b><span>4. 按年龄比较反馈</span></div>
         <div class="evo-toolbar">
           <div class="view-switch" id="evoViewSwitch" role="tablist" aria-label="演进视图">
-            <button class="view-btn sel" data-evo-view="scheme" role="tab" aria-selected="true">写作方案</button>
-            <button class="view-btn" data-evo-view="release" role="tab" aria-selected="false">每次 Release</button>
+            <button class="view-btn sel" data-evo-view="release" role="tab" aria-selected="true">版本表现</button>
+            <button class="view-btn" data-evo-view="scheme" role="tab" aria-selected="false">写作方案</button>
           </div>
           <label>观察阶段 <select id="evoHorizon" aria-label="文章发布后的观察阶段">
             <option value="7">7 天 · 启动</option><option value="14">14 天 · 起量</option>
@@ -321,18 +324,14 @@
           </select></label>
           <label>作品发布自 <input id="evoSince" type="date" aria-label="作品发布起始日期"></label>
           <label>至 <input id="evoUntil" type="date" aria-label="作品发布结束日期"></label>
-          <button class="btn ghost" id="evoFeedbackRefresh">从知乎更新反馈</button>
-          <button class="btn ghost" id="evoReset">重置图位置</button>
         </div>
         <div id="evoStatus" class="evo-muted" role="status">进入此页后加载本地记录。</div>
         <div id="evoWarnings" class="evo-note" hidden></div>
         <div class="evo-workspace">
           <div class="evo-graph-wrap">
-            <div id="evoGraph" role="img" aria-label="写作方案与版本的有向演进图"></div>
-            <div class="evo-legend"><span class="evo-legend-dot history"></span>历史代码方案
-              <span class="evo-legend-dot runtime"></span>已记录配置的试用
-              <span>点击节点查看；可拖动、缩放。箭头表示改动顺序。</span></div>
-            <div id="evoNodeList" class="evo-node-list" aria-label="节点列表"></div>
+            <div class="evo-section-head"><div><h3 id="evoListTitle">版本时间线</h3><p id="evoListHint" class="evo-muted"></p></div>
+              <span id="evoSyncStatus" class="evo-muted"></span></div>
+            <div id="evoNodeList" class="evo-node-list evo-timeline" aria-label="版本或方案列表"></div>
           </div>
           <aside id="evoDetail" class="evo-detail"><p class="evo-muted">选择一个节点查看改动和样本。</p></aside>
         </div>
@@ -344,11 +343,11 @@
         <p class="evo-muted evo-window-note" id="evoWindowNote"></p>
         <div id="evoFeedbackStatus" class="evo-note" role="status"></div>
         <details><summary>最近反馈采集记录</summary><div id="evoRefreshNodes" class="evo-muted"></div></details>
-        <div id="evoDistribution" class="evo-distribution" role="img" aria-label="所选方案在观察阶段的作品点赞分布" hidden></div>
+        <div id="evoDistribution" class="evo-distribution" role="img" aria-label="所选版本或方案在观察阶段的作品反馈分布" hidden></div>
         <div id="evoArticles" class="evo-articles"><p class="evo-muted">暂无记录。</p></div>
-        <div class="evo-note">历史作品的生成配置没有完整记录。请根据自己的记录确认归属；仅有标题或日期相近的作品不会自动参与方案评价。
-          自动化运行时默认每天 23:00 采集反馈，可在自动化设置调整时间。手动更新复用已发布内容看板；本地查询不重新抓取。
-          所有阶段成绩来自实际观测，缺失不记为零；未采集的历史不会自动补造。</div>
+        <div class="evo-note"><b>归属说明：</b>“按发布时间推定”把知乎发布时间落入相邻软件发布时点之间的作品归到该版本，用于版本效果比较；它不等同于已核验的生成链路。
+          有明确生成与发布证据的作品会另标为“证据已确认”。日期精度不足、边界当天或缺发布时间的作品不强行归属。
+          自动化默认每天 23:00 更新反馈；所有成绩来自实际观测，缺失不补造。</div>
       </div>
     </div>
 

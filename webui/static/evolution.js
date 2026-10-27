@@ -1,353 +1,106 @@
 "use strict";
 
-// 本地历史与反馈的可视化；抓取仍沿用已有的内容看板入口。
+// 版本时间窗和真实反馈的本地可视化。网络抓取只由用户主动点击触发。
 window.AutoQuillEvolution = (() => {
-  let data = null, view = "scheme", selected = null, graph = null, distribution = null;
-  let requestNumber = 0;
+  let data = null, view = "release", selected = null, distribution = null, requestNumber = 0;
   const metricNames = {likes: "赞同", reads: "阅读", comments: "评论", collects: "收藏", favors: "喜欢"};
-  const attributionReasons = {
-    verified_chain: "版本链已核验", manual: "人工确认", manual_clear: "人工清除",
-    missing_public_snapshot: "缺少公开快照", missing_content_evidence: "缺少正文一致性证据",
-    ambiguous_generation: "生成记录有歧义", conflicting_receipt: "发布回执冲突",
-    missing_generation: "缺少生成记录", unknown_version: "生成版本未知"
-  };
-  const metricKey = () => data?.metric || el("evoMetric")?.value || "likes";
-  const metricName = () => metricNames[metricKey()] || "赞同";
-  const quality = () => data?.quality || {};
-  const qualitySummary = () => {
-    const q = quality();
-    return "已确认 " + num(q.confirmed || 0) + " 篇 · 未分配 "
-      + num(Math.max(0, (q.public_articles || 0) - (q.confirmed || 0))) + " 篇 · 候选 "
-      + num(q.candidates || 0) + " 篇 · 冲突 " + num(q.conflicts || 0) + " 篇";
-  };
-  const freshnessSummary = () => {
-    const q = quality();
-    return " · 最新观测 " + (q.latest_observed_at ? h(String(q.latest_observed_at).replace("T", " ").slice(0, 19)) : "—")
-      + " · 陈旧 " + (q.stale_days == null ? "—" : num(q.stale_days) + " 天");
-  };
+  const reasons = {time_window: "按发布时间推定", boundary_ambiguous: "处于版本边界", before_history: "早于可用版本历史", missing_publish_time: "缺少发布时间", missing_public_snapshot: "缺少公开快照", verified_chain: "证据已确认", manual: "人工确认", manual_clear: "人工清除", missing_content_evidence: "缺少正文一致性证据", missing_generation: "缺少生成记录", ambiguous_generation: "生成记录有歧义", conflicting_receipt: "发布回执冲突"};
   const el = (id) => document.getElementById(id);
-  const h = (value) => String(value ?? "").replace(/[&<>"']/g,
-    (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
-  const num = (value) => value == null ? "—" : Number(value).toLocaleString("zh-CN", {maximumFractionDigits: 1});
-  const nodes = () => data?.nodes || [];
-  const releases = () => data?.releases || [];
-  const articleMetric = (article) => article.horizon_observation?.metrics || article.horizon_observation || {};
-  const nodeLabel = (node) => node.source === "history"
-    ? (node.releases?.length > 1 ? node.releases[0] + " ～ " + node.releases.at(-1) : node.label)
-    : node.label;
-  const selectedScheme = () => view === "scheme" ? nodes().find((n) => n.id === selected)
-    : nodes().find((n) => n.id === releases().find((r) => r.tag === selected)?.node_id);
-  const selectedRelease = () => view === "release" ? releases().find((r) => r.tag === selected) : null;
-  const selectedMetrics = () => selectedRelease()?.metrics || selectedScheme()?.metrics || {};
-  const belongsToSelected = (article) => view === "release"
-    ? (selectedRelease()?.article_ids || []).includes(article.aid)
-    : article.node_id === selectedScheme()?.id;
-  function publicLink(url) {
-    try {
-      const parsed = new URL(url);
-      return parsed.protocol === "https:" && /(^|\.)zhihu\.com$/.test(parsed.hostname) ? parsed.href : "";
-    } catch (_) { return ""; }
-  }
-  const releaseLink = (tag) => "https://github.com/large-su/AutoQuill/releases/tag/" + encodeURIComponent(tag);
+  const h = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const num = (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN", {maximumFractionDigits: 1});
+  const key = () => data?.metric || el("evoMetric").value || "likes";
+  const name = () => metricNames[key()] || "赞同";
+  const releases = () => data?.releases || [], nodes = () => data?.nodes || [];
+  const metric = (a) => a.horizon_observation?.metrics || a.horizon_observation || {};
+  const selectedRelease = () => releases().find((r) => r.tag === selected);
+  const selectedNode = () => nodes().find((n) => n.id === selected);
+  const item = () => view === "release" ? selectedRelease() : selectedNode();
+  const currentMetrics = () => view === "release" ? (selectedRelease()?.time_metrics || {}) : (selectedNode()?.metrics || {});
+  const releaseDate = (r) => r.released_at || r.date || "时间未知";
+  const sourceLabel = (source) => ({"github-release":"GitHub Release", "git-tag":"Git 标签时间（估计）", "git-commit":"Git 提交时间（估计）", "git-date-estimate":"Git 日期（时间未知）", "synthetic-ui":"合成测试时间", "build-time-estimate":"构建时间（估计）", "working-tree":"本地待发布"}[source] || source || "本地 Git 历史");
+  const versionOf = (a) => a.attributed_version || a.time_attribution?.version || "";
+  const belongs = (a) => view === "release"
+    ? (selectedRelease()?.time_article_ids || []).includes(a.aid)
+    : a.node_id === selected;
+  const publicLink = (url) => { try { const p = new URL(url); return p.protocol === "https:" && /(^|\.)zhihu\.com$/.test(p.hostname) ? p.href : ""; } catch (_) { return ""; } };
 
   async function load() {
-    const number = ++requestNumber;
-    el("evoStatus").textContent = "正在读取本地版本与反馈记录…";
+    const request = ++requestNumber;
+    el("evoStatus").textContent = "正在读取本地版本、时间窗和反馈记录…";
     el("evoStatus").classList.remove("evo-error");
     try {
-      const params = new URLSearchParams({horizon: el("evoHorizon").value, metric: el("evoMetric").value,
-        since: el("evoSince").value, until: el("evoUntil").value});
-      const response = await fetch("/api/evolution/feedback?" + params);
+      const q = new URLSearchParams({horizon: el("evoHorizon").value, metric: el("evoMetric").value, since: el("evoSince").value, until: el("evoUntil").value, attribution_basis: "publication"});
+      const response = await fetch("/api/evolution/feedback?" + q);
       if (!response.ok) throw new Error("读取失败（HTTP " + response.status + "）");
       const result = await response.json();
-      if (number !== requestNumber) return;
+      if (request !== requestNumber) return false;
       data = result;
-      const available = view === "scheme" ? nodes().map((n) => n.id) : releases().map((r) => r.tag);
-      if (!available.includes(selected)) selected = available.at(-1) || null;
-      render();
-      return true;
-    } catch (error) {
-      if (number !== requestNumber) return;
-      el("evoStatus").textContent = "读取未完成：" + error.message + "。可点击刷新重试。";
-      el("evoStatus").classList.add("evo-error");
-      return false;
-    }
+      const ids = (view === "release" ? releases() : nodes()).map((x) => view === "release" ? x.tag : x.id);
+      if (!ids.includes(selected)) selected = ids.at(-1) || null;
+      render(); return true;
+    } catch (error) { if (request === requestNumber) { el("evoStatus").textContent = "读取未完成：" + error.message + "。可点击刷新本地记录重试。"; el("evoStatus").classList.add("evo-error"); } return false; }
   }
 
   function render() {
-    const articles = data.articles || [];
-    const publicCount = articles.filter((a) => a.observations?.length).length;
-    const observedDates = articles.map((a) => a.latest?.observed_at).filter(Boolean).sort();
-    el("evoStatus").textContent = releases().length + " 个近期版本 · " + nodes().length + " 个方案阶段 · "
-      + publicCount + " 篇公开作品 · 当前 v" + data.current_version
-      + (observedDates.length ? " · 本地观测更新至 " + observedDates.at(-1).slice(0, 10) : "")
-      + " · " + qualitySummary();
-    const warnings = data.warnings || [];
-    el("evoWarnings").hidden = !warnings.length;
-    el("evoWarnings").textContent = warnings.join("；")
-      + (quality().missing_answer_receipts ? "；缺少发布回执 " + num(quality().missing_answer_receipts) + " 条" : "")
-      + (quality().unavailable?.followers ? "；账号关注数不可用：" + quality().unavailable.followers : "")
-      + (quality().unavailable?.per_run_hour ? "；每小时回报不可用：" + quality().unavailable.per_run_hour : "");
-    el("evoWindowNote").textContent = "对齐文章发布后的年龄：采用第 " + data.horizon + "～"
-      + (data.horizon + 3) + " 天内最接近目标日的一次实际观测。错过窗口的历史数据保留展示，不反推当时成绩。";
-    const refreshes = data.refreshes || {};
-    const latest = refreshes.latest, good = refreshes.last_success;
-    const names = {done: "完成", error: "失败", running: "进行中", stopped: "已停止", interrupted: "上次中断"};
-    const qualityText = qualitySummary() + freshnessSummary();
-    el("evoFeedbackStatus").textContent = good
-      ? "最近成功采集：" + (good.observed_at || "时间未知").replace("T", " ") + " · " + num(good.count) + " 篇"
-        + " · " + qualityText
-        + (latest && latest.id !== good.id ? "；最新尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "") : "")
-      : latest ? "最新采集尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "尚无成功观测")
-        + " · " + qualityText
-        : "尚无每日采集节点；已有历史快照仍可查询。开启日常自动化后默认每天 23:00 刷新，亦可手动更新。 · " + qualityText;
-    el("evoRefreshNodes").innerHTML = (refreshes.history || []).map((node) => "<p>"
-      + h((node.observed_at || node.finished_at || node.started_at || "").replace("T", " ").slice(0, 19))
-      + " · " + (node.source === "automation" ? "每日自动采集" : "手动采集") + " · " + h(names[node.status] || node.status)
-      + " · " + (node.status === "done" ? num(node.count) + " 篇" : h(node.message || "")) + "</p>").join("") || "暂无采集记录。";
-    renderGraph(); renderDetail(); renderArticles();
+    const quality = data.quality || {}, records = data.articles || [];
+    el("evoStatus").textContent = "当前 v" + data.current_version + " · " + releases().length + " 个版本 · " + num(quality.public_articles || records.filter((a) => a.observations?.length).length) + " 篇公开作品 · 按发布时间推定 " + num(quality.time_attributed || 0) + " 篇 · 方案已确认 " + num(quality.confirmed || 0) + " 篇";
+    const warnings = [...(data.warnings || [])];
+    if (quality.time_ambiguous) warnings.push("版本边界未归属 " + num(quality.time_ambiguous) + " 篇");
+    if (quality.time_unassigned) warnings.push("未能按时间窗归属 " + num(quality.time_unassigned) + " 篇");
+    if (quality.unavailable?.followers) warnings.push("账号关注数不可用：" + quality.unavailable.followers);
+    if (quality.unavailable?.per_run_hour) warnings.push("每小时回报不可用：" + quality.unavailable.per_run_hour);
+    el("evoWarnings").hidden = !warnings.length; el("evoWarnings").textContent = warnings.join("；");
+    el("evoWindowNote").textContent = "阶段成绩使用发布后第 " + data.horizon + "～" + (data.horizon + 3) + " 天内最接近目标日的一次实际观测。没有窗口内观测时保持缺失，不反推历史成绩。";
+    const sync = data.release_sync || {};
+    el("evoSyncStatus").textContent = sync.synced_at ? "版本时间最近同步：" + String(sync.synced_at).replace("T", " ").slice(0, 16) + " · " + num(sync.count) + " 个版本" : "版本时间来自随包历史；可同步 GitHub 发布时间";
+    feedback(); timeline(); detail(); articles();
   }
 
-  function renderGraph() {
-    const items = view === "scheme" ? nodes() : releases();
-    const key = (item) => view === "scheme" ? item.id : item.tag;
-    el("evoNodeList").innerHTML = items.map((item) => '<button class="btn ghost '
-      + (key(item) === selected ? "sel" : "") + '" data-evo-node="' + h(key(item)) + '">'
-      + h(view === "scheme" ? nodeLabel(item) : item.tag) + "</button>").join("");
-    if (!window.echarts) {
-      el("evoGraph").textContent = "图表库暂不可用，可通过下方按钮查看节点。";
-      return;
+  function feedback() {
+    const refreshes = data.refreshes || {}, good = refreshes.last_success, latest = refreshes.latest, names = {done:"完成", error:"失败", running:"进行中", stopped:"已停止", interrupted:"上次中断"};
+    el("evoFeedbackStatus").textContent = good ? "最近成功采集：" + String(good.observed_at || "时间未知").replace("T", " ").slice(0, 19) + " · " + num(good.count) + " 篇；从知乎更新只会新增当前观测，不改写过往成绩。" : latest ? "最新采集尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "尚无成功观测") : "尚无每日采集节点；可先从知乎更新反馈，或浏览已保存的历史快照。";
+    if (good && latest && latest.id !== good.id) {
+      el("evoFeedbackStatus").textContent += " 最新尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "");
     }
-    if (!graph) {
-      graph = echarts.init(el("evoGraph"));
-      graph.on("click", (params) => {
-        if (params.data?.reference) selectNode(params.data.reference);
-      });
-    }
-    const columns = Math.min(4, Math.max(1, items.length));
-    el("evoGraph").style.height = Math.max(360, Math.ceil(items.length / columns) * 105 + 60) + "px";
-    graph.resize();
-    const chartNodes = items.map((item, index) => {
-      const row = Math.floor(index / columns), offset = index % columns;
-      const column = row % 2 ? columns - 1 - offset : offset;
-      const scheme = view === "scheme" ? item : nodes().find((n) => n.id === item.node_id);
-      const active = key(item) === selected;
-      const color = scheme?.source === "runtime" ? "#34d399" : "#818cf8";
-      const name = view === "scheme" ? nodeLabel(item) : item.tag;
-      const m = view === "release" ? item.metrics || {} : scheme?.metrics || {};
-      const subtitle = view === "release" ? ({engineering: "工程改动", writing: "写作改动", mixed: "混合改动"}[item.change_kind] || "改动记录")
-        : m.observed ? "中位数 " + num(m.median) + " · " + m.observed + " 篇观测"
-          : m.assigned ? "已有作品 · 等待阶段观测" : "尚无已确认样本";
-      return {id: key(item), reference: key(item), name, subtitle,
-        x: column * 220, y: row * 115, symbol: "roundRect", symbolSize: [148, 54],
-        itemStyle: {color: active ? "#283247" : "#182131", borderColor: color, borderWidth: active ? 3 : 1},
-        label: {show: true, color: "#dbe3f0", fontSize: 11, formatter: () => name + "\n" + subtitle, lineHeight: 20}};
-    });
-    const graphEdges = view === "scheme" ? (data.edges || [])
-      : items.slice(1).map((item, index) => ({source: items[index].tag, target: item.tag}));
-    const valid = new Set(chartNodes.map((n) => n.id));
-    graph.setOption({animation: false,
-      tooltip: {formatter: (params) => params.data?.reference ? h(params.data.name) + "<br>" + h(params.data.subtitle) : "方案或版本的改动顺序"},
-      series: [{type: "graph", layout: "none", roam: true,
-        edgeSymbol: ["none", "arrow"], edgeSymbolSize: 9,
-        lineStyle: {color: "#a2b3d3", width: 2, opacity: 1},
-        data: chartNodes, links: graphEdges.filter((edge) => valid.has(edge.source) && valid.has(edge.target))}]
-    }, true);
-    graph.resize();
+    const q = data.quality || {};
+    el("evoFeedbackStatus").textContent += " 最新观测：" + (q.latest_observed_at || "暂无") + "；距今 " + num(q.stale_days) + " 天。";
+    el("evoRefreshNodes").innerHTML = (refreshes.history || []).map((x) => "<p>" + h(String(x.observed_at || x.finished_at || x.started_at || "").replace("T", " ").slice(0,19)) + " · " + (x.source === "automation" ? "每日自动采集" : "手动采集") + " · " + h(names[x.status] || x.status) + " · " + (x.status === "done" ? num(x.count) + " 篇" : h(x.message || "")) + "</p>").join("") || "暂无采集记录。";
   }
 
-  function selectNode(id) {
-    selected = id;
-    renderGraph(); renderDetail(); renderArticles();
+  function timeline() {
+    const values = view === "release" ? [...releases()].reverse() : [...nodes()].reverse();
+    el("evoListTitle").textContent = view === "release" ? "版本时间线" : "写作方案阶段";
+    el("evoListHint").textContent = view === "release" ? "默认按发布时间推定归属；点击版本查看样本、时间边界与改动。" : "方案视图只展示有明确生成／人工归属的证据链。";
+    el("evoNodeList").innerHTML = values.map((x) => {
+      const id = view === "release" ? x.tag : x.id;
+      const m = view === "release" ? (x.time_metrics || {}) : (x.metrics || {});
+      const count = view === "release" ? (x.time_article_ids || []).length : (x.article_ids || []).length;
+      const when = view === "release" ? String(releaseDate(x)).replace("T", " ").slice(0, 16)
+        : (x.source === "runtime" ? "已记录试用" : "历史代码");
+      const sampleLabel = view === "release" ? num(count) + " 篇时间窗归属" : num(count) + " 篇证据归属";
+      return '<button class="evo-time-item ' + (id === selected ? "sel" : "") + '" data-evo-node="' + h(id) + '"><span class="evo-time-dot"></span><span class="evo-time-main"><b>' + h(view === "release" ? x.tag : (x.label || x.id)) + '</b><small>' + h(when) + '</small></span><span class="evo-time-score">' + h(m.median == null ? "等待样本" : name() + "中位数 " + num(m.median)) + '<small>' + sampleLabel + '</small></span></button>';
+    }).join("") || '<p class="evo-muted">尚无可展示的版本或方案记录。</p>';
   }
 
-  function renderDetail() {
-    const node = selectedScheme();
-    if (!node) { el("evoDetail").innerHTML = '<p class="evo-muted">尚无节点记录。</p>'; return; }
-    const release = selectedRelease();
-    const m = selectedMetrics();
-    const metric = (label, value) => "<div><dt>" + label + "</dt><dd>" + num(value) + "</dd></div>";
-    let html = "<h3>" + h(release ? release.tag : nodeLabel(node)) + "</h3>";
-    html += '<p class="evo-muted">' + h(release?.date || node.start_date || "") + "</p>";
-    if (release) {
-      html += "<p>" + h(Array.isArray(release.summary) ? release.summary.join("；") : release.summary || "版本记录") + "</p>";
-      html += '<p class="evo-muted">属于 ' + h(nodeLabel(node)) + "。下面仅统计有该生成版本证据且已确认归属的作品。</p>";
-    } else html += "<p>" + h(node.description || "同一写作方案连续使用的阶段") + "</p>";
-    html += "<dl>" + metric(metricName() + "中位数", m.median) + metric("P25 · 较低四分位", m.p25)
-      + metric("篇均" + metricName(), m.mean) + metric("有效阶段观测", m.observed || 0) + "</dl>";
-    const share = m.top_share == null ? "—" : (m.top_share * 100).toFixed(1) + "%";
-    html += '<p class="evo-muted">已关联 ' + (m.assigned || 0) + " 篇 · 已到观察日 " + (m.mature || 0)
-      + " 篇<br>最大单篇占比 " + share + "；用于查看成绩是否集中在一篇作品。</p>";
-    html += '<p class="evo-muted">尚未到观察日 ' + num(m.immature || 0) + " 篇 · 窗口缺失 " + num(m.missing || 0)
-      + " 篇 · 发布日期未知 " + num(m.unknown_publish || 0) + " 篇</p>";
-    const candidateSource = release || node;
-    const candidateCount = (candidateSource.candidate_article_ids || []).length;
-    if (candidateCount) {
-      const candidateMetric = candidateSource.candidate_metrics?.median;
-      html += '<p class="evo-note">另有' + num(candidateCount) + '篇候选（缺正文一致性证据，不计入已确认统计）'
-        + (candidateMetric == null ? "。" : "；候选样本中位数 " + num(candidateMetric) + "，仅作参考。") + "</p>";
-    }
-    if (m.by_metric) html += '<details><summary>各反馈指标的有效样本</summary>' + Object.entries(m.by_metric)
-      .map(([key, stat]) => '<p class="evo-muted">' + h(metricNames[key]) + "：" + num(stat.valid_n)
-        + " 篇，中位数 " + num(stat.median) + "，缺失 " + num(stat.missing) + " 篇</p>").join("") + "</details>";
-    html += '<p class="evo-note">' + h(m.observed ? (m.observed < 5 ? "样本较少，保留观察结果，暂不足以判断稳定改善。" : "优先结合中位数、P25 与样本分布判断；这些结果尚不能证明改动的因果效果。")
-      : m.assigned ? "尚未获得这个阶段的有效观测，暂不评分。" : "尚无已确认归属的公开作品，暂不评分。") + "</p>";
-    html += '<p class="evo-muted">包含版本</p>' + (node.releases || []).map((tag) => '<a class="evo-release-link" href="'
-      + h(releaseLink(tag)) + '" target="_blank" rel="noopener noreferrer">' + h(tag) + " ↗</a>").join("");
-    if (node.source === "history") html += '<p class="evo-muted">历史节点按写作代码归并；当时的模型、文风和运行配置尚未完整记录。</p>';
-    if (node.settings) {
-      const labels = {LLM_MODE: "生成通道", LLM_PROVIDER: "模型提供商", LLM_MODEL_ID: "API 模型",
-        WEB_LLM_DRIVER: "网页模型", AUTHOR_PROFILE: "作者风格", STORY_MATERIAL_MODE: "素材方式",
-        QUESTION_SELECT_MODE: "选题方式", QUESTION_SOURCE: "选题来源", LLM_API_TEMPERATURE: "生成温度"};
-      html += '<details><summary>记录的方案设置</summary>' + Object.entries(node.settings)
-        .filter(([key, value]) => labels[key] && value != null)
-        .map(([key, value]) => '<p class="evo-muted">' + h(labels[key]) + "：" + h(value) + "</p>").join("") + "</details>";
-    }
-    if (release) html += '<details><summary>改动来源与文件</summary><p>' + h(release.commit || "待发布") + "</p><ul>"
-      + (release.changed_files || []).slice(0, 30).map((file) => "<li>" + h(file) + "</li>").join("") + "</ul></details>";
-    el("evoDetail").innerHTML = html;
+  function detail() {
+    const x = item(); if (!x) { el("evoDetail").innerHTML = '<p class="evo-muted">尚无可查看的记录。</p>'; return; }
+    const m = currentMetrics(), release = selectedRelease(), ids = view === "release" ? (release.time_article_ids || []) : (x.article_ids || []);
+    const timing = view === "release" ? '<p class="evo-detail-time">发布边界：' + h(String(releaseDate(x)).replace("T"," ").slice(0,19)) + ' · ' + h(sourceLabel(x.release_time_source)) + '<br>下个版本边界：' + h(String(x.interval_end || "暂无后续版本边界").replace("T"," ").slice(0,19)) + "</p>" : "";
+    const link = view === "release" ? '<a class="evo-release-link" target="_blank" rel="noopener" href="https://github.com/large-su/AutoQuill/releases/tag/' + encodeURIComponent(x.tag) + '">查看 GitHub Release ↗</a>' : "";
+    el("evoDetail").innerHTML = '<div class="evo-detail-kicker">' + (view === "release" ? "按发布时间推定" : "证据链归属") + '</div><h3>' + h(view === "release" ? x.tag : (x.label || x.id)) + '</h3>' + timing + '<p class="evo-muted">' + h(x.summary || x.summaries?.[0] || "暂无改动摘要") + '</p><dl><div><dt>' + name() + '中位数</dt><dd>' + num(m.median) + '</dd></div><div><dt>P25 · 较低四分位</dt><dd>' + num(m.p25) + '</dd></div><div><dt>阶段有效观测</dt><dd>' + num(m.observed) + '</dd></div><div><dt>归属作品</dt><dd>' + num(ids.length) + '</dd></div></dl>' + link + '<details><summary>数据口径与缺失</summary><p>已归属 ' + num(m.assigned ?? ids.length) + ' 篇；有效观测 ' + num(m.observed) + ' 篇；尚未成熟 ' + num(m.immature) + ' 篇；缺少阶段指标 ' + num(m.missing) + ' 篇。篇均 ' + num(m.mean) + '，最高篇占比 ' + (m.top_share == null ? '—' : num(m.top_share * 100) + '%') + '。样本按作品发布时间归入版本时间窗；方案视图保留生成证据与人工方案归属。缺失指标与未成熟作品不按零处理。</p></details>';
   }
 
-  function renderArticles() {
-    const node = selectedScheme();
-    const all = [...(data.articles || [])].sort((a, b) => (b.publish_date || "").localeCompare(a.publish_date || ""));
-    const articles = el("evoOnlySelected").checked ? all.filter(belongsToSelected) : all;
-    if (!articles.length) {
-      el("evoArticles").innerHTML = '<p class="evo-muted">' + (all.length ? "所选方案尚无已关联作品。取消筛选后，可从已有作品中确认归属。"
-        : "尚无公开作品快照。可先到已发布内容看板刷新，再回到此页查看。") + "</p>";
-    } else {
-      el("evoArticles").innerHTML = '<table class="evo-table"><thead><tr><th>作品 / 发布日期</th><th>方案归属</th>'
-        + '<th class="evo-num">当前' + h(metricName()) + '</th><th class="evo-num">阶段' + h(metricName()) + '</th><th>观测状态与变化</th></tr></thead><tbody>'
-        + articles.map((article) => {
-          const href = publicLink(article.url);
-          const title = href ? '<a class="evo-title" href="' + h(href) + '" target="_blank" rel="noopener noreferrer">' + h(article.title || article.aid) + " ↗</a>"
-            : '<span class="evo-title">' + h(article.title || article.aid) + "</span>";
-          const chosen = article.node_id || article.suggested_node_id || "";
-          const options = '<option value="">暂不关联</option>' + nodes().map((n) => '<option value="' + h(n.id) + '"'
-            + (chosen === n.id ? " selected" : "") + ">" + h(nodeLabel(n)) + "</option>").join("");
-          const isPublic = !!article.observations?.length;
-          const state = !isPublic ? "发布回执 · 待公开确认" : article.node_id ? "已确认归属"
-            : article.suggested_node_id ? "归属建议 · 待确认" : "待关联";
-          const reason = attributionReasons[article.attribution_reason] || article.attribution_reason || "未知";
-          const observation = article.horizon_observation;
-          const hasValue = articleMetric(article)[metricKey()] != null;
-          const status = !isPublic ? "等待公开内容快照" : !article.node_id ? "确认归属后参与评价" : !article.publish_date ? "缺少发布日期"
-            : observation && hasValue ? "第 " + num(observation.age_days) + " 天观测"
-              : article.age_days != null && article.age_days < data.horizon ? "尚未到观察日" : "缺少窗口内有效观测";
-          const change = article.latest_change;
-          const delta = change?.metrics?.[metricKey()];
-          const windowChange = (pair) => article.window_deltas?.[pair]?.[metricKey()];
-          const interval = (pair, label) => {
-            const x = windowChange(pair);
-            return label + "：" + (x ? (x.value >= 0 ? "+" : "") + num(x.value)
-              + "（第 " + num(x.from_age_days) + "→" + num(x.to_age_days) + " 天实际观测）" : "缺少两端观测");
-          };
-          const details = '<details><summary>观测变化 · ' + num(article.observations?.length || 0) + ' 次</summary>'
-            + '<p class="evo-muted">归属依据：' + h(reason) + (article.version_confirmed ? " · 生成版本已确认" : " · 生成版本未确认") + "</p>"
-            + (change ? '<p class="evo-muted">' + h(change.from_at) + " → " + h(change.to_at) + "<br>"
-              + h(metricName()) + "变化：" + (delta == null ? "—（缺指标）" : (delta >= 0 ? "+" : "") + num(delta)) + "</p>" : "尚缺相邻观测。")
-            + '<p class="evo-muted">' + h(interval("7_14", "7→14 天")) + "<br>" + h(interval("14_30", "14→30 天")) + "</p>"
-            + (article.observations || []).slice(-7).map((o) => '<div class="evo-muted">' + h(o.observed_at)
-              + " · " + num(o[metricKey()]) + "</div>").join("") + "</details>";
-          return "<tr><td>" + title + '<span class="evo-muted">' + h(article.publish_date || "发布日期未知")
-            + (article.generation_version ? " · 生成 v" + h(article.generation_version.replace(/^v/, "")) : " · 生成版本未知") + "</span></td><td>"
-            + '<div class="evo-assignment-box"><select class="evo-assignment" data-evo-aid="' + h(article.aid) + '" aria-label="作品所属方案">'
-            + options + '</select><button class="btn ghost" data-evo-save="' + h(article.aid) + '"'
-            + (isPublic ? "" : " disabled") + '>确认归属</button></div>'
-            + '<span class="evo-state ' + (article.node_id ? "confirmed" : "") + '">' + state + " · " + h(reason) + "</span></td>"
-            + '<td class="evo-num">' + num((article.latest?.metrics || article.latest || {})[metricKey()]) + "</td>"
-            + '<td class="evo-num">' + num(articleMetric(article)[metricKey()]) + "</td><td>" + h(status) + details + "</td></tr>";
-        }).join("") + "</tbody></table>";
-    }
-    renderDistribution(node, all);
+  function articles() {
+    const all = data.articles || [], values = el("evoOnlySelected").checked ? all.filter(belongs) : all, options = ['<option value="">未确认方案</option>'].concat(nodes().map((n) => '<option value="' + h(n.id) + '">' + h(n.label || n.id) + '</option>'));
+    if (!values.length) { el("evoArticles").innerHTML = '<p class="evo-muted">当前筛选没有作品。可取消“只看所选版本或方案”查看全部记录。</p>'; chart([]); return; }
+    el("evoArticles").innerHTML = '<table class="evo-table"><thead><tr><th>作品 / 发布时间</th><th>版本归属</th><th class="evo-num">当前' + name() + '</th><th class="evo-num">阶段' + name() + '</th><th>观测状态</th><th>方案证据</th></tr></thead><tbody>' + values.map((a) => { const title = publicLink(a.url) ? '<a class="evo-title" href="' + h(publicLink(a.url)) + '" target="_blank" rel="noopener">' + h(a.title || "未命名作品") + " ↗</a>" : '<span class="evo-title">' + h(a.title || "未命名作品") + "</span>"; const time = a.time_attribution || {}, version = versionOf(a), status = a.horizon_observation && metric(a)[key()] != null ? "第 " + num(a.horizon_observation.age_days) + " 天实际观测" : a.age_days != null && a.age_days < data.horizon ? "尚未到观察日" : "缺少窗口内有效观测"; const inference = (reasons[time.reason] || reasons[a.attribution_reason] || "待核对") + (time.precision ? " · " + ({day:"日", minute:"分钟", second:"秒"}[time.precision] || time.precision) + "精度" : "") + (time.source ? " · " + sourceLabel(time.source) : ""); const evidence = reasons[a.attribution_reason] || "生成证据待确认"; return '<tr><td>' + title + '<span class="evo-muted">' + h(a.publish_time || a.publish_date || "发布时间未知") + (a.generation_version ? " · 生成记录 v" + h(String(a.generation_version).replace(/^v/, "")) : "") + '</span></td><td><span class="evo-state ' + (version ? "confirmed" : "") + '">' + h(version || reasons[time.reason] || reasons[a.attribution_reason] || "待核对") + '</span><small class="evo-muted">' + h(inference) + '</small></td><td class="evo-num">' + num((a.latest?.metrics || a.latest || {})[key()]) + '</td><td class="evo-num">' + num(metric(a)[key()]) + '</td><td>' + h(status) + '</td><td><div class="evo-assignment-box"><select class="evo-assignment" data-evo-aid="' + h(a.aid) + '">' + options.join("") + '</select><button class="btn ghost" data-evo-save="' + h(a.aid) + '">确认</button></div><small class="evo-muted">' + h(evidence) + '</small></td></tr>'; }).join("") + "</tbody></table>";
+    values.forEach((a) => { const s = [...el("evoArticles").querySelectorAll("select[data-evo-aid]")].find((x) => x.dataset.evoAid === String(a.aid)); if (s) s.value = a.node_id || ""; }); chart(values);
   }
 
-  function renderDistribution(node, articles) {
-    const samples = articles.filter((a) => belongsToSelected(a) && a.attribution === "confirmed" && articleMetric(a)[metricKey()] != null)
-      .sort((a, b) => articleMetric(a)[metricKey()] - articleMetric(b)[metricKey()]);
-    el("evoDistribution").hidden = !samples.length;
-    if (!samples.length || !window.echarts) return;
-    if (!distribution) distribution = echarts.init(el("evoDistribution"));
-    distribution.setOption({animation: false,
-      title: {text: "所选节点 · 每篇作品的阶段" + metricName() + "（由低到高）", textStyle: {color: "#dbe3f0", fontSize: 12}},
-      grid: {left: 50, right: 20, top: 42, bottom: 32},
-      tooltip: {trigger: "item", formatter: (params) => h(samples[params.dataIndex].title || "作品") + "<br>阶段" + metricName() + "：" + num(params.value)},
-      xAxis: {type: "category", data: samples.map((_, i) => i + 1), name: "作品", axisLabel: {color: "#7d8aa3"}},
-      yAxis: {type: "value", name: metricName(), axisLabel: {color: "#7d8aa3"}, splitLine: {lineStyle: {color: "#232b3d"}}},
-      series: [{type: "bar", data: samples.map((a) => articleMetric(a)[metricKey()]), itemStyle: {color: "#818cf8"},
-        markLine: {symbol: "none", lineStyle: {color: "#34d399"}, label: {color: "#34d399"},
-          data: selectedMetrics().median == null ? [] : [{yAxis: selectedMetrics().median, name: "中位数", label: {formatter: "中位数"}}]}}]
-    }, true);
-    distribution.resize();
-  }
-
-  async function saveAssignment(aid, button) {
-    const select = [...el("evoArticles").querySelectorAll("select[data-evo-aid]")].find((s) => s.dataset.evoAid === aid);
-    if (!select) return;
-    button.disabled = true;
-    button.textContent = "保存中…";
-    try {
-      const response = await fetch("/api/evolution/assign", {method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({aid, node_id: select.value || null})});
-      if (!response.ok) {
-        const result = await response.json();
-        throw new Error(result.detail || "保存失败");
-      }
-      await load();
-    } catch (error) {
-      el("evoStatus").textContent = "归属未保存：" + error.message;
-      el("evoStatus").classList.add("evo-error");
-      button.disabled = false;
-      button.textContent = "确认归属";
-    }
-  }
-
-  el("evoRefresh").addEventListener("click", load);
-  el("evoHorizon").addEventListener("change", load);
-  ["evoMetric", "evoSince", "evoUntil"].forEach((id) => el(id).addEventListener("change", load));
-  el("evoFeedbackRefresh").addEventListener("click", async () => {
-    const button = el("evoFeedbackRefresh");
-    button.disabled = true;
-    try {
-      const response = await fetch("/api/dashboard/refresh", {method: "POST"});
-      const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.message || "刷新未启动");
-      el("evoFeedbackStatus").textContent = "正在从知乎采集反馈，可离开此页；完成后会保存新的观测节点。";
-      while (true) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        const status = await (await fetch("/api/dashboard/refresh/status")).json();
-        if (status.status === "running") { el("evoFeedbackStatus").textContent = status.progress || "正在采集…"; continue; }
-        const loaded = await load();
-        if (loaded === false) throw new Error("读取反馈结果失败，已有观测仍保留");
-        if (status.status !== "done") throw new Error(status.error || "本次采集未完成，已有观测仍保留");
-        break;
-      }
-    } catch (error) {
-      el("evoFeedbackStatus").textContent = "反馈采集未完成：" + error.message;
-    } finally { button.disabled = false; }
-  });
-  el("evoReset").addEventListener("click", () => { if (data) renderGraph(); });
-  el("evoOnlySelected").addEventListener("change", () => { if (data) renderArticles(); });
-  el("evoViewSwitch").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-evo-view]");
-    if (!button) return;
-    view = button.dataset.evoView;
-    el("evoViewSwitch").querySelectorAll("button").forEach((b) => {
-      b.classList.toggle("sel", b === button); b.setAttribute("aria-selected", String(b === button));
-    });
-    selected = null;
-    if (data) { selected = (view === "scheme" ? nodes().at(-1)?.id : releases().at(-1)?.tag) || null; render(); }
-  });
-  el("evoNodeList").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-evo-node]");
-    if (button) selectNode(button.dataset.evoNode);
-  });
-  el("evoArticles").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-evo-save]");
-    if (button) saveAssignment(button.dataset.evoSave, button);
-  });
-  const resize = () => { if (!el("pane-evolution").hidden) { graph?.resize(); distribution?.resize(); } };
-  if (window.ResizeObserver) new ResizeObserver(resize).observe(el("evoGraph"));
-  window.addEventListener("resize", resize);
-  return {load};
+  function chart(values) { const samples = values.filter((a) => belongs(a) && metric(a)[key()] != null).sort((a,b) => metric(a)[key()] - metric(b)[key()]); el("evoDistribution").hidden = !samples.length; if (!samples.length || !window.echarts) return; if (!distribution) distribution = echarts.init(el("evoDistribution")); distribution.setOption({animation:false,title:{text:"所选" + (view === "release" ? "版本" : "方案") + " · 每篇作品阶段" + name(),textStyle:{color:"#dbe3f0",fontSize:12}},grid:{left:48,right:18,top:42,bottom:30},xAxis:{type:"category",data:samples.map((_,i)=>i+1),axisLabel:{color:"#7d8aa3"}},yAxis:{type:"value",axisLabel:{color:"#7d8aa3"},splitLine:{lineStyle:{color:"#232b3d"}}},series:[{type:"bar",data:samples.map((a)=>metric(a)[key()]),itemStyle:{color:"#818cf8"}}]},true); distribution.resize(); }
+  async function save(aid, button) { const select = [...el("evoArticles").querySelectorAll("select[data-evo-aid]")].find((x)=>x.dataset.evoAid===aid); if (!select) return; button.disabled=true; button.textContent="保存中…"; try { const r=await fetch("/api/evolution/assign",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({aid,node_id:select.value||null})}), result=await r.json(); if (!r.ok) throw new Error(result.detail||"保存失败"); await load(); } catch(error) { el("evoStatus").textContent="方案归属未保存："+error.message; el("evoStatus").classList.add("evo-error"); button.disabled=false; button.textContent="确认"; } }
+  el("evoRefresh").addEventListener("click",load); ["evoHorizon","evoMetric","evoSince","evoUntil"].forEach((id)=>el(id).addEventListener("change",load)); el("evoOnlySelected").addEventListener("change",()=>data&&articles());
+  el("evoReleaseRefresh").addEventListener("click",async()=>{const b=el("evoReleaseRefresh"); b.disabled=true;b.textContent="同步中…";try{const r=await fetch("/api/evolution/releases/refresh",{method:"POST"}),v=await r.json();if(!r.ok||!v.ok)throw new Error(v.message||"同步未完成");await load();}catch(e){el("evoSyncStatus").textContent="版本时间同步未完成："+e.message;}finally{b.disabled=false;b.textContent="同步版本时间";}});
+  el("evoFeedbackRefresh").addEventListener("click",async()=>{const b=el("evoFeedbackRefresh");b.disabled=true;try{const r=await fetch("/api/dashboard/refresh",{method:"POST"}),v=await r.json();if(!r.ok||!v.ok)throw new Error(v.message||"刷新未启动");el("evoFeedbackStatus").textContent="正在从知乎采集反馈，可离开此页；完成后会保存新的观测节点。";while(true){await new Promise((ok)=>setTimeout(ok,3000));const s=await(await fetch("/api/dashboard/refresh/status")).json();if(s.status==="running"){el("evoFeedbackStatus").textContent=s.progress||"正在采集…";continue;}if(!await load()||s.status!=="done")throw new Error(s.error||"本次采集未完成，已有观测仍保留");break;}}catch(e){el("evoFeedbackStatus").textContent="反馈采集未完成："+e.message;}finally{b.disabled=false;}});
+  el("evoViewSwitch").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-view]");if(!b)return;view=b.dataset.evoView;el("evoViewSwitch").querySelectorAll("button").forEach((x)=>{x.classList.toggle("sel",x===b);x.setAttribute("aria-selected",String(x===b));});el("evoOnlySelected").parentElement.lastChild.textContent="只看所选"+(view==="release"?"版本":"方案");selected=null;if(data){selected=(view==="release"?releases().at(-1)?.tag:nodes().at(-1)?.id)||null;render();}}); el("evoNodeList").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-node]");if(b){selected=b.dataset.evoNode;timeline();detail();articles();}}); el("evoArticles").addEventListener("click",(e)=>{const b=e.target.closest("[data-evo-save]");if(b)save(b.dataset.evoSave,b);}); window.addEventListener("resize",()=>{if(!el("pane-evolution").hidden)distribution?.resize();}); return {load};
 })();

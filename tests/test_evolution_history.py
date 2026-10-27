@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -42,6 +43,65 @@ class EvolutionHistoryTest(unittest.TestCase):
         self.assertEqual(rs[1]["writing_code_id"], rs[0]["writing_code_id"])
         self.assertEqual(rs[1]["parent"], rs[0]["source_commit"])
         self.assertEqual(json.loads(out.read_text())["schema_version"], 1)
+
+    def test_release_times_and_interval_boundaries_are_explicit(self):
+        d = self.make_repo()
+        rows = refresh_history(d)["releases"]
+        for row in rows:
+            self.assertRegex(row["released_at"], r"^\d{4}-\d\d-\d\dT.*[+-]\d\d:\d\d$")
+            self.assertEqual(row["release_time_source"], "git-commit")
+        self.assertEqual(rows[0]["interval_end"], rows[1]["released_at"])
+        self.assertIsNone(rows[-1]["interval_end"])
+
+    def test_imported_github_release_time_survives_offline_refresh(self):
+        d = self.make_repo(); out = d / "manifest.json"
+        manifest = refresh_history(d, out)
+        target = manifest["releases"][1]
+        target["released_at"] = "2026-01-02T03:04:05+00:00"
+        target["release_time_source"] = "github-release"
+        out.write_text(json.dumps(manifest), encoding="utf8")
+        refreshed = refresh_history(d, out)
+        kept = next(row for row in refreshed["releases"] if row["tag"] == target["tag"])
+        self.assertEqual(kept["released_at"], "2026-01-02T03:04:05+00:00")
+        self.assertEqual(kept["release_time_source"], "github-release")
+
+    def test_github_time_requires_matching_commit_and_valid_offset(self):
+        d = self.make_repo(); out = d / "manifest.json"
+        manifest = refresh_history(d, out)
+        target = manifest["releases"][1]
+        original = target["released_at"]
+        target["released_at"] = "2026-01-02T03:04:05"  # no offset
+        target["release_time_source"] = "github-release"
+        target["commit"] = "0" * 40
+        out.write_text(json.dumps(manifest), encoding="utf8")
+        refreshed = refresh_history(d, out)
+        kept = next(row for row in refreshed["releases"] if row["tag"] == target["tag"])
+        self.assertEqual(kept["released_at"], original)
+        self.assertEqual(kept["release_time_source"], "git-commit")
+
+    def test_annotated_tag_and_same_day_commit_offsets_are_exact(self):
+        d = self.make_repo()
+        (d / "story_prompt.py").write_text("annotated", encoding="utf8")
+        git(d, "add", ".")
+        env = os.environ.copy()
+        env["GIT_AUTHOR_DATE"] = "2026-04-05T09:10:11+08:00"
+        env["GIT_COMMITTER_DATE"] = "2026-04-05T09:10:11+08:00"
+        subprocess.run(["git", "commit", "-qm", "same-day-a"], cwd=d, env=env, check=True)
+        commit_a = git(d, "rev-parse", "HEAD").strip()
+        git(d, "tag", "v1.3.0")
+        (d / "story_prompt.py").write_text("annotated-two", encoding="utf8")
+        git(d, "add", ".")
+        env["GIT_AUTHOR_DATE"] = "2026-04-05T10:10:12-05:00"
+        env["GIT_COMMITTER_DATE"] = "2026-04-05T10:10:12-05:00"
+        subprocess.run(["git", "commit", "-qm", "same-day-b"], cwd=d, env=env, check=True)
+        git(d, "tag", "-a", "v1.4.0", "-m", "annotated")
+        rows = refresh_history(d)["releases"]
+        first = next(row for row in rows if row["tag"] == "v1.3.0")
+        second = next(row for row in rows if row["tag"] == "v1.4.0")
+        self.assertEqual(first["commit"], commit_a)
+        self.assertEqual(first["released_at"], "2026-04-05T09:10:11+08:00")
+        self.assertEqual(second["released_at"], "2026-04-05T10:10:12-05:00")
+        self.assertEqual(first["interval_end"], second["released_at"])
 
     def test_missing_fingerprint_is_explicit(self):
         d = self.make_repo(); (d / "story_prompt.py").unlink()

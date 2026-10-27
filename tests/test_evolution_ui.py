@@ -17,13 +17,27 @@ from core import evolution
 
 @unittest.skipUnless(os.environ.get("AQ_UI_TESTS") == "1", "opt-in Edge UI test")
 class EvolutionUITest(unittest.TestCase):
-    def test_graph_views_horizons_and_assignment(self):
+    def test_release_time_window_views_horizons_and_assignment(self):
         from fastapi.testclient import TestClient
         from playwright.sync_api import sync_playwright
         from webui.server import app
 
+        today = date.today()
+        first_release = (today - timedelta(days=40)).isoformat()
+        second_release = (today - timedelta(days=10)).isoformat()
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             evolution.paths, "data", side_effect=lambda *parts: str(Path(temporary).joinpath(*parts))
+        ), patch.object(
+            evolution, "_history", return_value=[
+                {"version": "0.1.0", "tag": "v0.1.0", "date": first_release,
+                 "released_at": first_release + "T00:00:00+08:00",
+                 "release_time_source": "synthetic-ui", "writing_code_id": "synthetic-writing-a",
+                 "change_kind": "writing", "summary": "合成版本窗口 A"},
+                {"version": "0.2.0", "tag": "v0.2.0", "date": second_release,
+                 "released_at": second_release + "T00:00:00+08:00",
+                 "release_time_source": "synthetic-ui", "writing_code_id": "synthetic-writing-b",
+                 "change_kind": "writing", "summary": "合成版本窗口 B"},
+            ]
         ):
             today = date.today()
             publish_date = (today - timedelta(days=30)).isoformat()
@@ -41,10 +55,25 @@ class EvolutionUITest(unittest.TestCase):
             for aid in ("2", "3", "4", "5", "6"):
                 self.assertEqual(client.post("/api/evolution/assign", json={"aid": aid, "node_id": scheme_id}).status_code, 200)
             errors = []
+            actions = []
+            fail = {'sync': False, 'feedback': False}
 
             def route_request(route):
                 parsed = urlsplit(route.request.url)
                 target = parsed.path + ("?" + parsed.query if parsed.query else "")
+                if parsed.path == "/api/evolution/releases/refresh":
+                    actions.append("release-refresh")
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps({"ok": not fail['sync'], "message": "离线测试：保留缓存", "count": 2}))
+                    return
+                if parsed.path == "/api/dashboard/refresh":
+                    actions.append("feedback-refresh")
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+                    return
+                if parsed.path == "/api/dashboard/refresh/status":
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps({"status": "error" if fail['feedback'] else "done", "error": "采集失败测试"}))
+                    return
                 if parsed.path.startswith("/api/evolution") or not parsed.path.startswith("/api/"):
                     response = client.request(route.request.method, target, content=route.request.post_data,
                                               headers={"Content-Type": "application/json"})
@@ -68,15 +97,42 @@ class EvolutionUITest(unittest.TestCase):
                     page.select_option("#leftModeSel", "evolution")
                     page.wait_for_selector("#evoArticles tbody tr")
                     self.assertEqual(page.locator("#evoArticles tbody tr").count(), 6)
-                    self.assertGreater(page.locator("#evoGraph canvas").count(), 0)
+                    self.assertGreater(page.locator("#evoNodeList .evo-time-item").count(), 0)
+                    self.assertIn("按发布时间推定", page.inner_text("#evoListHint"))
+                    self.assertIn("从知乎更新反馈", page.inner_text("#pane-evolution"))
+                    self.assertIn("同步版本时间", page.inner_text("#pane-evolution"))
+                    self.assertEqual(page.get_attribute('[data-evo-view="release"]', 'aria-selected'), 'true')
+                    page.click('[data-evo-node="v0.1.0"]')
+                    self.assertIn('42.5', page.inner_text('#evoDetail'))
+                    page.check('#evoOnlySelected')
+                    self.assertEqual(page.locator('#evoArticles tbody tr').count(), 6)
+                    page.click('[data-evo-node="v0.2.0"]')
+                    self.assertEqual(page.locator('#evoArticles tbody tr').count(), 0)
+                    page.uncheck('#evoOnlySelected')
+                    page.click("#evoReleaseRefresh")
+                    page.wait_for_function("document.getElementById('evoReleaseRefresh').disabled === false")
+                    page.click("#evoFeedbackRefresh")
+                    page.wait_for_function("document.getElementById('evoFeedbackRefresh').disabled === false")
+                    self.assertEqual(actions, ["release-refresh", "feedback-refresh"])
+                    fail['sync'] = True
+                    page.click('#evoReleaseRefresh')
+                    page.wait_for_function("!document.getElementById('evoReleaseRefresh').disabled")
+                    self.assertIn('离线测试', page.inner_text('#evoSyncStatus'))
+                    fail['feedback'] = True
+                    page.click('#evoFeedbackRefresh')
+                    page.wait_for_function("!document.getElementById('evoFeedbackRefresh').disabled")
+                    self.assertIn('采集失败测试', page.inner_text('#evoFeedbackStatus'))
+                    self.assertEqual(page.locator('#evoArticles tbody tr').count(), 6)
+                    page.select_option("#evoHorizon", "30")
+                    page.wait_for_function("document.getElementById('evoWindowNote').textContent.includes('第 30～33')")
+                    page.click('[data-evo-view="scheme"]')
                     page.select_option('select[data-evo-aid="1"]', scheme_id)
                     page.click('button[data-evo-save="1"]')
-                    page.wait_for_function("document.querySelectorAll('#evoArticles .evo-state.confirmed').length === 6")
-                    page.locator('#evoNodeList button').first.click()
+                    page.wait_for_function("[...document.querySelectorAll('#evoArticles select[data-evo-aid]')].every(x => x.value)")
+                    page.locator('#evoNodeList button[data-evo-node="' + scheme_id + '"]').click()
                     self.assertIn("42.5", page.inner_text("#evoDetail"))
                     self.assertGreater(page.locator("#evoDistribution canvas").count(), 0)
                     self.assertIn("6 篇", page.inner_text("#evoFeedbackStatus"))
-                    self.assertIn("已确认 6 篇", page.inner_text("#evoFeedbackStatus"))
                     self.assertIn("账号关注数不可用", page.inner_text("#evoWarnings"))
                     self.assertIn("人工确认", page.inner_text("#evoArticles"))
                     page.select_option("#evoMetric", "collects")
@@ -89,21 +145,27 @@ class EvolutionUITest(unittest.TestCase):
                     page.click('[data-evo-view="release"]')
                     release_count = len(client.get('/api/evolution').json()['releases'])
                     self.assertEqual(page.locator("#evoNodeList button").count(), release_count)
-                    self.assertEqual(page.evaluate("echarts.getInstanceByDom(document.getElementById('evoGraph')).getOption().series[0].links.length"), release_count - 1)
                     page.click("#evoNodeList button:first-child")
-                    self.assertIn("属于", page.inner_text("#evoDetail"))
+                    self.assertIn("按发布时间推定", page.inner_text("#evoDetail"))
                     page.click('[data-evo-view="scheme"]')
                     page.select_option('select[data-evo-aid="1"]', "")
                     page.click('button[data-evo-save="1"]')
-                    page.wait_for_function("document.querySelectorAll('#evoArticles .evo-state.confirmed').length === 5")
+                    page.wait_for_function("[...document.querySelectorAll('#evoArticles select[data-evo-aid]')].filter(x => x.value).length === 5")
                     screenshot = os.environ.get("AQ_UI_SCREENSHOT")
                     if screenshot:
                         page.select_option("#evoHorizon", "30")
                         page.wait_for_function("document.getElementById('evoWindowNote').textContent.includes('第 30～33')")
                         page.click('[data-evo-view="release"]')
+                        page.click('[data-evo-node="v0.1.0"]')
                         page.locator(".left-col").evaluate("element => element.scrollTop = 0")
-                        page.locator("#evoStatus").evaluate("element => element.textContent = '界面测试示例：版本历史真实，文章与互动为合成数据。 ' + element.textContent")
+                        page.locator("#evoStatus").evaluate("element => element.textContent = '界面测试示例：版本、文章与互动均为合成数据。 ' + element.textContent")
                         page.screenshot(path=screenshot, full_page=True)
+                    page.set_viewport_size({"width": 620, "height": 900})
+                    page.wait_for_timeout(100)
+                    self.assertLessEqual(page.locator("#pane-evolution .evo-workspace").evaluate("e => e.scrollWidth - e.clientWidth"), 1)
+                    self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth - window.innerWidth'), 1)
+                    if screenshot:
+                        page.screenshot(path=str(Path(screenshot).with_name(Path(screenshot).stem + "-narrow.png")), full_page=True)
                     self.assertEqual(errors, [])
                 finally:
                     browser.close()
