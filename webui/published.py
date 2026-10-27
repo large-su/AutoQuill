@@ -600,7 +600,12 @@ def scrape(progress=None, stop_flag=None, result_meta=None):
         new_eng = sum(
             r["likes"] + r["reads"] + r["comments"] + r["collects"] + r["favors"]
             for r in dedup)
-        broken = (not dedup) or (new_eng == 0 and len(dedup) > 10) \
+        from core import evolution
+        raw_metrics = [r['metrics'] if isinstance(r.get('metrics'), dict) else r for r in raw_dedup]
+        valid_metrics = sum(
+            evolution._number(source.get(key, source.get(label))) is not None
+            for source in raw_metrics for key, label in evolution._METRICS.items())
+        broken = (not dedup) or valid_metrics == 0 \
                   or (prev_eng > 0 and new_eng < prev_eng * 0.2)
         if broken:
             log.warning(
@@ -614,24 +619,33 @@ def scrape(progress=None, stop_flag=None, result_meta=None):
 
         stamp = datetime.now().astimezone().isoformat(timespec="seconds")
         path = _DATA_DIR / f"published_answers_{stamp[:10]}.json"
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(dedup, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-        if progress:
-            progress(f"已抓取 {len(dedup)} 条，已保存", 100)
-        log.info("已发布内容抓取完成：%d 条 → %s", len(dedup), path)
         ingest_error = None
         try:
             from core import evolution
             # 原始指标才能区分「缺失」与实测 0；看板归一后的旧字段已丢失这个区别。
             ingested = evolution.ingest_snapshot(raw_dedup, observed_at=stamp)
-            if not ingested:
-                ingest_error = "演进观测未写入"
+            if ingested != len(raw_dedup):
+                ingest_error = "演进观测未完整写入"
         except Exception as exc:
             ingest_error = "演进观测保存失败：%s" % exc
-            log.warning("演进记录：反馈观测保存失败（看板快照已保留）", exc_info=True)
+            log.warning("演进记录：反馈观测保存失败（保留上次看板快照）", exc_info=True)
+        if ingest_error:
+            _meta(error=ingest_error + "，未替换上次快照", count=0)
+            return []
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                # Preserve explicit zero vs absent fields in the durable daily mirror too.
+                json.dump(raw_dedup, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except OSError as exc:
+            _meta(observed_at=stamp, count=len(dedup),
+                  error="演进观测已保存，但看板快照保存失败：%s" % exc)
+            return []
+        if progress:
+            progress(f"已抓取 {len(dedup)} 条，已保存", 100)
+        log.info("已发布内容抓取完成：%d 条 → %s", len(dedup), path)
         try:
             from core import feedback_loop
             from config.story import FEEDBACK_LOOP_ENABLE
@@ -749,12 +763,13 @@ def refresh_feedback(progress=None, stop_flag=None, source="manual", refresh_key
                     "node_id": node["id"], "message": "反馈刷新已取消",
                     "need_login": False}
         if meta.get("error"):
-            _finish("error", count=len(rows),
+            saved_count = int(meta.get("count") or len(rows))
+            _finish("error", count=saved_count,
                                      observed_at=meta.get("observed_at"),
                                      source_file=meta.get("source_file"),
                                      message=meta["error"])
             _dash({"status": "error", "error": meta["error"], "need_login": False})
-            return {"ok": False, "status": "error", "count": len(rows),
+            return {"ok": False, "status": "error", "count": saved_count,
                     "observed_at": meta.get("observed_at"),
                     "source_file": meta.get("source_file"),
                     "node_id": node["id"], "message": meta["error"],

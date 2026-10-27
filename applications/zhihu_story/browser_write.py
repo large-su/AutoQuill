@@ -14,6 +14,7 @@ import time
 log = logging.getLogger(__name__)
 
 from core.paths import data as _data_path
+from core.evolution import content_fingerprint
 
 from .browser_utils import (
     _NAV_TIMEOUT,
@@ -606,6 +607,12 @@ class WriteActionsMixin:
         time.sleep(6)
         # ★ 回执监听必须在**任何可能触发发布的动作之前**挂上。
         watch = self._arm_publish_watch()
+        draft_content_digest = None
+
+        def _add_content_evidence(result):
+            if result.get("ok") and draft_content_digest:
+                result["draft_content_fingerprint"] = draft_content_digest
+            return result
 
         def _finish(ok, url, detail, **extra):
             """统一收尾：摘监听 + 出结果（避免任何分支漏摘）。
@@ -618,16 +625,16 @@ class WriteActionsMixin:
                 if published:
                     self._disarm_publish_watch(watch)
                     _say("核对草稿箱后确认：本次发布其实已成功（%s）" % why)
-                    return {"ok": True, "qid": target.get("qid", ""),
+                    return _add_content_evidence({"ok": True, "qid": target.get("qid", ""),
                             "title": target.get("title", ""),
                             "url": url or (self.page.url or ""),
-                            "detail": why}
+                            "detail": why})
             self._disarm_publish_watch(watch)
             out = {"ok": ok, "qid": target.get("qid", ""),
                    "title": target.get("title", ""), "url": url or "",
                    "detail": detail}
             out.update(extra)
-            return out
+            return _add_content_evidence(out)
 
         # 进页面先看结果：可能上一步（草稿箱页/导航）就已把发布发出去了。
         # trust_draft=False：还没点过发布，草稿接口读回空不能当成功
@@ -656,6 +663,17 @@ class WriteActionsMixin:
                            "演练通过：草稿箱 %d 篇，将发最旧的一篇《%s》，未点击发布"
                            % (len(cards), target.get("title") or target.get("qid")),
                            reason="dry_run", rehearsed=True)
+        # Best-effort provenance capture: read the server draft exactly once before
+        # the first real publish click. Never let evidence collection block publish.
+        from web_drivers.browser_pool import WorkflowCancelled
+        try:
+            draft_content_digest = content_fingerprint(
+                self.get_draft_content(target.get("qid")))
+        except WorkflowCancelled:
+            self._disarm_publish_watch(watch)
+            raise
+        except Exception as exc:                # noqa: BLE001
+            log.debug("browser_adapter: 草稿内容指纹采集失败：%s", exc)
         # ★ 这里**不再**用 _PUBLISH_BTN_JS 做「预检点击」：
         #   它在非演练时是真的会点按钮的，等于把发布提前到点击函数之外——
         #   2026-09-28 线上事故就是它发出的发布，随后真实点击因按钮已变灰而超时，
@@ -714,9 +732,9 @@ class WriteActionsMixin:
             if m:
                 _say("发布成功：%s" % url)
                 self._disarm_publish_watch(watch)
-                return {"ok": True, "qid": target.get("qid", ""),
+                return _add_content_evidence({"ok": True, "qid": target.get("qid", ""),
                         "title": target.get("title", ""), "url": url,
-                        "detail": "页面已跳到回答页"}
+                        "detail": "页面已跳到回答页"})
             # 服务端回执优先：它是「到底发出去没有」的唯一权威答案。
             # /api/v4/content/publish 用 HTTP 200 + body.code 表达业务结果，
             # 不读它就会把「被拒绝」当成「在路上」干等到超时（2026-09-28 真机）。
@@ -756,9 +774,9 @@ class WriteActionsMixin:
                 if empty_hits >= 2:
                     _say("发布成功（服务端草稿已清空）")
                     self._disarm_publish_watch(watch)
-                    return {"ok": True, "qid": target.get("qid", ""),
+                    return _add_content_evidence({"ok": True, "qid": target.get("qid", ""),
                             "title": target.get("title", ""), "url": url,
-                            "detail": "服务端草稿已清空（已发布）"}
+                            "detail": "服务端草稿已清空（已发布）"})
             else:
                 empty_hits = 0
                 # ★ 服务端已回过 code=0（发布被受理）但草稿还没清空、URL 也没变：
@@ -768,10 +786,10 @@ class WriteActionsMixin:
                 if receipt_ok:
                     _say("服务端已受理发布（code=0），但页面/草稿未及时刷新")
                     self._disarm_publish_watch(watch)
-                    return {"ok": True, "qid": target.get("qid", ""),
+                    return _add_content_evidence({"ok": True, "qid": target.get("qid", ""),
                             "title": target.get("title", ""), "url": url,
                             "detail": "发布请求已被服务端受理（草稿尚未刷新，"
-                                      "可在创作中心核对）"}
+                                      "可在创作中心核对）"})
             now = time.time()
             if now - last_log >= 15:
                 last_log = now

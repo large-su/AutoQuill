@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""版本 × 发布文章 × 知乎反馈 复盘工具（P2 固化，每周一键）。
+"""历史启发式复盘工具；不能用于确认各版本效果。
+
+真实版本反馈请使用 tools/evolution_feedback.py。此旧工具按标题和提交日期
+推测关联，不能证明作品由该版本生成，也没有对齐作品发布年龄。
 
 数据流（全部本地）：
   logs/autoquill_*.log                → 每轮生成事件（时间/文件/标题/格式/重试/废稿）
   data/published_answers_*.json（最新）→ 发布文章的阅读/赞/评/藏（按标题归一化匹配）
-  git log                             → 版本时间线（提交时刻 == 当时运行版本）
+  git log                             → 提交时间线（不代表实际运行或生成版本）
   结果                                  → 按版本聚合：发布率 / 格式合规 / 重试 / 废稿 / 互动中位
 
 用法：
@@ -265,6 +268,8 @@ def render_md(rows, days, generated_at, priors_text=""):
     md = []
     md.append("# AutoQuill 版本 × 发布 × 反馈 复盘（%s，近 %d 天）" % (generated_at, days))
     md.append("")
+    md.append("> 历史启发式估算：标题匹配与提交日期不能确认生成版本，累计反馈没有对齐发布年龄。正式比较请用 tools/evolution_feedback.py。")
+    md.append("")
     md.append("| 版本 | 生成 | 发布(率) | 格式合规 | 重试 | 废稿 | 阅读中位 | 赞中位 | 发布代表文章（读/赞） |")
     md.append("|---|---|---|---|---|---|---|---|---|")
     for g in rows:
@@ -290,7 +295,7 @@ def render_md(rows, days, generated_at, priors_text=""):
 def priors_text():
     try:
         from core import feedback_loop
-        s = feedback_loop.summarize(auto_seed=True)
+        s = feedback_loop.summarize(auto_seed=False)
         if not s["n_articles"]:
             return ""
         lines = ["| 题材 | n | 互动分 | 赞/天 | 评/天 | 藏/天 |",
@@ -316,6 +321,7 @@ def main():
     ap.add_argument("--write", action="store_true",
                     help="另写 docs/REVIEW-<今日>.md")
     args = ap.parse_args()
+    print("注意：此旧工具只提供标题/提交日期推测，不是版本效果证据；请用 tools/evolution_feedback.py 查询真实归属与发布年龄窗口。")
 
     events = parse_logs(args.logs)
     rows = load_snapshot_latest(args.data)

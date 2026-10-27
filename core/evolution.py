@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import uuid
+from html.parser import HTMLParser
 from datetime import date, datetime
 from pathlib import Path
 from core import paths
@@ -70,6 +71,22 @@ def _blank():
 def _sha(b):
     return hashlib.sha256(b).hexdigest()
 
+
+def content_fingerprint(html):
+    """Hash rendered story text, ignoring markup/whitespace, never storing prose."""
+    if not isinstance(html, str) or not html.strip():
+        return None
+    class Text(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts = []
+        def handle_data(self, value):
+            self.parts.append(value)
+    parser = Text()
+    parser.feed(html)
+    plain = re.sub(r'[\s\u200b-\u200d\ufeff]+', '', ''.join(parser.parts))
+    return 'text-v1:' + _sha(plain.encode('utf-8')) if plain else None
+
 def _load():
     p = _path()
     if not p.exists():
@@ -78,7 +95,8 @@ def _load():
         data = json.loads(p.read_text(encoding='utf8'))
         if not isinstance(data, dict):
             raise ValueError('状态根不是对象')
-        for k, v in (('generations', []), ('drafts', []), ('articles', {}), ('refreshes', [])):
+        for k, v in (('generations', []), ('drafts', []), ('articles', {}), ('refreshes', []),
+                     ('publication_receipts', []), ('assignments', [])):
             data.setdefault(k, v)
         valid_generations = isinstance(data['generations'], list)
         valid_drafts = isinstance(data['drafts'], list)
@@ -104,6 +122,9 @@ def _load():
             raise ValueError('状态字段类型无效')
         if data.get('schema_version', 1) != 1:
             raise ValueError('不支持的演进状态版本')
+        for key in ('publication_receipts', 'assignments'):
+            if not isinstance(data[key], list) or any(not isinstance(x, dict) for x in data[key]):
+                raise ValueError('归属审计记录字段无效')
         if not isinstance(data['refreshes'], list) or any(
                 not isinstance(item, dict) or not isinstance(item.get('id'), str)
                 or _date(item.get('started_at')) is None
@@ -223,7 +244,7 @@ def record_generation(story_file, story_text, settings=None, workflow_mode=None)
         _save(d)
         return {'id': g['id'], 'event': 'file_save', 'fingerprint': fingerprint}
 
-def record_draft(question_url, story_file, title=''):
+def record_draft(question_url, story_file, title='', *, story_text=None, rendered_html=None):
     m = re.search('question/(\\d+)', str(question_url or ''))
     qid = m.group(1) if m else ''
     name = Path(str(story_file or '')).name
@@ -231,13 +252,19 @@ def record_draft(question_url, story_file, title=''):
         d, _ = _load()
         if d is None:
             return None
-        g = next((x for x in reversed(d['generations']) if x.get('basename') == name), None)
+        candidates = [x for x in d['generations'] if x.get('basename') == name]
+        if story_text is not None:
+            candidates = [x for x in candidates if x['content_hash'] == _sha(str(story_text).encode())]
+        g = candidates[-1] if candidates else None
         if not g:
             return None
-        same = [x for x in d['drafts'] if x.get('qid') == qid and x.get('generation_id') == g['id']]
+        content_hash = content_fingerprint(rendered_html) if story_text is not None else None
+        same = [x for x in d['drafts'] if x.get('qid') == qid and x.get('generation_id') == g['id']
+                and x.get('content_fingerprint') == content_hash]
         if same:
             return dict(same[0])
-        x = {'id': 'draft:' + uuid.uuid4().hex, 'qid': qid, 'title': str(title or ''), 'generation_id': g['id'], 'public': False, 'observed_at': _now()}
+        x = {'id': 'draft:' + uuid.uuid4().hex, 'qid': qid, 'title': str(title or ''), 'generation_id': g['id'], 'public': False, 'observed_at': _now(),
+             'content_fingerprint': content_hash}
         d['drafts'].append(x)
         _save(d)
         return dict(x)
@@ -245,21 +272,50 @@ def record_draft(question_url, story_file, title=''):
 def record_publication(result):
     result = result or {}
     m = _ANSWER.match(str(result.get('url') or ''))
-    if not result.get('ok') or result.get('dry_run') or (not m):
+    if not result.get('ok') or result.get('dry_run'):
         return None
-    aid, qid = (m.group(1), str(result.get('qid') or ''))
+    qid = str(result.get('qid') or '')
+    url_qid = re.search(r'/question/(\d+)/answer/', str(result.get('url') or ''))
+    qid_conflict = bool(url_qid and qid and url_qid.group(1) != qid)
+    qid = qid or (url_qid.group(1) if url_qid else '')
     with _LOCK:
         d, _ = _load()
         if d is None:
             return None
+        receipt = {k: result.get(k) for k in ('url', 'qid', 'draft_content_fingerprint')}
+        receipt['id'] = 'receipt:' + _sha(json.dumps(receipt, sort_keys=True).encode())[:24]
+        receipts = d.setdefault('publication_receipts', [])
+        if not any(x.get('id') == receipt['id'] for x in receipts):
+            receipts.append(dict(receipt, observed_at=_now(), aid=m.group(1) if m else None))
+        if not m:
+            _save(d)
+            return None
+        aid = m.group(1)
         matches = [x for x in d['drafts'] if qid and x.get('qid') == qid]
         draft = matches[0] if len(matches) == 1 else None
+        digest = result.get('draft_content_fingerprint')
+        verified = [x for x in matches if digest and x.get('content_fingerprint') == digest]
+        generations = {x.get('generation_id') for x in verified}
+        if len(generations) == 1 and not qid_conflict:
+            draft = verified[-1]
         if draft:
             draft['publication_receipt_at'] = _now()
         a = d['articles'].setdefault(aid, {'aid': aid, 'observations': [], 'node_id': None, 'assignment_source': None, 'attribution': 'unassigned'})
         a.update({'url': str(result.get('url') or a.get('url') or ''), 'title': str(result.get('title') or a.get('title') or ''), 'qid': qid, 'published_at': a.get('published_at') or _now()})
-        if draft:
-            a['generation_id'] = draft['generation_id']
+        if draft and not qid_conflict:
+            if a.get('generation_id') and a['generation_id'] != draft['generation_id']:
+                a['provenance_conflict'] = True
+            else:
+                a['generation_id'] = draft['generation_id']
+        if qid_conflict:
+            a['provenance_conflict'] = True
+        previous = a.get('publication_evidence') if isinstance(a.get('publication_evidence'), dict) else {}
+        if digest and previous.get('content_fingerprint') and digest != previous['content_fingerprint']:
+            a['provenance_conflict'] = True
+        if draft and len(generations) == 1 and not qid_conflict:
+            a['publication_evidence'] = {'receipt_id': receipt['id'], 'draft_id': draft['id'],
+                                         'generation_id': draft['generation_id'],
+                                         'content_fingerprint': digest, 'verified_at': _now()}
         _save(d)
         return dict(a)
 
@@ -527,7 +583,42 @@ def assign_article(aid, node_id):
             if article.get(k):
                 a[k] = article[k]
         a.update({'node_id': node_id, 'assignment_source': 'manual' if node_id else 'manual_clear', 'attribution': 'confirmed' if node_id else 'unassigned'})
+        d.setdefault('assignments', []).append({'aid': str(aid), 'node_id': node_id,
+                                               'observed_at': _now(), 'source': a['assignment_source']})
         _save(d)
+
+
+def _resolve_attribution(article, data, generations, nodes, public):
+    """Resolve only recorded evidence; read queries never rewrite historic state."""
+    generation = generations.get(article.get('generation_id'), {})
+    candidate = generation.get('episode')
+    if candidate not in nodes:
+        candidate = None
+    source = article.get('assignment_source')
+    if source == 'manual_clear':
+        return None, 'unassigned', source, 'manual_clear', False
+    if not public:
+        return None, 'draft_match_pending', source, 'missing_public_snapshot', False
+    if source == 'manual' and article.get('node_id') in nodes:
+        node = article['node_id']
+        return node, 'confirmed', source, 'manual', bool(generation.get('version') and node == candidate)
+    if article.get('provenance_conflict'):
+        return None, 'unassigned', None, 'conflicting_receipt', False
+    if not generation or not candidate:
+        return None, 'unassigned', None, 'missing_generation', False
+    evidence = article.get('publication_evidence') if isinstance(article.get('publication_evidence'), dict) else {}
+    draft = next((x for x in data['drafts'] if x.get('id') == evidence.get('draft_id')), None)
+    receipt = next((x for x in data.get('publication_receipts', [])
+                    if x.get('id') == evidence.get('receipt_id')), None)
+    digest = evidence.get('content_fingerprint')
+    verified = (draft and receipt and isinstance(digest, str)
+                and re.fullmatch(r'text-v1:[0-9a-f]{64}', digest)
+                and evidence.get('generation_id') == generation['id'] == draft.get('generation_id')
+                and digest == draft.get('content_fingerprint') == receipt.get('draft_content_fingerprint')
+                and str(receipt.get('aid')) == article['aid'])
+    if not verified:
+        return None, 'unassigned', None, 'missing_content_evidence', False
+    return candidate, 'confirmed', 'verified_chain', 'verified_chain', bool(generation.get('version'))
 
 def _q(v, q):
     v = sorted(v)
@@ -588,7 +679,7 @@ def _observation_change(observations):
                         for k in _METRICS}}
 
 
-def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='', as_of=None):
+def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='', as_of=None, version=''):
     try:
         horizon = int(horizon)
     except (ValueError, TypeError):
@@ -601,6 +692,9 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
     start, end = _date(since) if since else None, _date(until) if until else None
     if (since and start is None) or (until and end is None) or (start and end and start > end):
         raise ValueError('无效的作品发布日期范围')
+    filter_version = str(version or '').removeprefix('v')
+    if filter_version and not re.fullmatch(r'\d+(?:\.\d+){1,3}', filter_version):
+        raise ValueError('无效的生成版本')
     with _LOCK:
         d, warnings = _load()
         d = d or _blank()
@@ -627,16 +721,15 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                 obs.append(x)
             hovs = {k: _window_observation(obs, horizon, k) for k in _METRICS}
             hov = hovs[metric]
-            node = a.get('node_id')
             generation = gens.get(a.get('generation_id'), {})
+            node, attribution, assignment_source, reason, version_confirmed = _resolve_attribution(a, d, gens, by, bool(obs))
             suggested = None if a.get('assignment_source') == 'manual_clear' else node or gens.get(a.get('generation_id'), {}).get('episode')
             if not suggested and a.get('assignment_source') != 'manual_clear' and a['aid'] in ledger:
                 tag = 'v' + ledger[a['aid']].lstrip('v')
                 suggested = next((n['id'] for n in nodes if tag in n['releases']), None)
-            attribution = a.get('attribution', 'unassigned')
-            if a.get('published_at') and (not a.get('observations')):
-                attribution = 'draft_match_pending'
             if node_id and node != node_id:
+                continue
+            if filter_version and (not version_confirmed or str(generation.get('version') or '').lstrip('v') != filter_version):
                 continue
             age = (today - pub).days if pub else None
             windows = {str(h): {k: _window_observation(obs, h, k) for k in _METRICS}
@@ -654,10 +747,13 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
             item = {'aid': a['aid'], 'url': a.get('url', ''), 'title': a.get('title', ''),
                     'publish_date': a.get('publish_date', ''), 'published_at': a.get('published_at'),
                     'publish_date_precision': a.get('publish_date_precision'),
-                    'attribution': attribution, 'assignment_source': a.get('assignment_source'),
+                    'attribution': attribution, 'assignment_source': assignment_source,
+                    'attribution_reason': reason, 'version_confirmed': version_confirmed,
                     'node_id': node, 'suggested_node_id': suggested if suggested in by else None,
                     'generation_id': a.get('generation_id'),
-                    'generation_version': generation.get('version') or ledger.get(a['aid']),
+                    'generation_version': generation.get('version'),
+                    'ledger_version_hint': ledger.get(a['aid']),
+                    'publication_evidence': a.get('publication_evidence'),
                     'generation_episode': generation.get('episode'),
                     'latest': obs[-1] if obs else {k: None for k in _METRICS},
                     'observations': obs, 'horizon_observation': hov,
@@ -668,8 +764,13 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
             articles.append(item)
         for n in nodes:
             assigned = [a for a in articles if a['node_id'] == n['id'] and a['attribution'] == 'confirmed']
+            candidates = [a for a in articles if a['suggested_node_id'] == n['id']
+                          and a['attribution'] != 'confirmed' and a['observations']
+                          and a['attribution_reason'] == 'missing_content_evidence']
             n['article_ids'] = [a['aid'] for a in assigned]
             n['metrics'] = _feedback_statistics(assigned, horizon, metric)
+            n['candidate_article_ids'] = [a['aid'] for a in candidates]
+            n['candidate_metrics'] = _feedback_statistics(candidates, horizon, metric)
             n['publication_counts'] = {
                 'total': len(assigned), 'dated': sum(bool(a['publish_date']) for a in assigned),
                 'by_date': {day: sum(a['publish_date'] == day for a in assigned)
@@ -678,22 +779,46 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
         for r in _history():
             x = {k: r.get(k) for k in ('version', 'tag', 'date', 'change_kind', 'writing_code_id', 'writing_files_changed', 'changed_files', 'pending')}
             version = str(r.get('version') or r.get('tag') or '').lstrip('v')
-            assigned = [a for a in articles if a['attribution'] == 'confirmed'
+            assigned = [a for a in articles if a['version_confirmed']
                         and str(a.get('generation_version') or '').lstrip('v') == version]
+            candidates = [a for a in articles if not a['version_confirmed']
+                          and a['attribution_reason'] == 'missing_content_evidence' and a['observations']
+                          and str(a.get('generation_version') or '').lstrip('v') == version]
             x.update(commit=r.get('commit') or r.get('source_commit'),
                      summary=r.get('summary') or r.get('summaries') or [],
                      node_id=next((n['id'] for n in nodes if r.get('tag') in n['releases']), None),
                      article_ids=[a['aid'] for a in assigned],
-                     metrics=_feedback_statistics(assigned, horizon, metric))
+                     metrics=_feedback_statistics(assigned, horizon, metric),
+                     candidate_article_ids=[a['aid'] for a in candidates],
+                     candidate_metrics=_feedback_statistics(candidates, horizon, metric))
             releases.append(x)
-        warnings.append('历史运行配置未知；标题和日期仅供人工参考。')
+        public = [a for a in articles if a['observations']]
+        latest = max((o['observed_at'] for a in public for o in a['observations']), default=None)
+        reasons = {reason: sum(a['attribution_reason'] == reason for a in public)
+                   for reason in {a['attribution_reason'] for a in public}}
+        quality = {'public_articles': len(public),
+                   'confirmed': sum(a['attribution'] == 'confirmed' for a in public),
+                   'candidates': reasons.get('missing_content_evidence', 0),
+                   'conflicts': reasons.get('conflicting_receipt', 0),
+                   'manual_cleared': reasons.get('manual_clear', 0),
+                   'unknown': reasons.get('missing_generation', 0),
+                   'latest_observed_at': latest,
+                   'stale_days': (today - _date(latest)).days if latest else None,
+                   'missing_answer_receipts': sum(not r.get('aid') for r in d.get('publication_receipts', [])),
+                   'by_reason': reasons, 'window_metrics': _feedback_statistics(public, horizon, metric),
+                   'latest_metrics': {key: {'valid_n': sum(a['latest'].get(key) is not None for a in public),
+                                            'missing': sum(a['latest'].get(key) is None for a in public)}
+                                      for key in _METRICS},
+                   'unavailable': {'followers': '尚无可核验的账号新增关注观测，问题关注数不是账号关注数',
+                                   'per_run_hour': '尚无完整的版本运行暴露时间，不能计算每小时回报'}}
+        warnings.append('旧记录缺正文一致性证据时仅列候选；台账运行版本不作为生成版本。')
         return {'schema_version': 1, 'current_version': VERSION,
                 'objective': '比较逐作品发布年龄窗口的真实反馈；保留缺失和归属证据，不作因果判断。',
                 'horizon': horizon, 'horizons': [7, 14, 30, 90],
                 'metric': metric, 'metrics_available': dict(_METRICS),
-                'query': {'since': since, 'until': until, 'aid': aid, 'node_id': node_id,
+                'query': {'since': since, 'until': until, 'aid': aid, 'node_id': node_id, 'version': filter_version,
                           'as_of': today.isoformat(), 'window_slack_days': 3},
-                'refreshes': _refresh_payload(d), 'nodes': nodes, 'releases': releases,
+                'refreshes': _refresh_payload(d), 'quality': quality, 'nodes': nodes, 'releases': releases,
                 'edges': [{'source': nodes[i - 1]['id'], 'target': n['id'], 'label': '演进'}
                           for i, n in enumerate(nodes) if i],
                 'articles': articles,

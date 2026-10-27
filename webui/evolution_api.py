@@ -14,11 +14,13 @@ class _Assign(BaseModel):
 @router.get('/api/evolution')
 @router.get('/api/evolution/feedback')
 def api_evolution(horizon: int = 30, view: str = 'scheme', metric: str = 'likes',
-                  since: str = '', until: str = '', aid: str = '', node_id: str = ''):
+                  since: str = '', until: str = '', aid: str = '', node_id: str = '',
+                  as_of: str = '', version: str = ''):
     if metric not in ('reads', 'likes', 'comments', 'collects', 'favors'):
         raise HTTPException(400, '未知反馈指标')
     try:
-        return evolution.contract(horizon, metric, since, until, aid, node_id)
+        return evolution.contract(horizon, metric, since, until, aid, node_id,
+                                 as_of=as_of or None, version=version)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 

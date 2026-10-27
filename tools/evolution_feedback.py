@@ -20,6 +20,7 @@ def main(argv=None):
     parser.add_argument('--aid', default='', help='只查询这个作品ID')
     parser.add_argument('--node-id', default='', help='只查询已确认属于这个演进行动的作品')
     parser.add_argument('--as-of', default='', help='固定查询截止日期YYYY-MM-DD；排除之后的观测')
+    parser.add_argument('--version', default='', help='只查询已确认属于这个生成版本的作品，如5.3.0')
     parser.add_argument('--output', type=Path, help='另存JSON报告；省略时输出到终端')
     args = parser.parse_args(argv)
     previous = paths.DATA_ROOT
@@ -28,7 +29,7 @@ def main(argv=None):
             paths.DATA_ROOT = args.data_root.resolve()
         report = evolution.contract(args.horizon, args.metric, args.since,
                                     args.until, args.aid, args.node_id,
-                                    as_of=args.as_of or None)
+                                    as_of=args.as_of or None, version=args.version)
         text = json.dumps(report, ensure_ascii=False, indent=2)
         if args.output is None:
             print(text)

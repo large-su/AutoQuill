@@ -1003,8 +1003,8 @@
     {
       "version": "5.6.0",
       "tag": "v5.6.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "d19acde21d0543d097040e8450a4dd3aa982d876",
+      "source_commit": "d19acde21d0543d097040e8450a4dd3aa982d876",
       "parent": "f9a3dcb556e8818071116b25fbb746f46cf73ce5",
       "date": "2026-10-27",
       "summary": "v5.6.0: 在同预算内学习参考故事的开头中段与收束表达",
@@ -1036,6 +1036,44 @@
         "core/reference_sample.py",
         "story_prompt.py"
       ],
+      "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
+      "provenance": "git-tag"
+    },
+    {
+      "version": "5.6.1",
+      "tag": "v5.6.1",
+      "commit": null,
+      "source_commit": null,
+      "parent": "d19acde21d0543d097040e8450a4dd3aa982d876",
+      "date": "2026-10-27",
+      "summary": "v5.6.1: 补齐作品版本归属证据与真实反馈质量诊断",
+      "summaries": [
+        "v5.6.1: 补齐作品版本归属证据与真实反馈质量诊断"
+      ],
+      "changed_file_count": 19,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "applications/zhihu_story/browser_write.py",
+        "core/evolution.py",
+        "core/version.py",
+        "docs/FEEDBACK-OBSERVATIONS.md",
+        "installer/AutoQuill.iss",
+        "tests/test_evolution_evidence.py",
+        "tests/test_evolution_query.py",
+        "tests/test_evolution_ui.py",
+        "tests/test_feedback_refresh_integration.py",
+        "tests/test_publish_content_evidence.py",
+        "tools/evolution_feedback.py",
+        "tools/version_feedback_report.py",
+        "webui/evolution_api.py",
+        "webui/published.py",
+        "webui/static/evolution.js",
+        "workflows/base.py",
+        "workflows/zhihu.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
       "provenance": "working-tree",
       "pending": true

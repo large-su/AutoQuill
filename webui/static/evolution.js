@@ -5,8 +5,26 @@ window.AutoQuillEvolution = (() => {
   let data = null, view = "scheme", selected = null, graph = null, distribution = null;
   let requestNumber = 0;
   const metricNames = {likes: "赞同", reads: "阅读", comments: "评论", collects: "收藏", favors: "喜欢"};
+  const attributionReasons = {
+    verified_chain: "版本链已核验", manual: "人工确认", manual_clear: "人工清除",
+    missing_public_snapshot: "缺少公开快照", missing_content_evidence: "缺少正文一致性证据",
+    ambiguous_generation: "生成记录有歧义", conflicting_receipt: "发布回执冲突",
+    missing_generation: "缺少生成记录", unknown_version: "生成版本未知"
+  };
   const metricKey = () => data?.metric || el("evoMetric")?.value || "likes";
   const metricName = () => metricNames[metricKey()] || "赞同";
+  const quality = () => data?.quality || {};
+  const qualitySummary = () => {
+    const q = quality();
+    return "已确认 " + num(q.confirmed || 0) + " 篇 · 未分配 "
+      + num(Math.max(0, (q.public_articles || 0) - (q.confirmed || 0))) + " 篇 · 候选 "
+      + num(q.candidates || 0) + " 篇 · 冲突 " + num(q.conflicts || 0) + " 篇";
+  };
+  const freshnessSummary = () => {
+    const q = quality();
+    return " · 最新观测 " + (q.latest_observed_at ? h(String(q.latest_observed_at).replace("T", " ").slice(0, 19)) : "—")
+      + " · 陈旧 " + (q.stale_days == null ? "—" : num(q.stale_days) + " 天");
+  };
   const el = (id) => document.getElementById(id);
   const h = (value) => String(value ?? "").replace(/[&<>"']/g,
     (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -47,10 +65,12 @@ window.AutoQuillEvolution = (() => {
       const available = view === "scheme" ? nodes().map((n) => n.id) : releases().map((r) => r.tag);
       if (!available.includes(selected)) selected = available.at(-1) || null;
       render();
+      return true;
     } catch (error) {
       if (number !== requestNumber) return;
       el("evoStatus").textContent = "读取未完成：" + error.message + "。可点击刷新重试。";
       el("evoStatus").classList.add("evo-error");
+      return false;
     }
   }
 
@@ -60,20 +80,27 @@ window.AutoQuillEvolution = (() => {
     const observedDates = articles.map((a) => a.latest?.observed_at).filter(Boolean).sort();
     el("evoStatus").textContent = releases().length + " 个近期版本 · " + nodes().length + " 个方案阶段 · "
       + publicCount + " 篇公开作品 · 当前 v" + data.current_version
-      + (observedDates.length ? " · 本地观测更新至 " + observedDates.at(-1).slice(0, 10) : "");
+      + (observedDates.length ? " · 本地观测更新至 " + observedDates.at(-1).slice(0, 10) : "")
+      + " · " + qualitySummary();
     const warnings = data.warnings || [];
     el("evoWarnings").hidden = !warnings.length;
-    el("evoWarnings").textContent = warnings.join("；");
+    el("evoWarnings").textContent = warnings.join("；")
+      + (quality().missing_answer_receipts ? "；缺少发布回执 " + num(quality().missing_answer_receipts) + " 条" : "")
+      + (quality().unavailable?.followers ? "；账号关注数不可用：" + quality().unavailable.followers : "")
+      + (quality().unavailable?.per_run_hour ? "；每小时回报不可用：" + quality().unavailable.per_run_hour : "");
     el("evoWindowNote").textContent = "对齐文章发布后的年龄：采用第 " + data.horizon + "～"
       + (data.horizon + 3) + " 天内最接近目标日的一次实际观测。错过窗口的历史数据保留展示，不反推当时成绩。";
     const refreshes = data.refreshes || {};
     const latest = refreshes.latest, good = refreshes.last_success;
     const names = {done: "完成", error: "失败", running: "进行中", stopped: "已停止", interrupted: "上次中断"};
+    const qualityText = qualitySummary() + freshnessSummary();
     el("evoFeedbackStatus").textContent = good
       ? "最近成功采集：" + (good.observed_at || "时间未知").replace("T", " ") + " · " + num(good.count) + " 篇"
+        + " · " + qualityText
         + (latest && latest.id !== good.id ? "；最新尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "") : "")
       : latest ? "最新采集尝试：" + (names[latest.status] || latest.status) + " · " + (latest.message || "尚无成功观测")
-        : "尚无每日采集节点；已有历史快照仍可查询。开启日常自动化后默认每天 23:00 刷新，亦可手动更新。";
+        + " · " + qualityText
+        : "尚无每日采集节点；已有历史快照仍可查询。开启日常自动化后默认每天 23:00 刷新，亦可手动更新。 · " + qualityText;
     el("evoRefreshNodes").innerHTML = (refreshes.history || []).map((node) => "<p>"
       + h((node.observed_at || node.finished_at || node.started_at || "").replace("T", " ").slice(0, 19))
       + " · " + (node.source === "automation" ? "每日自动采集" : "手动采集") + " · " + h(names[node.status] || node.status)
@@ -98,6 +125,8 @@ window.AutoQuillEvolution = (() => {
       });
     }
     const columns = Math.min(4, Math.max(1, items.length));
+    el("evoGraph").style.height = Math.max(360, Math.ceil(items.length / columns) * 105 + 60) + "px";
+    graph.resize();
     const chartNodes = items.map((item, index) => {
       const row = Math.floor(index / columns), offset = index % columns;
       const column = row % 2 ? columns - 1 - offset : offset;
@@ -151,6 +180,13 @@ window.AutoQuillEvolution = (() => {
       + " 篇<br>最大单篇占比 " + share + "；用于查看成绩是否集中在一篇作品。</p>";
     html += '<p class="evo-muted">尚未到观察日 ' + num(m.immature || 0) + " 篇 · 窗口缺失 " + num(m.missing || 0)
       + " 篇 · 发布日期未知 " + num(m.unknown_publish || 0) + " 篇</p>";
+    const candidateSource = release || node;
+    const candidateCount = (candidateSource.candidate_article_ids || []).length;
+    if (candidateCount) {
+      const candidateMetric = candidateSource.candidate_metrics?.median;
+      html += '<p class="evo-note">另有' + num(candidateCount) + '篇候选（缺正文一致性证据，不计入已确认统计）'
+        + (candidateMetric == null ? "。" : "；候选样本中位数 " + num(candidateMetric) + "，仅作参考。") + "</p>";
+    }
     if (m.by_metric) html += '<details><summary>各反馈指标的有效样本</summary>' + Object.entries(m.by_metric)
       .map(([key, stat]) => '<p class="evo-muted">' + h(metricNames[key]) + "：" + num(stat.valid_n)
         + " 篇，中位数 " + num(stat.median) + "，缺失 " + num(stat.missing) + " 篇</p>").join("") + "</details>";
@@ -192,6 +228,7 @@ window.AutoQuillEvolution = (() => {
           const isPublic = !!article.observations?.length;
           const state = !isPublic ? "发布回执 · 待公开确认" : article.node_id ? "已确认归属"
             : article.suggested_node_id ? "归属建议 · 待确认" : "待关联";
+          const reason = attributionReasons[article.attribution_reason] || article.attribution_reason || "未知";
           const observation = article.horizon_observation;
           const hasValue = articleMetric(article)[metricKey()] != null;
           const status = !isPublic ? "等待公开内容快照" : !article.node_id ? "确认归属后参与评价" : !article.publish_date ? "缺少发布日期"
@@ -206,6 +243,7 @@ window.AutoQuillEvolution = (() => {
               + "（第 " + num(x.from_age_days) + "→" + num(x.to_age_days) + " 天实际观测）" : "缺少两端观测");
           };
           const details = '<details><summary>观测变化 · ' + num(article.observations?.length || 0) + ' 次</summary>'
+            + '<p class="evo-muted">归属依据：' + h(reason) + (article.version_confirmed ? " · 生成版本已确认" : " · 生成版本未确认") + "</p>"
             + (change ? '<p class="evo-muted">' + h(change.from_at) + " → " + h(change.to_at) + "<br>"
               + h(metricName()) + "变化：" + (delta == null ? "—（缺指标）" : (delta >= 0 ? "+" : "") + num(delta)) + "</p>" : "尚缺相邻观测。")
             + '<p class="evo-muted">' + h(interval("7_14", "7→14 天")) + "<br>" + h(interval("14_30", "14→30 天")) + "</p>"
@@ -216,7 +254,7 @@ window.AutoQuillEvolution = (() => {
             + '<div class="evo-assignment-box"><select class="evo-assignment" data-evo-aid="' + h(article.aid) + '" aria-label="作品所属方案">'
             + options + '</select><button class="btn ghost" data-evo-save="' + h(article.aid) + '"'
             + (isPublic ? "" : " disabled") + '>确认归属</button></div>'
-            + '<span class="evo-state ' + (article.node_id ? "confirmed" : "") + '">' + state + "</span></td>"
+            + '<span class="evo-state ' + (article.node_id ? "confirmed" : "") + '">' + state + " · " + h(reason) + "</span></td>"
             + '<td class="evo-num">' + num((article.latest?.metrics || article.latest || {})[metricKey()]) + "</td>"
             + '<td class="evo-num">' + num(articleMetric(article)[metricKey()]) + "</td><td>" + h(status) + details + "</td></tr>";
         }).join("") + "</tbody></table>";
@@ -279,7 +317,8 @@ window.AutoQuillEvolution = (() => {
         await new Promise((resolve) => setTimeout(resolve, 3000));
         const status = await (await fetch("/api/dashboard/refresh/status")).json();
         if (status.status === "running") { el("evoFeedbackStatus").textContent = status.progress || "正在采集…"; continue; }
-        await load();
+        const loaded = await load();
+        if (loaded === false) throw new Error("读取反馈结果失败，已有观测仍保留");
         if (status.status !== "done") throw new Error(status.error || "本次采集未完成，已有观测仍保留");
         break;
       }

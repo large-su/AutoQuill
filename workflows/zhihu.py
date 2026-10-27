@@ -1141,7 +1141,10 @@ class ZhihuWorkflow(WorkflowBase):
         log.info("  服务端草稿已确认（编辑器写入通道）")
         try:
             from core import evolution
-            evolution.record_draft(url, md_abs_path, title)
+            from applications.zhihu_story.browser_utils import story_markdown_to_html
+            if evolution.record_draft(url, md_abs_path, title, story_text=story,
+                                      rendered_html=story_markdown_to_html(story)) is None:
+                log.warning("演进记录：草稿已保存，但未找到与正文一致的生成记录，版本归属待核实")
         except Exception:
             log.warning("演进记录：草稿关联保存失败（不影响草稿结果）", exc_info=True)
 

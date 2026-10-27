@@ -153,7 +153,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             f.write(story)
         try:
             from core import evolution
-            evolution.record_generation(md_path, story, workflow_mode=workflow_mode)
+            if evolution.record_generation(md_path, story, workflow_mode=workflow_mode) is None:
+                log.warning("演进记录：稿件已保存，但生成归属未写入，请检查演进数据状态")
         except Exception:
             log.warning("演进记录：未能记录稿件保存时的方案（不影响稿件保存）", exc_info=True)
         return os.path.abspath(md_path)

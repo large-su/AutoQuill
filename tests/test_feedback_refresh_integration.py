@@ -144,7 +144,40 @@ class FeedbackRefreshIntegrationTest(unittest.TestCase):
         state = json.loads((self.tmp / 'data' / 'state' / 'evolution.json').read_text(encoding='utf-8'))
         self.assertEqual(state['refreshes'][-1]['status'], 'error')
         self.assertEqual(state['articles'], {})
-        self.assertTrue(Path(result['source_file']).exists())
+        self.assertIsNone(result['source_file'])
+        self.assertEqual(list((self.tmp/'data').glob('published_answers_*.json')), [])
+
+    def test_daily_mirror_retains_raw_missing_and_explicit_zero(self):
+        payload = [{'aid': 'a1', 'metrics': {'阅读': '2', '赞同': '0'}}]
+        result = self._refresh(payload)
+        self.assertTrue(result['ok'])
+        rows = json.loads(Path(result['source_file']).read_text(encoding='utf-8'))
+        self.assertEqual(rows, payload)
+        self.assertNotIn('评论', rows[0]['metrics'])
+
+    def test_mirror_failure_reports_partial_save_and_retains_real_observation(self):
+        _FakeBrowser.payload = [{'aid': 'new', 'metrics': {'阅读': '2'}}]
+        _FakeBrowser.counts = [1, 1, 1, 1]
+        real_replace = published.os.replace
+        def replace(source, destination):
+            if Path(destination).name.startswith('published_answers_'):
+                raise OSError('disk failure')
+            return real_replace(source, destination)
+        with mock.patch.object(published.os, 'replace', side_effect=replace):
+            result = published.refresh_feedback(source='manual')
+        self.assertFalse(result['ok'])
+        self.assertIn('演进观测已保存', result['message'])
+        self.assertEqual(result['count'], 1)
+        state = json.loads((self.tmp/'data/state/evolution.json').read_text(encoding='utf-8'))
+        self.assertEqual(state['articles']['new']['observations'][0]['reads'], 2)
+
+    def test_explicit_zero_is_valid_but_all_missing_is_not_success(self):
+        rows = [{'aid': str(i), 'metrics': {'阅读': '0', '赞同': '0'}} for i in range(12)]
+        result = self._refresh(rows, counts=(12, 12, 12, 12))
+        self.assertTrue(result['ok'])
+        _FakeBrowser.payload = [{'aid': str(i), 'metrics': {}} for i in range(12)]
+        result = published.refresh_feedback(source='manual')
+        self.assertFalse(result['ok'])
 
 
 if __name__ == "__main__":
