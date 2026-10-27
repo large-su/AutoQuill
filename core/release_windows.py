@@ -116,6 +116,52 @@ def intervals(history):
     return result
 
 
+def daily_intervals(history):
+    """One evaluation node per China calendar day; retain every release action."""
+    days = {}
+    for row in history:
+        stamp = timestamp(row.get('released_at') or row.get('date'))
+        if stamp:
+            member = dict(row)
+            if row.get('released_at'):
+                member['released_at'] = stamp.isoformat()
+            days.setdefault(stamp.date().isoformat(), []).append(member)
+    result = []
+    for day, rows in sorted(days.items()):
+        def version_key(row):
+            value = str(row.get('version') or row.get('tag') or '').lstrip('vV')
+            return tuple(int(x) for x in value.split('.')) if re.fullmatch(r'\d+(?:\.\d+){1,3}', value) else ()
+        precise = all(row.get('released_at') and row.get('release_time_source') != 'git-date-estimate' for row in rows)
+        rows.sort(key=(lambda r: (timestamp(r['released_at']), version_key(r))) if precise
+                  else (lambda r: (version_key(r), timestamp(r.get('released_at') or r.get('date')))))
+        final = dict(rows[-1])
+        kinds = {r.get('change_kind') for r in rows} - {None}
+        if 'mixed' in kinds or {'writing', 'engineering'} <= kinds:
+            final['change_kind'] = 'mixed'
+        elif kinds:
+            final['change_kind'] = next(iter(kinds)) if len(kinds) == 1 else 'mixed'
+        summaries = []
+        for row in rows:
+            summary = row.get('summary') or row.get('summaries') or ''
+            if isinstance(summary, list):
+                summary = '；'.join(str(s) for s in summary)
+            if summary:
+                summaries.append(str(row.get('tag') or row.get('version')) + '：' + str(summary))
+        final.update(evaluation_date=day, evaluation_id='day:' + day,
+                     interval_start=day + 'T00:00:00+08:00',
+                     release_count=len(rows), included_releases=rows,
+                     summary='；'.join(summaries), summaries=summaries,
+                     release_time_source=final.get('release_time_source') or 'git-date-estimate',
+                     released_at=(timestamp(final.get('released_at') or final.get('date')).isoformat()),
+                     daily_order_source='release-time' if precise else 'version-number-fallback',
+                     changed_files=list(dict.fromkeys(p for r in rows for p in (r.get('changed_files') or []))),
+                     writing_files_changed=list(dict.fromkeys(p for r in rows for p in (r.get('writing_files_changed') or []))))
+        result.append(final)
+    for i, row in enumerate(result):
+        row['interval_end'] = result[i + 1]['interval_start'] if i + 1 < len(result) else None
+    return result
+
+
 def infer(article, windows, public=True):
     result = {'version': None, 'start': None, 'end': None, 'source': None,
               'precision': article.get('publish_date_precision') or 'day',
@@ -126,6 +172,18 @@ def infer(article, windows, public=True):
     start = timestamp(raw)
     if not start:
         return result
+    if windows and windows[0].get('evaluation_date'):
+        # The evaluation convention deliberately includes the entire release
+        # day, even articles published before that day's final software release.
+        for window in reversed(windows):
+            if (timestamp(window['interval_start']) <= start
+                    and (not window['interval_end'] or start < timestamp(window['interval_end']))):
+                return dict(result, version=window.get('version'), start=window['interval_start'],
+                            end=window['interval_end'], source=window['release_time_source'],
+                            reason='daily_release_window', candidates=[window.get('version')],
+                            evaluation_date=window['evaluation_date'],
+                            included_versions=[r.get('version') for r in window['included_releases']])
+        return dict(result, reason='before_history')
     precision = article.get('publish_date_precision') or ('minute' if len(str(raw)) > 10 else 'day')
     end = start + (timedelta(days=1) if precision == 'day' else
                    timedelta(minutes=1) if precision == 'minute' else timedelta(seconds=1))

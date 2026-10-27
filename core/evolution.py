@@ -734,7 +734,10 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
         gens = {g['id']: g for g in d['generations']}
         ledger = _ledger_versions()
         history = _history()
-        release_intervals = release_windows.intervals(history)
+        release_intervals = release_windows.daily_intervals(history)
+        evaluation_version = next((r['version'] for r in release_intervals
+                                   if any(str(m.get('version') or '').lstrip('vV') == filter_version
+                                          for m in r['included_releases'])), filter_version)
         articles = []
         for a in _merged(d).values():
             pub = _date(a.get('publish_date'))
@@ -765,7 +768,7 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                 continue
             if filter_version:
                 if attribution_basis == 'publication':
-                    if time_attribution['version'] != filter_version:
+                    if time_attribution['version'] != evaluation_version:
                         continue
                 elif not version_confirmed or str(generation.get('version') or '').lstrip('v') != filter_version:
                     continue
@@ -816,18 +819,21 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                 'by_date': {day: sum(a['publish_date'] == day for a in assigned)
                             for day in sorted({a['publish_date'] for a in assigned if a['publish_date']})}}
         releases = []
-        window_by_tag = {w.get('tag'): w for w in release_intervals}
-        for r in history:
+        for r in release_intervals:
             x = {k: r.get(k) for k in ('version', 'tag', 'date', 'change_kind', 'writing_code_id', 'writing_files_changed', 'changed_files', 'pending')}
             version = str(r.get('version') or r.get('tag') or '').lstrip('v')
+            grouped_versions = {str(member.get('version') or '').lstrip('vV') for member in r['included_releases']}
             assigned = [a for a in articles if a['version_confirmed']
-                        and str(a.get('generation_version') or '').lstrip('v') == version]
+                        and str(a.get('generation_version') or '').lstrip('v') in grouped_versions]
             candidates = [a for a in articles if not a['version_confirmed']
                           and a['attribution_reason'] == 'missing_content_evidence' and a['observations']
-                          and str(a.get('generation_version') or '').lstrip('v') == version]
+                          and str(a.get('generation_version') or '').lstrip('v') in grouped_versions]
             time_assigned = [a for a in articles if a['attributed_version'] == version]
-            w = window_by_tag.get(r.get('tag'), {})
+            w = r
             x.update(commit=r.get('commit') or r.get('source_commit'),
+                     evaluation_date=r['evaluation_date'], evaluation_id=r['evaluation_id'], interval_start=r['interval_start'],
+                     release_count=r['release_count'], included_releases=r['included_releases'],
+                     daily_order_source=r['daily_order_source'],
                      released_at=w.get('released_at'), interval_end=w.get('interval_end'),
                      release_time_source=w.get('release_time_source'),
                      time_article_ids=[a['aid'] for a in time_assigned],
@@ -861,15 +867,18 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                                       for key in _METRICS},
                    'unavailable': {'followers': '尚无可核验的账号新增关注观测，问题关注数不是账号关注数',
                                    'per_run_hour': '尚无完整的版本运行暴露时间，不能计算每小时回报'}}
-        warnings.append('版本表现默认按作品发布时间落入发布区间推定；发布时间不等于本机升级时间。生成证据另行保留，边界精度不足不强行分配。')
+        warnings.append('评价最小间隔为北京时间自然日：同日最后版本汇总当天所有版本动作和作品，持续至下一个发布日。此约定不代表实际安装时段，原生成证据独立保留。')
         return {'schema_version': 1, 'current_version': VERSION,
                 'objective': '比较逐作品发布年龄窗口的真实反馈；保留缺失和归属证据，不作因果判断。',
                 'horizon': horizon, 'horizons': [7, 14, 30, 90],
                 'metric': metric, 'metrics_available': dict(_METRICS),
                 'query': {'since': since, 'until': until, 'aid': aid, 'node_id': node_id, 'version': filter_version,
                           'attribution_basis': attribution_basis,
+                          'evaluation_granularity': 'calendar_day', 'timezone': 'Asia/Shanghai',
+                          'evaluation_version': evaluation_version if attribution_basis == 'publication' else None,
                           'as_of': today.isoformat(), 'window_slack_days': 3},
                 'release_sync': release_windows.status(),
+                'release_history': history,
                 'refreshes': _refresh_payload(d), 'quality': quality, 'nodes': nodes, 'releases': releases,
                 'edges': [{'source': nodes[i - 1]['id'], 'target': n['id'], 'label': '演进'}
                           for i, n in enumerate(nodes) if i],

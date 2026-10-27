@@ -2,20 +2,22 @@
 
 | 项目 | 内容 |
 |---|---|
-| **适用版本** | v5.7.0 起 |
+| **适用版本** | v5.7.1 起 |
 | **最后更新** | 2026-10-27 |
 | **状态** | 活跃 |
 | **说明** | 版本发布区间、生成证据、手动更新及逐作品同龄反馈的查询口径 |
 
 ## 默认版本归属
 
-演进页默认按作品在知乎的发布时间匹配版本区间：`本版发布时间 ≤ 作品发布时间 < 下一版发布时间`，最后一版区间暂不封闭。界面标为“按时间推定”。例如 A 版 10:00 发布，B 版 12:00 发布，11:30 的作品归入 A 版；12:00 的作品归入 B 版。
+评价的最小间隔为北京时间自然日。同一天发布多个版本时，以当天最后发布的最新版本命名唯一评价节点；当天所有版本的改动、链接和提交记录都纳入节点详情。节点具有固定的 `day:YYYY-MM-DD` 标识，版本名可随当天后续发布更新。
+
+节点从当天 `00:00:00+08:00` 起，到下一个有新版本发布的日期零点结束；没有新版本的日期继续归入前一节点。例如 A 版、B 版在 10 月 1 日先后发布，全天作品均归入 B 节点，A 的改动也属于 B 节点；下一次发布在 10 月 3 日时，10 月 2 日作品仍归 B。界面标为“按发布日推定”。不再把日内小版本分别评估。
 
 这是用户约定的分析口径，不证明本机在软件发布后立即安装，也不证明该作品由此版生成。跨版本保存与发布时，“发布时推定版本”和“生成版本”可能不同，两者分别保留。更新版本时间会重新计算推定区间，不改写原指标、生成记录或人工方案归属。
 
 GitHub 稳定版 `published_at` 优先；离线历史用 Git 提交时间并标明来源。本版安装包生成于 Release 上传之前，因此当前版本先使用“构建时间估计”，同步后采用实际发布时刻。旧日粒度时间标为估计，不能据此声称准确的运行暴露时间。
 
-知乎时间按 UTC+08:00 解析，带时区值统一时区。完整年份优先，无年份按对应快照观测年份归一；保留日、分钟或秒精度。只有日期的作品若覆盖换版边界，或只有分钟的作品恰跨秒级边界，显示“边界待核实”，不任意分配。早于已知最早版本、缺发布时间或没有公开快照的作品保持未归属。
+知乎时间按 UTC+08:00 解析，带时区值统一时区。完整年份优先，无年份按对应快照观测年份归一；仍保留日、分钟或秒精度用于追溯。按日评价只需要日期，日内时分不再切分样本。早于已知最早发布日、缺发布时间或没有公开快照的作品保持未归属。若同日版本只有日期而缺精确时刻，以版本号排序选取最新版本，并保留该排序来源。
 
 旧演进状态曾截去时分。查询会从仍保留 `publish` 的原始每日快照恢复时间，不让旧日粒度状态覆盖它；查询不写业务原件。已经丢失的时间不能恢复。
 
@@ -47,7 +49,7 @@ GitHub 稳定版 `published_at` 优先；离线历史用 Git 提交时间并标�
 
 阅读、赞同、评论、收藏、喜欢分别统计有效样本、中位数、P25、篇均、合计及最大单篇占比。真实零保留，缺失为 `null`。旧归一化文件中的零可能来自解析失败，保留不确定性。未到观察日、无发布时间、成熟但错过窗口分别显示。小样本不判定胜负。
 
-版本表现使用时间推定样本；生成证据统计只使用已核验版本，两者不合并。采集日期不能改变归属，发布区间不能当实际运行小时分母。当前没有可核验的账号新增关注数据和完整运行时长，保持不可用，不用问题关注数替代。
+每日版本节点使用按发布日推定样本；节点的生成证据统计汇总该日包含的各生成版本，但仍与时间样本分开。采集日期不能改变归属，发布区间不能当实际运行小时分母。当前没有可核验的账号新增关注数据和完整运行时长，保持不可用，不用问题关注数替代。
 
 ## 文件与接口
 
@@ -61,7 +63,7 @@ GitHub 稳定版 `published_at` 优先；离线历史用 Git 提交时间并标�
 | `webui/static/evolution.js` / `evolution.css` | 概览、版本导航、分布与明细 |
 | `data/state/evolution.json` / `release_times.json` | 本机记录，排除版本跟踪 |
 
-`GET /api/evolution/feedback?horizon=7&version=5.3.0&attribution_basis=publication` 查询时间区间作品。省略 `attribution_basis` 时维持旧接口的 `evidence` 生成证据筛选；前端明确传入 `publication`。报告同时提供 `time_metrics` 和原证据 `metrics`，不得交叉解释。
+`GET /api/evolution/feedback?horizon=7&version=5.3.0&attribution_basis=publication` 查询该版本所在日节点的作品；即使指定当天较早版本，也映射到最终节点，`query.evaluation_version` 返回节点版本。省略 `attribution_basis` 时维持旧接口的 `evidence` 精确生成版本筛选；前端明确传入 `publication`。报告 `releases` 为每日节点，`release_history` 保留逐版本原件，节点含 `included_releases`、`release_count`、`interval_start/end`。`time_metrics` 和原证据 `metrics` 不交叉解释。
 
 CLI：`python tools/evolution_feedback.py --horizon 7 --version 5.3.0 --attribution-basis publication --as-of 2026-10-27 --output logs/report-new.json`。`as_of` 仅限制观测，不重建当日版本缓存或人工分配状态。正式基线另存报告、输入哈希及时间来源，已有输出不可覆盖。
 
@@ -69,6 +71,6 @@ CLI：`python tools/evolution_feedback.py --horizon 7 --version 5.3.0 --attribut
 
 ## 验证与可追踪基线
 
-边界、时区、精度、历史恢复、联网失败及 API/CLI 由 `tests.test_release_windows`、`tests.test_evolution_query` 验证。生成证据与采集沿用 `tests.test_evolution*`、`tests.test_feedback_refresh_integration`。`AQ_UI_TESTS=1` 运行 `tests.test_evolution_ui`，隔离 Edge 检查实际交互与截图；合成数据不是实际反馈。
+日内合并、动作保留、跨日边界、无更新日延续和成员版本查询由 `tests.test_evolution_days` 验证；原时区、精度恢复、联网失败与 API/CLI 由 `tests.test_release_windows`、`tests.test_evolution_query` 验证。生成证据与采集沿用 `tests.test_evolution*`、`tests.test_feedback_refresh_integration`。`AQ_UI_TESTS=1` 运行 `tests.test_evolution_ui`，隔离 Edge 检查实际交互与截图；合成数据不是实际反馈。
 
-本轮依据是用户 2026-10-27 的发布时间区间约定、GitHub `published_at` 与原始知乎 `publish` 字段。原指标不变，只增加归属统计。发布前冻结只读查询、时间来源和输入哈希到 `logs/version-window-*`，账户数据不提交 Git。UI 和归属变化不表示阅读、互动或关注已提高；后续仍需比较相同作品年龄窗口及有效样本。
+本轮依据是用户 2026-10-27 的发布时间区间约定及随后明确的“至少一天、同日最终版本汇总”要求、GitHub `published_at` 与原始知乎 `publish` 字段。原指标不变，只调整归属统计。发布前冻结只读查询、时间来源和输入哈希到 `logs/version-window-*` 与 `logs/version-day-*`，账户数据不提交 Git。UI 和归属变化不表示阅读、互动或关注已提高；后续仍需比较相同作品年龄窗口及有效样本。

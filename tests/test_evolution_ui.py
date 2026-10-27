@@ -30,9 +30,13 @@ class EvolutionUITest(unittest.TestCase):
         ), patch.object(
             evolution, "_history", return_value=[
                 {"version": "0.1.0", "tag": "v0.1.0", "date": first_release,
-                 "released_at": first_release + "T00:00:00+08:00",
+                 "released_at": first_release + "T09:00:00+08:00",
                  "release_time_source": "synthetic-ui", "writing_code_id": "synthetic-writing-a",
-                 "change_kind": "writing", "summary": "合成版本窗口 A"},
+                 "change_kind": "writing", "summary": "合成同日动作 A"},
+                {"version": "0.1.1", "tag": "v0.1.1", "date": first_release,
+                 "released_at": first_release + "T18:00:00+08:00",
+                 "release_time_source": "synthetic-ui", "writing_code_id": "synthetic-writing-a",
+                 "change_kind": "mixed", "summary": "合成同日动作 B（最后版本）"},
                 {"version": "0.2.0", "tag": "v0.2.0", "date": second_release,
                  "released_at": second_release + "T00:00:00+08:00",
                  "release_time_source": "synthetic-ui", "writing_code_id": "synthetic-writing-b",
@@ -98,12 +102,19 @@ class EvolutionUITest(unittest.TestCase):
                     page.wait_for_selector("#evoArticles tbody tr")
                     self.assertEqual(page.locator("#evoArticles tbody tr").count(), 6)
                     self.assertGreater(page.locator("#evoNodeList .evo-time-item").count(), 0)
-                    self.assertIn("按发布时间推定", page.inner_text("#evoListHint"))
+                    self.assertIn("最小评价间隔为自然日", page.inner_text("#evoListHint"))
                     self.assertIn("从知乎更新反馈", page.inner_text("#pane-evolution"))
                     self.assertIn("同步版本时间", page.inner_text("#pane-evolution"))
                     self.assertEqual(page.get_attribute('[data-evo-view="release"]', 'aria-selected'), 'true')
-                    page.click('[data-evo-node="v0.1.0"]')
+                    self.assertEqual(page.locator("#evoNodeList .evo-time-item").count(), 2)
+                    page.click('[data-evo-node="v0.1.1"]')
                     self.assertIn('42.5', page.inner_text('#evoDetail'))
+                    self.assertIn('当天合并的 2 次发布', page.inner_text('#evoDetail'))
+                    page.locator('#evoDetail summary', has_text='当天合并的 2 次发布').click()
+                    self.assertIn('v0.1.0', page.inner_text('#evoDetail'))
+                    self.assertIn('v0.1.1', page.inner_text('#evoDetail'))
+                    self.assertIn('合成同日动作 A', page.inner_text('#evoDetail'))
+                    self.assertIn('合成同日动作 B', page.inner_text('#evoDetail'))
                     page.check('#evoOnlySelected')
                     self.assertEqual(page.locator('#evoArticles tbody tr').count(), 6)
                     page.click('[data-evo-node="v0.2.0"]')
@@ -146,7 +157,7 @@ class EvolutionUITest(unittest.TestCase):
                     release_count = len(client.get('/api/evolution').json()['releases'])
                     self.assertEqual(page.locator("#evoNodeList button").count(), release_count)
                     page.click("#evoNodeList button:first-child")
-                    self.assertIn("按发布时间推定", page.inner_text("#evoDetail"))
+                    self.assertIn("按发布日推定", page.inner_text("#evoDetail"))
                     page.click('[data-evo-view="scheme"]')
                     page.select_option('select[data-evo-aid="1"]', "")
                     page.click('button[data-evo-save="1"]')
@@ -156,7 +167,7 @@ class EvolutionUITest(unittest.TestCase):
                         page.select_option("#evoHorizon", "30")
                         page.wait_for_function("document.getElementById('evoWindowNote').textContent.includes('第 30～33')")
                         page.click('[data-evo-view="release"]')
-                        page.click('[data-evo-node="v0.1.0"]')
+                        page.click('[data-evo-node="v0.1.1"]')
                         page.locator(".left-col").evaluate("element => element.scrollTop = 0")
                         page.locator("#evoStatus").evaluate("element => element.textContent = '界面测试示例：版本、文章与互动均为合成数据。 ' + element.textContent")
                         page.screenshot(path=screenshot, full_page=True)

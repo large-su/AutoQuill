@@ -18,7 +18,7 @@ class EvolutionEvidenceTest(unittest.TestCase):
             p.start()
         history = self.root/'core/evolution_history.json'
         history.parent.mkdir()
-        history.write_text(json.dumps({'releases': [{'version': '1.0.0', 'tag': 'v1.0.0'}]}))
+        history.write_text(json.dumps({'releases': [{'version': '1.0.0', 'tag': 'v1.0.0', 'date': '2026-01-01'}]}))
 
     def tearDown(self):
         for p in reversed(self.patches):

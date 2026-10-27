@@ -63,7 +63,8 @@ class ReleaseWindowsTest(unittest.TestCase):
         article = report['articles'][0]
         self.assertEqual(article['publish_time'], '2024-01-02T10:45:00+08:00')
         self.assertEqual(article['publish_date_precision'], 'minute')
-        self.assertEqual(article['attributed_version'], '1.1.0')
+        self.assertEqual(article['attributed_version'], '1.2.0')
+        self.assertEqual(report['query']['evaluation_version'], '1.2.0')
         self.assertFalse(article['version_confirmed'])
         self.assertEqual(report['releases'][1]['time_metrics']['median'], 0)
         self.assertIsNone(report['releases'][1]['metrics']['median'])
@@ -76,7 +77,7 @@ class ReleaseWindowsTest(unittest.TestCase):
         before = evolution._path().read_bytes()
         with patch.object(evolution, '_history', return_value=HISTORY):
             report = evolution.contract(7, as_of='2024-01-11')
-        self.assertEqual(report['articles'][0]['attributed_version'], '1.1.0')
+        self.assertEqual(report['articles'][0]['attributed_version'], '1.2.0')
         self.assertEqual(evolution._path().read_bytes(), before)
 
     def test_year_rollover_and_invalid_time(self):

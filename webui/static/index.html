@@ -302,12 +302,12 @@
       <div class="card evo-card">
         <div class="evo-heading">
           <div><h2>演进记录 <span class="evo-badge">反馈积累</span></h2>
-            <p class="evo-muted">用每篇作品的发布时间对齐版本区间，再按发布年龄比较真实反馈。</p></div>
+              <p class="evo-muted">以自然日为最小评价间隔：当天多次发布合并到最后版本，再按发布年龄比较真实反馈。</p></div>
           <div class="evo-actions"><button class="btn ghost" id="evoRefresh">刷新本地记录</button>
             <button class="btn ghost" id="evoReleaseRefresh">同步版本时间</button>
             <button class="btn primary" id="evoFeedbackRefresh">从知乎更新反馈</button></div>
         </div>
-        <div class="evo-flow" aria-label="反馈归属方法"><span>1. GitHub 发布时点</span><b>→</b><span>2. 知乎发布时间</span><b>→</b><span>3. 版本区间推定</span><b>→</b><span>4. 按年龄比较反馈</span></div>
+          <div class="evo-flow" aria-label="反馈归属方法"><span>1. GitHub 发布日</span><b>→</b><span>2. 同日合并至最后版本</span><b>→</b><span>3. 知乎发布日归属</span><b>→</b><span>4. 按年龄比较反馈</span></div>
         <div class="evo-toolbar">
           <div class="view-switch" id="evoViewSwitch" role="tablist" aria-label="演进视图">
             <button class="view-btn sel" data-evo-view="release" role="tab" aria-selected="true">版本表现</button>
@@ -345,8 +345,8 @@
         <details><summary>最近反馈采集记录</summary><div id="evoRefreshNodes" class="evo-muted"></div></details>
         <div id="evoDistribution" class="evo-distribution" role="img" aria-label="所选版本或方案在观察阶段的作品反馈分布" hidden></div>
         <div id="evoArticles" class="evo-articles"><p class="evo-muted">暂无记录。</p></div>
-        <div class="evo-note"><b>归属说明：</b>“按发布时间推定”把知乎发布时间落入相邻软件发布时点之间的作品归到该版本，用于版本效果比较；它不等同于已核验的生成链路。
-          有明确生成与发布证据的作品会另标为“证据已确认”。日期精度不足、边界当天或缺发布时间的作品不强行归属。
+          <div class="evo-note"><b>归属说明：</b>最小评价间隔为自然日。当天所有软件发布合并为一个节点，节点取当天最后发布的版本；当天发表的知乎作品都归入该节点，用于版本效果比较。
+            这不等同于已核验的生成链路。有明确生成与发布证据的作品会另列为方案证据；缺发布日的作品不强行归属。
           自动化默认每天 23:00 更新反馈；所有成绩来自实际观测，缺失不补造。</div>
       </div>
     </div>

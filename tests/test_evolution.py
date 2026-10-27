@@ -224,6 +224,7 @@ class EvolutionTest(unittest.TestCase):
         history = Path(self.d.name, 'core', 'evolution_history.json')
         history.parent.mkdir()
         history.write_text(json.dumps({'releases': [{'version': '1.0.0', 'tag': 'v1.0.0',
+                                                    'date': '2026-01-01',
                                                     'pending': True, 'commit': None,
                                                     'writing_code_id': 'code'}]}), encoding='utf-8')
         Path(self.d.name, 'build_info.json').write_text(json.dumps({'version': '1.0.0',

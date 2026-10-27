@@ -4,7 +4,7 @@
 window.AutoQuillEvolution = (() => {
   let data = null, view = "release", selected = null, distribution = null, requestNumber = 0;
   const metricNames = {likes: "赞同", reads: "阅读", comments: "评论", collects: "收藏", favors: "喜欢"};
-  const reasons = {time_window: "按发布时间推定", boundary_ambiguous: "处于版本边界", before_history: "早于可用版本历史", missing_publish_time: "缺少发布时间", missing_public_snapshot: "缺少公开快照", verified_chain: "证据已确认", manual: "人工确认", manual_clear: "人工清除", missing_content_evidence: "缺少正文一致性证据", missing_generation: "缺少生成记录", ambiguous_generation: "生成记录有歧义", conflicting_receipt: "发布回执冲突"};
+  const reasons = {daily_release_window: "按发布日推定", time_window: "按发布时间推定", boundary_ambiguous: "处于版本边界", before_history: "早于可用版本历史", missing_publish_time: "缺少发布时间", missing_public_snapshot: "缺少公开快照", verified_chain: "证据已确认", manual: "人工确认", manual_clear: "人工清除", missing_content_evidence: "缺少正文一致性证据", missing_generation: "缺少生成记录", ambiguous_generation: "生成记录有歧义", conflicting_receipt: "发布回执冲突"};
   const el = (id) => document.getElementById(id);
   const h = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const num = (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN", {maximumFractionDigits: 1});
@@ -43,7 +43,7 @@ window.AutoQuillEvolution = (() => {
 
   function render() {
     const quality = data.quality || {}, records = data.articles || [];
-    el("evoStatus").textContent = "当前 v" + data.current_version + " · " + releases().length + " 个版本 · " + num(quality.public_articles || records.filter((a) => a.observations?.length).length) + " 篇公开作品 · 按发布时间推定 " + num(quality.time_attributed || 0) + " 篇 · 方案已确认 " + num(quality.confirmed || 0) + " 篇";
+    el("evoStatus").textContent = "当前 v" + data.current_version + " · " + releases().length + " 个每日版本节点 · " + num(quality.public_articles || records.filter((a) => a.observations?.length).length) + " 篇公开作品 · 按发布日推定 " + num(quality.time_attributed || 0) + " 篇 · 方案已确认 " + num(quality.confirmed || 0) + " 篇";
     const warnings = [...(data.warnings || [])];
     if (quality.time_ambiguous) warnings.push("版本边界未归属 " + num(quality.time_ambiguous) + " 篇");
     if (quality.time_unassigned) warnings.push("未能按时间窗归属 " + num(quality.time_unassigned) + " 篇");
@@ -69,15 +69,15 @@ window.AutoQuillEvolution = (() => {
 
   function timeline() {
     const values = view === "release" ? [...releases()].reverse() : [...nodes()].reverse();
-    el("evoListTitle").textContent = view === "release" ? "版本时间线" : "写作方案阶段";
-    el("evoListHint").textContent = view === "release" ? "默认按发布时间推定归属；点击版本查看样本、时间边界与改动。" : "方案视图只展示有明确生成／人工归属的证据链。";
+    el("evoListTitle").textContent = view === "release" ? "每日版本节点" : "写作方案阶段";
+    el("evoListHint").textContent = view === "release" ? "最小评价间隔为自然日；同日发布合并到当天最后版本，作品按发布日归属。" : "方案视图只展示有明确生成／人工归属的证据链。";
     el("evoNodeList").innerHTML = values.map((x) => {
       const id = view === "release" ? x.tag : x.id;
       const m = view === "release" ? (x.time_metrics || {}) : (x.metrics || {});
       const count = view === "release" ? (x.time_article_ids || []).length : (x.article_ids || []).length;
-      const when = view === "release" ? String(releaseDate(x)).replace("T", " ").slice(0, 16)
+      const when = view === "release" ? String(x.evaluation_date || releaseDate(x)).replace("T", " ").slice(0, 16)
         : (x.source === "runtime" ? "已记录试用" : "历史代码");
-      const sampleLabel = view === "release" ? num(count) + " 篇时间窗归属" : num(count) + " 篇证据归属";
+      const sampleLabel = view === "release" ? num(x.release_count || 1) + " 版合并 · " + num(count) + " 篇归属" : num(count) + " 篇证据归属";
       return '<button class="evo-time-item ' + (id === selected ? "sel" : "") + '" data-evo-node="' + h(id) + '"><span class="evo-time-dot"></span><span class="evo-time-main"><b>' + h(view === "release" ? x.tag : (x.label || x.id)) + '</b><small>' + h(when) + '</small></span><span class="evo-time-score">' + h(m.median == null ? "等待样本" : name() + "中位数 " + num(m.median)) + '<small>' + sampleLabel + '</small></span></button>';
     }).join("") || '<p class="evo-muted">尚无可展示的版本或方案记录。</p>';
   }
@@ -85,9 +85,11 @@ window.AutoQuillEvolution = (() => {
   function detail() {
     const x = item(); if (!x) { el("evoDetail").innerHTML = '<p class="evo-muted">尚无可查看的记录。</p>'; return; }
     const m = currentMetrics(), release = selectedRelease(), ids = view === "release" ? (release.time_article_ids || []) : (x.article_ids || []);
-    const timing = view === "release" ? '<p class="evo-detail-time">发布边界：' + h(String(releaseDate(x)).replace("T"," ").slice(0,19)) + ' · ' + h(sourceLabel(x.release_time_source)) + '<br>下个版本边界：' + h(String(x.interval_end || "暂无后续版本边界").replace("T"," ").slice(0,19)) + "</p>" : "";
+    const timing = view === "release" ? '<p class="evo-detail-time">评价日：' + h(x.evaluation_date || "未知") + ' · 当天最后发布：' + h(String(releaseDate(x)).replace("T"," ").slice(0,19)) + ' · ' + h(sourceLabel(x.release_time_source)) + '<br>评价区间：' + h(String(x.interval_start || "未知").replace("T"," ").slice(0,19)) + " 至 " + h(String(x.interval_end || "暂无后续发布日").replace("T"," ").slice(0,19)) + "</p>" : "";
     const link = view === "release" ? '<a class="evo-release-link" target="_blank" rel="noopener" href="https://github.com/large-su/AutoQuill/releases/tag/' + encodeURIComponent(x.tag) + '">查看 GitHub Release ↗</a>' : "";
-    el("evoDetail").innerHTML = '<div class="evo-detail-kicker">' + (view === "release" ? "按发布时间推定" : "证据链归属") + '</div><h3>' + h(view === "release" ? x.tag : (x.label || x.id)) + '</h3>' + timing + '<p class="evo-muted">' + h(x.summary || x.summaries?.[0] || "暂无改动摘要") + '</p><dl><div><dt>' + name() + '中位数</dt><dd>' + num(m.median) + '</dd></div><div><dt>P25 · 较低四分位</dt><dd>' + num(m.p25) + '</dd></div><div><dt>阶段有效观测</dt><dd>' + num(m.observed) + '</dd></div><div><dt>归属作品</dt><dd>' + num(ids.length) + '</dd></div></dl>' + link + '<details><summary>数据口径与缺失</summary><p>已归属 ' + num(m.assigned ?? ids.length) + ' 篇；有效观测 ' + num(m.observed) + ' 篇；尚未成熟 ' + num(m.immature) + ' 篇；缺少阶段指标 ' + num(m.missing) + ' 篇。篇均 ' + num(m.mean) + '，最高篇占比 ' + (m.top_share == null ? '—' : num(m.top_share * 100) + '%') + '。样本按作品发布时间归入版本时间窗；方案视图保留生成证据与人工方案归属。缺失指标与未成熟作品不按零处理。</p></details>';
+    const included = (x.included_releases || []).map((release) => '<li><a target="_blank" rel="noopener" href="https://github.com/large-su/AutoQuill/releases/tag/' + encodeURIComponent(release.tag) + '">' + h(release.tag || release.version) + ' ↗</a> · ' + h(String(release.released_at || "").replace("T", " ").slice(0,19)) + ' · ' + h(release.summary || "无摘要") + '</li>').join("");
+    const releaseDetails = view === "release" ? '<details><summary>当天合并的 ' + num(x.release_count || 1) + ' 次发布</summary><ul>' + (included || '<li>仅保留当天最后版本记录。</li>') + '</ul></details>' : "";
+    el("evoDetail").innerHTML = '<div class="evo-detail-kicker">' + (view === "release" ? "按发布日推定" : "证据链归属") + '</div><h3>' + h(view === "release" ? x.tag : (x.label || x.id)) + '</h3>' + timing + '<p class="evo-muted">' + h(view === 'release' && x.release_count > 1 ? '同日 ' + x.release_count + ' 个版本的全部改动已合并，可展开下方记录查看。' : (x.summary || x.summaries?.[0] || '暂无改动摘要')) + '</p><dl><div><dt>' + name() + '中位数</dt><dd>' + num(m.median) + '</dd></div><div><dt>P25 · 较低四分位</dt><dd>' + num(m.p25) + '</dd></div><div><dt>阶段有效观测</dt><dd>' + num(m.observed) + '</dd></div><div><dt>归属作品</dt><dd>' + num(ids.length) + '</dd></div></dl>' + link + releaseDetails + '<details><summary>数据口径与缺失</summary><p>最小评价间隔为自然日：同日所有版本并入当天最后发布的版本节点，作品按发布日归属。已归属 ' + num(m.assigned ?? ids.length) + ' 篇；有效观测 ' + num(m.observed) + ' 篇；尚未成熟 ' + num(m.immature) + ' 篇；缺少阶段指标 ' + num(m.missing) + ' 篇。篇均 ' + num(m.mean) + '，最高篇占比 ' + (m.top_share == null ? '—' : num(m.top_share * 100) + '%') + '。方案视图保留生成证据与人工方案归属。缺失指标与未成熟作品不按零处理。</p></details>';
   }
 
   function articles() {
