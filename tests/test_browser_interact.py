@@ -76,6 +76,24 @@ class TestCheckinTasks(unittest.TestCase):
         self.assertEqual(bi.parse_checkin_tasks(None), {})
         self.assertEqual(bi.parse_checkin_tasks([None, 'x']), {})
 
+    def test_read_checkin_tasks_preserves_bounded_page_signal_for_diagnostics(self):
+        class Page:
+            def goto(self, *_args, **_kwargs):
+                return None
+
+        class Probe(bi.InteractMixin):
+            page = Page()
+
+            def _safe_evaluate(self, _js):
+                return {'url': 'https://example.test/campaign/old',
+                        'title': '', 'tasks': [], 'groups': [],
+                        'body_head': '活动未开始'}
+
+        with mock.patch.object(bi.time, 'sleep'):
+            result = Probe().read_checkin_tasks('https://example.test/campaign/old', wait=0)
+        self.assertEqual(result['tasks'], {})
+        self.assertEqual(result['body_head'], '活动未开始')
+
 
 class TestCommentTime(unittest.TestCase):
     '''评论时间文案 → datetime（实测格式 09-26 13:32 / 昨天 / 20 小时前）。'''

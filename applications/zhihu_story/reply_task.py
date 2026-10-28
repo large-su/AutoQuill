@@ -496,14 +496,10 @@ def _refresh_checkin_after_reply(browser, state, progress=None, now=None):
     （core.checkin.update_tasks 只升不降）——打卡页有自己的统计延迟。
     '''
     try:
-        url = state.get('campaign_url') or ''
-        if not url:
-            found = browser.discover_campaign_url()
-            if not found.get('ok'):
-                return None
-            url = found['url']
-            checkin.set_campaign(state, url, found.get('text') or '')
-        info = browser.read_checkin_tasks(url)
+        # 和晚间巡检共用换期恢复：旧页空任务时只确认一次创作中心的新一期，
+        # 新页可解析后才更新缓存 URL，避免回复路径留下过期活动链接。
+        from applications.zhihu_story.checkin_task import read_current_checkin_tasks
+        info, failure = read_current_checkin_tasks(browser, state, progress=progress)
         if info.get('tasks'):
             checkin.update_tasks(state, info['tasks'], now=now)
             if info.get('title'):
@@ -517,6 +513,8 @@ def _refresh_checkin_after_reply(browser, state, progress=None, now=None):
             checkin.save_state(state)
             _say(progress, summary['line'])
             return summary
+        if failure:
+            log.debug('刷新打卡状态未完成：%s', failure)
     except Exception as exc:                     # noqa: BLE001
         log.debug('刷新打卡状态失败（不影响回复）：%s', exc)
     return None

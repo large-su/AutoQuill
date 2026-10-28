@@ -354,6 +354,7 @@ class TaskRunner:
             import time as _time
             rounds = max(1, int(spec.rounds or 1))
             success = 0
+            last_error = None
             for rnd in range(1, rounds + 1):
                 if rounds > 1:
                     log.info("\n" + "=" * 50 + "\n纯净模式 · 第 " + str(rnd)
@@ -363,11 +364,14 @@ class TaskRunner:
                                     on_story=_on_clean_story):
                         success += 1
                 except Exception as exc:
+                    last_error = exc
                     log.warning("纯净模式第 %d/%d 轮失败：%s",
                                 rnd, rounds, exc)
                 if rnd < rounds:
                     _time.sleep(2)   # 轮间小憩，避免连续刷新推荐页
             log.info(f"纯净模式 {rounds} 轮完成：成功 {success}/{rounds}")
+            if not success and last_error is not None:
+                raise RuntimeError(f"纯净模式未完成：{last_error}") from last_error
             return success > 0
 
         if mode == "single":
@@ -401,6 +405,7 @@ class TaskRunner:
             import time as _time
             rounds = max(1, int(spec.rounds or 1))
             success = 0
+            last_error = None
             for rnd in range(1, rounds + 1):
                 if rounds > 1:
                     log.info("\n" + "=" * 50 + "\n经典模式 · 第 " + str(rnd)
@@ -410,11 +415,14 @@ class TaskRunner:
                                      on_story=_on_story):
                         success += 1
                 except Exception as exc:
+                    last_error = exc
                     log.warning("经典模式第 %d/%d 轮失败：%s",
                                 rnd, rounds, exc)
                 if rnd < rounds:
                     _time.sleep(2)   # 轮间小憩
             log.info(f"经典模式 {rounds} 轮完成：成功 {success}/{rounds}")
+            if not success and last_error is not None:
+                raise RuntimeError(f"经典模式未完成：{last_error}") from last_error
             return success > 0
 
         if mode == "batch":

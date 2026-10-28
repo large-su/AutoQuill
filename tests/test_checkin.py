@@ -16,10 +16,14 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
+# default_ask imports config lazily.  Load it before individual tests redirect
+# DATA_ROOT, so this module remains independently runnable.
+import config  # noqa: F401
 from core import checkin as ck
 from core import paths
 from applications.zhihu_story import checkin_task as task
 from applications.zhihu_story import comment_fallback as cfb
+from applications.zhihu_story import reply_task as reply_task
 
 
 class CheckinBase(unittest.TestCase):
@@ -368,6 +372,50 @@ class _FakeCommentBrowser:
         return None
 
 
+class _ExpiredCampaignBrowser(_FakeCommentBrowser):
+    '''旧活动页不再提供任务；创作中心能找到已经开始的新一期。'''
+
+    old_url = 'https://example.test/campaign/old'
+    new_url = 'https://example.test/campaign/new'
+
+    def __init__(self):
+        super().__init__()
+        self.read_urls = []
+
+    def read_checkin_tasks(self, url):
+        self.read_urls.append(url)
+        if url == self.old_url:
+            return {'tasks': {}, 'title': '', 'raw_tasks': [],
+                    'body_head': '活动未开始'}
+        if url == self.new_url:
+            return {'tasks': {
+                'follow': {'title': '关注', 'done': True},
+                'vote': {'title': '赞同', 'done': True},
+                'comment': {'title': '评论', 'done': True},
+            }, 'title': '新一期', 'raw_tasks': [{}]}
+        raise AssertionError('unexpected URL: %s' % url)
+
+    def discover_campaign_url(self):
+        return {'ok': True, 'url': self.new_url, 'text': '查看详情'}
+
+
+class _UnreadyReplacementBrowser(_ExpiredCampaignBrowser):
+    def read_checkin_tasks(self, url):
+        self.read_urls.append(url)
+        return {'tasks': {}, 'title': '', 'raw_tasks': [],
+                'body_head': '活动未开始'}
+
+
+class _SameCampaignBrowser(_ExpiredCampaignBrowser):
+    def discover_campaign_url(self):
+        return {'ok': True, 'url': self.old_url, 'text': '查看详情'}
+
+
+class _DiscoverErrorBrowser(_ExpiredCampaignBrowser):
+    def discover_campaign_url(self):
+        raise RuntimeError('创作中心暂不可用')
+
+
 class CommentFallbackTest(unittest.TestCase):
     '''打卡评论兜底：当天最后一班在参考故事下补一条贴题评论。
 
@@ -642,6 +690,84 @@ class CommentFallbackTest(unittest.TestCase):
                                  is_last=True)
         self.assertFalse(r['ok'])
         self.assertIn('评论仍未达成', r['detail'])
+
+    def test_expired_campaign_is_replaced_only_after_new_page_has_tasks(self):
+        '''换期后旧页空任务，巡检应刷新入口并只在新页可解析时保存新链接。'''
+        browser = _ExpiredCampaignBrowser()
+        st = ck.fresh_state()
+        st['campaign_url'] = browser.old_url
+        ck.save_state(st)
+
+        result = task.run_checkin_job(browser, is_last=True)
+
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(browser.read_urls, [browser.old_url, browser.new_url])
+        self.assertEqual(ck.load_state()['campaign_url'], browser.new_url)
+        self.assertEqual(browser.opened, [])
+        self.assertEqual(browser.comments, [])
+
+    def test_unready_replacement_does_not_replace_known_campaign(self):
+        browser = _UnreadyReplacementBrowser()
+        st = ck.fresh_state()
+        st['campaign_url'] = browser.old_url
+
+        info, detail = task.read_current_checkin_tasks(browser, st)
+
+        self.assertEqual(info, {})
+        self.assertIn('新一期仍未解析到任务', detail)
+        self.assertEqual(st['campaign_url'], browser.old_url)
+        self.assertEqual(browser.read_urls, [browser.old_url, browser.new_url])
+
+    def test_same_discovered_url_is_not_read_twice(self):
+        browser = _SameCampaignBrowser()
+        st = ck.fresh_state()
+        st['campaign_url'] = browser.old_url
+
+        info, detail = task.read_current_checkin_tasks(browser, st)
+
+        self.assertEqual(info, {})
+        self.assertIn('缓存的打卡活动已失效', detail)
+        self.assertEqual(browser.read_urls, [browser.old_url])
+
+    def test_discovery_exception_returns_actionable_failure(self):
+        browser = _DiscoverErrorBrowser()
+        st = ck.fresh_state()
+        st['campaign_url'] = browser.old_url
+
+        info, detail = task.read_current_checkin_tasks(browser, st)
+
+        self.assertEqual(info, {})
+        self.assertIn('刷新当期入口失败', detail)
+        self.assertIn('创作中心暂不可用', detail)
+
+    def test_first_discovery_exception_is_also_reported(self):
+        browser = _DiscoverErrorBrowser()
+
+        info, detail = task.read_current_checkin_tasks(browser, ck.fresh_state())
+
+        self.assertEqual(info, {})
+        self.assertIn('当期入口读取失败', detail)
+
+    def test_cancel_during_cached_read_is_not_changed_to_failure_or_retried(self):
+        from web_drivers.browser_pool import WorkflowCancelled
+        browser = Mock()
+        browser.read_checkin_tasks.side_effect = WorkflowCancelled('已停止')
+        st = ck.fresh_state()
+        st['campaign_url'] = _ExpiredCampaignBrowser.old_url
+        with self.assertRaises(WorkflowCancelled):
+            task.read_current_checkin_tasks(browser, st)
+        browser.discover_campaign_url.assert_not_called()
+
+    def test_reply_refresh_uses_same_expired_campaign_recovery(self):
+        browser = _ExpiredCampaignBrowser()
+        st = ck.fresh_state()
+        st['campaign_url'] = browser.old_url
+
+        summary = reply_task._refresh_checkin_after_reply(browser, st)
+
+        self.assertTrue(summary['ok'])
+        self.assertEqual(st['campaign_url'], browser.new_url)
+        self.assertEqual(browser.read_urls, [browser.old_url, browser.new_url])
 
     def test_checkin_uses_saved_story_to_complete_comment_and_summary(self):
         '''晚间巡检可使用已保存故事补评论，并将最终摘要记为完成。'''

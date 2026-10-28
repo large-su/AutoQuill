@@ -493,6 +493,7 @@ class InteractMixin:
         return {'ok': bool(tasks), 'url': (raw or {}).get('url') or url,
                 'title': (raw or {}).get('title') or '',
                 'tasks': tasks, 'groups': (raw or {}).get('groups') or [],
+                'body_head': (raw or {}).get('body_head') or '',
                 'raw_tasks': (raw or {}).get('tasks') or []}
 
     # ---------------- 回答页关注 / 赞同 ----------------

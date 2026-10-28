@@ -867,10 +867,10 @@ class ZhihuWorkflow(WorkflowBase):
                   f"（其中 {', '.join(reasons)}）" if reasons else "")
         raise RuntimeError(
             f"提取失败：重试 {MAX_TOPIC_RETRY + 1} 次仍无合格首答"
-            f"（首答过短或不可回答）"
-            + (f"，其中 {gate_reject_count} 次被点赞门槛拒绝" if gate_reject_count
+            f"（检查长度、可回答性、点赞及故事适配筛选）"
+            + (f"，其中 {gate_reject_count} 个候选被点赞门槛拒绝" if gate_reject_count
                else "")
-            + "。可调低 config 中的 MIN_ANSWER_LENGTH / MATERIAL_MIN_LIKES 后重试")
+            + "。具体排除原因见本次日志，可稍后重新选题")
 
     # ============================================================
     # 纯净模式：选题（只按流量/关注，无体裁规则）+ 提取（仅赞门槛）
