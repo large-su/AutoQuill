@@ -1285,28 +1285,29 @@
       "writing_files_changed": [],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
       "provenance": "git-tag",
-      "interval_end": "2026-10-28T14:44:42+00:00"
+      "interval_end": "2026-10-28T22:47:17+08:00"
     },
     {
       "version": "5.8.1",
       "tag": "v5.8.1",
-      "commit": null,
-      "source_commit": null,
+      "commit": "5969e7d16d71c9c8afd23a9f1cd7762adc70f20d",
+      "source_commit": "5969e7d16d71c9c8afd23a9f1cd7762adc70f20d",
       "parent": "10f6431e66b1603e3b50f01b7e7e9e4315f42c82",
       "date": "2026-10-28",
-      "released_at": "2026-10-28T14:44:42+00:00",
-      "release_time_source": "build-time-estimate",
+      "released_at": "2026-10-28T22:47:17+08:00",
+      "release_time_source": "git-commit",
       "summary": "v5.8.1: 修复打卡活动换期与自动化失败原因丢失",
       "summaries": [
         "v5.8.1: 修复打卡活动换期与自动化失败原因丢失"
       ],
-      "changed_file_count": 13,
+      "changed_file_count": 14,
       "changed_files": [
         "CHANGELOG.md",
         "README.md",
         "applications/zhihu_story/browser_interact.py",
         "applications/zhihu_story/checkin_task.py",
         "applications/zhihu_story/reply_task.py",
+        "core/evolution_history.json",
         "core/version.py",
         "docs/archive/AUTOMATION-INCIDENT-2026-10-28.md",
         "installer/AutoQuill.iss",
@@ -1319,6 +1320,40 @@
       "change_kind": "engineering",
       "writing_files_changed": [],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
+      "provenance": "git-tag",
+      "interval_end": "2026-10-30T15:53:33+00:00"
+    },
+    {
+      "version": "5.9.0",
+      "tag": "v5.9.0",
+      "commit": null,
+      "source_commit": null,
+      "parent": "5969e7d16d71c9c8afd23a9f1cd7762adc70f20d",
+      "date": "2026-10-30",
+      "released_at": "2026-10-30T15:53:33+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.9.0: 修正完整结局提示冲突并保存探索与真实反馈基线",
+      "summaries": [
+        "v5.9.0: 修正完整结局提示冲突并保存探索与真实反馈基线"
+      ],
+      "changed_file_count": 9,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "config/story.py",
+        "core/evolution.py",
+        "core/version.py",
+        "docs/archive/GROWTH-EXPERIMENT-5.9.0.md",
+        "installer/AutoQuill.iss",
+        "story_prompt.py",
+        "tests/test_story_ending_closure.py"
+      ],
+      "change_kind": "mixed",
+      "writing_files_changed": [
+        "config/story.py",
+        "story_prompt.py"
+      ],
+      "writing_code_id": "c22f775b88dd91f6868f1b9ddc3114909159d74175144efc0d60279518ee357b",
       "provenance": "working-tree",
       "pending": true,
       "interval_end": null

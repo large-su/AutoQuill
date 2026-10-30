@@ -150,6 +150,19 @@ DEAI_STYLE_RULE = """
 - 否定式排比"不仅仅是……而是……"、三段并列堆叠要拆开
 - 删掉"金句"：读起来像名言警句、能单独摘出来的句子，一律重写成随口说出的样子"""
 
+# 整体精简与放宽额度的候选未通过隔离审读，不进入默认提示。
+# 仅消除旧结尾要求与题意/读者承诺的直接冲突；关闭可精确恢复旧守则。
+COMPLETE_ENDING_STYLE_RULE = DEAI_STYLE_RULE.replace(
+    '- 结尾停在画面或悬念上，禁止"这件事让我明白……"式升华收尾',
+    '- 结尾按题意兑现主线；题目要求完整结局时，不新增未解释的谜团或续篇悬念。'
+    '可用已经发生的动作或画面收束，禁止"这件事让我明白……"式升华收尾')
+
+
+def _deai_style_rule():
+    from config.story import STORY_ENDING_CLOSURE_ENABLE
+    return COMPLETE_ENDING_STYLE_RULE if STORY_ENDING_CLOSURE_ENABLE else DEAI_STYLE_RULE
+
+
 # 输出方式硬约束（2026-09-08 豆包实测根因修复）：
 # 网页版豆包对长写作请求会走「写作/文档/工作任务交付」——对话里只留一句
 # 引言（60-100 字），正文被放进独立交付界面，驱动读不到正文，整篇被判
@@ -847,7 +860,7 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     user_message += _reader_experience_rule()
     user_message += _craft_learning_rule()
     user_message += NAMING_CONSTRAINT
-    user_message += DEAI_STYLE_RULE
+    user_message += _deai_style_rule()
     # 开篇事件化（2026-09-19 用户口径）：管的是引言的"内容"，补住"形式达标但
     # 内容空转"的缺口；紧随去AI味守则之后（环境/空镜守则同属一节）。
     user_message += OPENING_EVENT_RULE

@@ -23,6 +23,7 @@ __all__ = [
     # 格式与素材
     "ENABLE_FORMAT_RETRY", "STORY_MATERIAL_MODE",
     "READER_EXPERIENCE_ENABLE", "CRAFT_LEARNING_ENABLE",
+    "STORY_ENDING_CLOSURE_ENABLE",
     "REFERENCE_NARRATIVE_SAMPLE_ENABLE",
     # 知识库
     "KB_MAX_PER_GENRE", "KB_MERGE_TRIGGER", "KB_ENABLE", "RECIPE_VERBOSE_MODE",
@@ -196,6 +197,10 @@ READER_CONTRACT_ENABLE = True
 # 与读者自检独立；False 可撤回本轮指导，保留 v5.2.0 的叙事兑现指导。
 # 不读取本地会员正文/学习笔记，不增加模型请求。
 CRAFT_LEARNING_ENABLE = True
+
+# 结尾兑现实验：经典模式消除强制留悬念与完整结局的冲突；False 精确恢复旧
+# DEAI_STYLE_RULE，便于同题对照和回滚。纯净模式不读取此开关。
+STORY_ENDING_CLOSURE_ENABLE = True
 
 # ============================================================
 # 知识库配置
