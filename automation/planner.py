@@ -48,7 +48,7 @@ def plan_fingerprint(plan) -> str:
         # （v2 = 2026-09-19 改成「时段内铺开」+ 上限公式；
         #   v3 = 2026-09-19 修「中途改计划从早上重铺 / 未来作业被凭空顺延」，
         #        并让新排班只落在「现在之后」）
-        "sched": 3,
+        "sched": 4,  # 重排不复用已消耗的槽位编号；按实际完成时间续排
         "window": plan.get("window"),
         "min_gap": plan.get("min_gap_minutes"),
         "gap_jitter": plan.get("gap_jitter_ratio"),
@@ -225,7 +225,8 @@ def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
         last_done = None
         for job in done:
             try:
-                t = datetime.fromisoformat(job.get("planned_at", ""))
+                t = datetime.fromisoformat(job.get("finished_at") or job.get("started_at")
+                                           or job.get("planned_at", ""))
             except Exception:
                 continue
             last_done = t if last_done is None else max(last_done, t)
@@ -280,9 +281,13 @@ def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
             continue
         times = spread_times(eff_start, win_end, min(remaining, limit), min_gap, rng,
                              jitter_minutes=jitter, spread=spread)
-        for i, when in enumerate(times):
+        used_keys = {j.get("key") for j in schedule}
+        slot = done_n
+        for when in times:
+            while job_key(task_type, day, "slot", slot) in used_keys:
+                slot += 1
             jobs.append({
-                "key": job_key(task_type, day, "slot", i),
+                "key": job_key(task_type, day, "slot", slot),
                 "type": task_type,
                 "planned_at": when.replace(microsecond=0).isoformat(),
                 "status": STATUS_PLANNED,
@@ -290,6 +295,7 @@ def _build_schedule(day, plan, schedule=None, counters=None, not_before=None):
                 "params": cfg.get("params") or {},
                 "note": "",
             })
+            slot += 1
     # 当天最后一个「写草稿」作业打标记：打卡互动的「翻转兜底」
     # （取关再关注 / 取消赞同再赞同）只在这一班做——用户口径 2026-09-27。
     # ★ 只在打卡任务确实启用时才打标：否则会给作业挂一条「打卡可翻转」的说明，
@@ -357,6 +363,10 @@ def materialize_day(now, plan, day_data, done_counts=None):
                     "counters": dict(done_counts or {}), "rescheduled": 0,
                     "notes": []}
     changed = day_data.get("plan_hash") != fingerprint
+    # 台账/线上计数随执行推进，不只在首次建日状态时读取。
+    counters = day_data.setdefault("counters", {})
+    for task_type, count in (done_counts or {}).items():
+        counters[task_type] = max(int(counters.get(task_type) or 0), int(count))
     if changed or not day_data.get("schedule"):
         keep = [j for j in day_data.get("schedule", [])
                 if j.get("status") in _CONSUMED or j.get("type") not in TASK_TYPES
@@ -453,7 +463,8 @@ def apply_catch_up(now, plan, day_data):
     for job in day_data.get("schedule", []):
         if job.get("status") in _CONSUMED and job.get("planned_at"):
             try:
-                t = datetime.fromisoformat(job["planned_at"])
+                t = datetime.fromisoformat(job.get("finished_at") or job.get("started_at")
+                                           or job["planned_at"])
             except Exception:
                 continue
             anchor[job["type"]] = max(anchor.get(job["type"], t), t)
@@ -669,7 +680,8 @@ def summarize(now, plan, day_data):
     for task_type, meta in TASK_TYPES.items():
         cfg = (plan.get("tasks") or {}).get(task_type) or {}
         jobs = [j for j in schedule if j.get("type") == task_type]
-        done = len([j for j in jobs if j.get("status") in _CONSUMED])
+        done = max(len([j for j in jobs if j.get("status") in _CONSUMED]),
+                   int((day_data.get("counters") or {}).get(task_type) or 0))
         failed = len([j for j in jobs if j.get("status") == STATUS_FAILED])
         pending = len([j for j in jobs if j.get("status") == STATUS_PLANNED])
         skipped = len([j for j in jobs if j.get("status") == STATUS_SKIPPED])

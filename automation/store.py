@@ -116,6 +116,45 @@ def load_day(day: str) -> dict:
     data.setdefault("schedule", [])
     data.setdefault("counters", {})
     data.setdefault("notes", [])
+    return _recover_day_evidence(day, data)
+
+
+def _recover_day_evidence(day, data):
+    """Recover old duplicate slots without altering the append-only ledger.
+
+    A completed publication may have been overwritten by later empty-draft
+    attempts with the same key. Its success receipt remains authoritative.
+    Duplicate rows are retained separately for inspection, never dispatched.
+    """
+    priority = {"done": 5, "running": 4, "needs_human": 3,
+                "failed": 2, "skipped": 2, "planned": 1}
+    unique, duplicates = {}, []
+    for job in data["schedule"]:
+        key = job.get("key")
+        if not key or key not in unique:
+            unique[key or id(job)] = job
+            continue
+        previous = unique[key]
+        if priority.get(job.get("status"), 0) > priority.get(previous.get("status"), 0):
+            duplicates.append(previous)
+            unique[key] = job
+        else:
+            duplicates.append(job)
+    data["schedule"] = list(unique.values())
+    if duplicates:
+        data.setdefault("recovered_duplicates", []).extend(duplicates)
+    successes = {}
+    for row in load_ledger(day):
+        if row.get("status") == "done" and not row.get("dry_run"):
+            successes[row.get("key")] = row
+    for job in data["schedule"]:
+        row = successes.get(job.get("key"))
+        if row and not job.get("dry_run"):
+            job["status"] = "done"
+            for field in ("started_at", "finished_at"):
+                if row.get(field):
+                    job[field] = row[field]
+            job["note"] = row.get("message") or job.get("note", "")
     return data
 
 
@@ -177,7 +216,7 @@ def done_counts(day: str) -> dict:
     """
     counts = {}
     for row in load_ledger(day):
-        if row.get("status") != "done":
+        if row.get("status") != "done" or row.get("dry_run"):
             continue
         t = row.get("type")
         n = int(row.get("units") or 1)

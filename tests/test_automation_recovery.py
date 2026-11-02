@@ -262,6 +262,10 @@ class SchedulerRecoveryTest(unittest.TestCase):
         snapshot = planner.materialize_day(self.now, plan, {}, {})
         running = next(job for job in snapshot["schedule"]
                        if job["type"] == "full_chain")
+        # Exercise the real dispatch seam: prepare_tick persists the selected
+        # schedule and calls it only once its planned time has arrived.
+        running["planned_at"] = self.now.isoformat()
+        store.save_day(day, snapshot)
         worker = threading.Thread(target=scheduler._run_job,
                                   args=(running, day, snapshot, plan))
         worker.start()

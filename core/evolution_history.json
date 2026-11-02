@@ -1321,27 +1321,28 @@
       "writing_files_changed": [],
       "writing_code_id": "f54ce3f7b90964fc9d06e215c6814ae9d478b6c4d95d0c3c58bd47ebe7359cbd",
       "provenance": "git-tag",
-      "interval_end": "2026-10-30T15:53:33+00:00"
+      "interval_end": "2026-10-30T23:56:09+08:00"
     },
     {
       "version": "5.9.0",
       "tag": "v5.9.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "59a75e778f4c4ba63cd0b97a896a1d2db11bf9f5",
+      "source_commit": "59a75e778f4c4ba63cd0b97a896a1d2db11bf9f5",
       "parent": "5969e7d16d71c9c8afd23a9f1cd7762adc70f20d",
       "date": "2026-10-30",
-      "released_at": "2026-10-30T15:53:33+00:00",
-      "release_time_source": "build-time-estimate",
+      "released_at": "2026-10-30T23:56:09+08:00",
+      "release_time_source": "git-commit",
       "summary": "v5.9.0: 修正完整结局提示冲突并保存探索与真实反馈基线",
       "summaries": [
         "v5.9.0: 修正完整结局提示冲突并保存探索与真实反馈基线"
       ],
-      "changed_file_count": 9,
+      "changed_file_count": 10,
       "changed_files": [
         "CHANGELOG.md",
         "README.md",
         "config/story.py",
         "core/evolution.py",
+        "core/evolution_history.json",
         "core/version.py",
         "docs/archive/GROWTH-EXPERIMENT-5.9.0.md",
         "installer/AutoQuill.iss",
@@ -1353,6 +1354,38 @@
         "config/story.py",
         "story_prompt.py"
       ],
+      "writing_code_id": "c22f775b88dd91f6868f1b9ddc3114909159d74175144efc0d60279518ee357b",
+      "provenance": "git-tag",
+      "interval_end": "2026-11-02T02:08:07+00:00"
+    },
+    {
+      "version": "5.9.1",
+      "tag": "v5.9.1",
+      "commit": null,
+      "source_commit": null,
+      "parent": "59a75e778f4c4ba63cd0b97a896a1d2db11bf9f5",
+      "date": "2026-11-02",
+      "released_at": "2026-11-02T02:08:07+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.9.1: 修复配额重排复用任务编号引发集中发布",
+      "summaries": [
+        "v5.9.1: 修复配额重排复用任务编号引发集中发布"
+      ],
+      "changed_file_count": 10,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "automation/planner.py",
+        "automation/scheduler.py",
+        "automation/store.py",
+        "core/version.py",
+        "docs/archive/AUTOMATION-INCIDENT-2026-11-02.md",
+        "installer/AutoQuill.iss",
+        "tests/test_automation_quota_replan.py",
+        "tests/test_automation_recovery.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
       "writing_code_id": "c22f775b88dd91f6868f1b9ddc3114909159d74175144efc0d60279518ee357b",
       "provenance": "working-tree",
       "pending": true,

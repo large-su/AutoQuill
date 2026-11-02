@@ -531,6 +531,56 @@ class AutomationScheduler:
 
     # ---------------- 执行单个作业 ----------------
 
+    def _publication_guard(self, now, job, day, day_data, plan):
+        """Check real receipts again at dispatch, including manual run-now.
+
+        A schedule is a plan, not permission to bypass the day's quota or the
+        interval since an actual publication. No browser calls occur here.
+        """
+        if job.get("type") != "publish_drafts" or job.get("dry_run"):
+            return None
+        cfg = (plan.get("tasks") or {}).get("publish_drafts") or {}
+        counts = store.done_counts(day)
+        done = max(int(counts.get("publish_drafts") or 0),
+                   int((day_data.get("counters") or {}).get("publish_drafts") or 0))
+        cap = int(cfg.get("daily_cap") or 0)
+        note = ""
+        if not cfg.get("enabled") and not job.get("manual"):
+            job["status"] = STATUS_SKIPPED
+            job["finished_at"] = now.replace(microsecond=0).isoformat()
+            note = "发布任务已停用，执行前拦截"
+        elif done >= cap:
+            job["status"] = STATUS_SKIPPED
+            job["finished_at"] = now.replace(microsecond=0).isoformat()
+            note = "今日发布配额已满（已完成 %d/%d），执行前拦截" % (done, cap)
+        else:
+            latest = None
+            for row in store.load_ledger(day) + day_data.get("schedule", []):
+                if (row.get("type") != "publish_drafts" or row.get("status") != STATUS_DONE
+                        or row.get("dry_run")):
+                    continue
+                stamp = row.get("finished_at") or row.get("started_at") or row.get("planned_at")
+                try:
+                    at = datetime.fromisoformat(stamp or "")
+                    latest = at if latest is None else max(latest, at)
+                except (ValueError, TypeError):
+                    continue
+            gap = float(cfg.get("min_gap_minutes") or plan.get("min_gap_minutes") or 60)
+            earliest = latest + timedelta(minutes=gap) if latest else None
+            if earliest and now < earliest:
+                job["planned_at"] = earliest.replace(microsecond=0).isoformat()
+                note = "距上次实际发布不足 %g 分钟，顺延至 %s" % (gap, earliest.strftime("%H:%M:%S"))
+                _, end = planner.window_bounds(day, plan, cfg)
+                if earliest > end:
+                    job["status"] = STATUS_SKIPPED
+                    job["finished_at"] = now.replace(microsecond=0).isoformat()
+                    note += "（超出今日时段）"
+        if not note:
+            return None
+        job["note"] = note
+        self._save_day_if_changed(day, day_data)
+        return {"ok": False, "status": job["status"], "units": 0, "message": note}
+
     def _run_job(self, job, day, day_data, plan):
         """执行并保证任何阶段异常都不会遗留永久 busy 状态。"""
         try:
@@ -560,12 +610,31 @@ class AutomationScheduler:
                     return {"ok": False, "status": STATUS_PLANNED, "units": 0,
                             "message": "调度已暂停或停止，保留待执行作业"}
             day_data, job = self._current_day_job(day, day_data, job)
+            # Rebinding may find a completed/claimed slot, including an old
+            # duplicate key. Never turn that receipt back into running.
+            if job.get("status") != STATUS_PLANNED:
+                return {"ok": False, "status": job.get("status"), "units": 0,
+                        "message": "任务已结束或已被领取，未重复执行"}
+            if (not job.get("manual") and job.get("planned_at")
+                    and datetime.fromisoformat(job["planned_at"]) > started):
+                return {"ok": False, "status": STATUS_PLANNED, "units": 0,
+                        "message": "任务已重新排班，尚未到执行时间"}
+            current_plan = store.load_plan()
+            blocked = self._publication_guard(started, job, day, day_data, current_plan)
+            if blocked is not None:
+                return blocked
             job["status"] = STATUS_RUNNING
             job["started_at"] = started.strftime("%Y-%m-%dT%H:%M:%S")
             with self._lock:
                 self._running_job = dict(job)
                 self._run_progress = {"text": "启动…", "pct": None}
             self._save_day_if_changed(day, day_data)
+            claimed = next((item for item in store.load_day(day).get("schedule", [])
+                            if item.get("key") == job.get("key")), None)
+            if not claimed or claimed.get("status") != STATUS_RUNNING:
+                self.pause("任务执行状态未能保存，已暂停以避免重复操作")
+                return {"ok": False, "status": STATUS_NEEDS_HUMAN, "units": 0,
+                        "message": "任务领取未持久化，未执行"}
             store.append_ledger({"day": day, "key": job["key"], "type": job["type"],
                                  "status": STATUS_RUNNING,
                                  "planned_at": job.get("planned_at"),
