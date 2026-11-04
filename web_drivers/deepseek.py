@@ -129,6 +129,12 @@ class DeepSeekDriver(WebLLMDriver):
         if observer is not None:
             observer.raise_if_rejected()
         parsed = urlsplit(page.url or "")
+        if (parsed.scheme == "https" and parsed.netloc == "chat.deepseek.com"
+                and parsed.path.rstrip("/") == "/banned"):
+            from web_drivers.account_status import remember_status
+            from web_drivers.browser_pool import WebAccountRestricted
+            state = remember_status("DeepSeek", "restricted")
+            raise WebAccountRestricted(state["message"])
         if parsed.scheme == "https" and parsed.netloc == "chat.deepseek.com" and parsed.path.rstrip("/") in (
                 "/sign_in", "/sign-in", "/login"):
             from web_drivers.browser_pool import WebLoginRequired
@@ -701,15 +707,12 @@ def web_llm_logged_in():
     """
     from web_drivers.browser_pool import (
         _browser_lock, create_browser, live_browsers, profile_in_use,
-        WebLoginCheckError, WebLoginRequired, WorkflowCancelled,
+        WebLoginCheckError, WebLoginRequired, WebAccountRestricted, WorkflowCancelled,
     )
+    from web_drivers.account_status import remember_status
     if profile_in_use() or live_browsers() > 0:
-        # ★ 2026-09-26：有浏览器在跑（任务/登录引导/抓取）就**不发起检测**。
-        # 第二个实例必然 exitCode=21 失败，而失败路径的「清理残留进程」会
-        # 把正在干活的浏览器杀掉（安装版真机事故）。这里按「已登录」回报：
-        # 把一次检测跳过误报成「未登录」会直接挡住用户的任务。
-        log.debug("网页版登录态检查跳过（浏览器正被占用）")
-        return True
+        remember_status("DeepSeek", "busy")
+        raise WebLoginCheckError("浏览器正在使用中，请在当前任务结束后检查")
     try:
         with _browser_lock:
             with create_browser(headless=True) as browser:
@@ -727,12 +730,20 @@ def web_llm_logged_in():
                     while time.monotonic() < deadline:
                         try:
                             auth.raise_if_rejected()
+                        except WebAccountRestricted:
+                            raise
                         except WebLoginRequired:
+                            remember_status("DeepSeek", "logged_out")
                             return False
+                        if urlsplit(page.url).path.rstrip("/") == "/banned":
+                            raise WebAccountRestricted(remember_status(
+                                "DeepSeek", "restricted")["message"])
                         state = _deepseek_login_state(page)
                         if state is not None:
+                            remember_status("DeepSeek", "ready" if state else "logged_out")
                             return state
                         page.wait_for_timeout(250)
+                    remember_status("DeepSeek", "unknown")
                     raise WebLoginCheckError(
                         "DeepSeek 页面尚未就绪，可能正在加载或验证；请稍后重试检测")
                 finally:
@@ -740,10 +751,11 @@ def web_llm_logged_in():
                         page.close()
                     except Exception:
                         pass
-    except (WebLoginCheckError, WorkflowCancelled):
+    except (WebLoginCheckError, WebAccountRestricted, WorkflowCancelled):
         raise
     except Exception as exc:
         log.warning("DeepSeek 登录检查暂不可用：%s", type(exc).__name__)
+        remember_status("DeepSeek", "unknown")
         raise WebLoginCheckError(
             "DeepSeek 登录检查暂不可用（浏览器或网络异常），请稍后重试；"
             "这不表示账号已退出登录") from exc

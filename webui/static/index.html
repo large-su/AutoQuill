@@ -62,6 +62,7 @@
             <div class="mc-d">免费。登录网页版大模型（DeepSeek / 豆包）后由浏览器自动操作。</div>
             <div class="mc-ctl">
               <button class="btn primary" id="btnWebLogin">打开 Edge 登录网页版大模型</button>
+              <button class="btn ghost" id="btnOpenSettingsModels">选择网页版模型</button>
               <span class="setup-err mc-msg" id="webErr"></span>
               <span class="setup-ok mc-msg" id="webOk"></span>
             </div>
@@ -667,6 +668,11 @@
             <select id="webDriverSel"><option value="">（加载中…）</option></select>
           </div>
           <div class="st-d">Web 通道用的网页端模型（豆包只使用「豆包快速」）</div>
+        </div>
+        <div class="st-row" id="webDriverAccountsRow" hidden>
+          <div class="st-k">网页版账号</div>
+          <div class="st-ctl" id="webDriverAccounts"></div>
+          <div class="st-d">每个网页模型的登录态独立保存；“检查状态”不会切换当前模型。</div>
         </div>
         <div class="st-row">
           <div class="st-k">浏览器模式</div>

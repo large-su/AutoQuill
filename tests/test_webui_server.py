@@ -25,6 +25,11 @@ class TestServerAPI(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # The installed user's selection and other suites must not choose the
+        # provider behind these Doubao login mocks.
+        driver_patch = mock.patch("config.WEB_DRIVER_NAME", "Doubao")
+        driver_patch.start()
+        cls.addClassCleanup(driver_patch.stop)
         cls.client = TestClient(server.app)
 
     def test_index_serves_html(self):
@@ -156,7 +161,7 @@ class TestServerAPI(unittest.TestCase):
         self.assertIn("web", data["allowed"])
 
     def test_mode_post_switch(self):
-        # 闭环预检：切 web 需 DeepSeek 已登录（mock 缓存通过，免真实拉起 Edge）
+        # 闭环预检：切 web 需当前选中的网页版已登录（mock 缓存通过，免真实拉起 Edge）
         import config
         orig = config.LLM_MODE
         try:
@@ -194,10 +199,10 @@ class TestServerAPI(unittest.TestCase):
         orig = config.LLM_MODE
         try:
             config.set_runtime_mode("api", persist=False)
-            # 缓存按驱动名区分（2026-09：DeepSeek 登录 ≠ 豆包登录）
+            # 缓存按当前驱动名区分（不同网页版登录态互不复用）
             setup_mod._web_llm_cache[setup_mod._web_llm_cache_key()] = {
                 "ts": time.time(), "ok": True}
-            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
+            with mock.patch("web_drivers.doubao.web_llm_logged_in",
                                    return_value=False) as m:
                 r = self.client.post("/api/mode", json={"mode": "web"})
                 self.assertEqual(r.status_code, 200)
@@ -241,7 +246,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
+            with mock.patch("web_drivers.doubao.web_llm_logged_in",
                                    return_value=False):
                 with mock.patch.object(runner, "_dispatch") as m:
                     runner._run_task(spec)
@@ -257,7 +262,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
+            with mock.patch("web_drivers.doubao.web_llm_logged_in",
                                    return_value=False):
                 with mock.patch.object(runner, "_dispatch"):
                     runner._run_task(spec)
@@ -303,7 +308,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="profile", author="甲")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
+            with mock.patch("web_drivers.doubao.web_llm_logged_in",
                                    return_value=False):
                 with mock.patch.object(runner, "_dispatch") as m:
                     runner._run_task(spec)
@@ -327,7 +332,7 @@ class TestServerAPI(unittest.TestCase):
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "web"):
-            with mock.patch("web_drivers.deepseek.web_llm_logged_in",
+            with mock.patch("web_drivers.doubao.web_llm_logged_in",
                                    return_value=True):
                 with mock.patch.object(runner, "_dispatch",
                                        return_value=True) as m:
@@ -336,13 +341,13 @@ class TestServerAPI(unittest.TestCase):
         m.assert_called_once_with(spec)
 
     def test_run_web_gate_skips_for_api_mode(self):
-        # API 模式不查 DeepSeek 登录态（不应拉起浏览器）
+        # API 模式不查当前网页版登录态（不应拉起浏览器）
         import applications.zhihu_story.browser_adapter as ba
         import config
         runner = server.TaskRunner()
         spec = server._RunSpec(mode="generate")
         with mock.patch.object(config, "LLM_MODE", "api"):
-            with mock.patch("web_drivers.deepseek.web_llm_logged_in") as m:
+            with mock.patch("web_drivers.doubao.web_llm_logged_in") as m:
                 with mock.patch.object(runner, "_dispatch",
                                        return_value=True):
                     runner._run_task(spec)
@@ -866,6 +871,9 @@ class TestSetupEndpoints(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import config
+        driver_patch = mock.patch("config.WEB_DRIVER_NAME", "Doubao")
+        driver_patch.start()
+        cls.addClassCleanup(driver_patch.stop)
         cls._orig_file = config._PROVIDERS_FILE
         cls.tmp = tempfile.mkdtemp(prefix="setup_")
         cls.dst = os.path.join(cls.tmp, "llm_providers.json")
@@ -884,7 +892,10 @@ class TestSetupEndpoints(unittest.TestCase):
             json.dump(providers, f, ensure_ascii=False, indent=2)
         # Web 登录检查缓存：测试内固定为未登录（免真实拉起 Edge），
         # 需要登录语义的用例单独 patch
-        setup_mod._web_llm_cache.update(ts=time.time(), ok=False)
+        setup_mod._web_llm_cache.clear()
+        setup_mod._web_llm_check_errors.clear()
+        setup_mod._web_llm_cache[setup_mod._web_llm_cache_key()] = {
+            "ts": time.time(), "ok": False}
 
     @classmethod
     def tearDownClass(cls):
@@ -931,7 +942,7 @@ class TestSetupEndpoints(unittest.TestCase):
         setup_mod._web_llm_cache[setup_mod._web_llm_cache_key()] = {
             "ts": 0.0, "ok": False}
         import applications.zhihu_story.browser_adapter as ba
-        with mock.patch("web_drivers.deepseek.web_llm_logged_in",
+        with mock.patch("web_drivers.doubao.web_llm_logged_in",
                                return_value=True) as m:
             self.assertTrue(setup_mod._web_llm_logged_in_cached())
             self.assertTrue(setup_mod._web_llm_logged_in_cached())
@@ -956,7 +967,7 @@ class TestSetupEndpoints(unittest.TestCase):
         results = []
         # patch 必须在主线程统一建立/恢复：若每个线程各自 patch 同一
         # 属性，线程退出时的恢复互相覆盖，残留 mock 污染后续测试
-        with mock.patch("web_drivers.deepseek.web_llm_logged_in",
+        with mock.patch("web_drivers.doubao.web_llm_logged_in",
                                side_effect=_slow_check) as m:
             def _call():
                 results.append(setup_mod._web_llm_logged_in_cached())
@@ -1094,14 +1105,16 @@ class TestSetupEndpoints(unittest.TestCase):
 
     def test_web_login_starts_thread(self):
         import applications.zhihu_story.browser_adapter as ba
+        from config import WEB_DRIVER_NAME
         orig_thread = setup_mod._login_thread
         orig_kind = setup_mod._login_kind
+        orig_driver = setup_mod._login_driver
         setup_mod._login_thread = None
         setup_mod._login_kind = ""
         try:
             with mock.patch.object(ba, "EDGE_PATH", "C:/fake/msedge.exe"):
                 with mock.patch(
-                        "web_drivers.deepseek.login_deepseek_web_flow",
+                        "web_drivers.account_status.login_account",
                         return_value=(True, "ok")) as m:
                     r = self.client.post("/api/setup/web-login")
                     self.assertEqual(r.status_code, 200)
@@ -1110,10 +1123,11 @@ class TestSetupEndpoints(unittest.TestCase):
                            and setup_mod._login_thread.is_alive()
                            and time.time() < deadline):
                         time.sleep(0.05)
-                    self.assertEqual(m.call_count, 1)
+                    m.assert_called_once_with(WEB_DRIVER_NAME, timeout=300)
         finally:
             setup_mod._login_thread = orig_thread
             setup_mod._login_kind = orig_kind
+            setup_mod._login_driver = orig_driver
 
     def test_web_login_duplicate_409(self):
         import applications.zhihu_story.browser_adapter as ba

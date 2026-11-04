@@ -1,11 +1,11 @@
-﻿# AutoQuill v5.9.2
+﻿# AutoQuill v5.10.0
 
 本地的**知乎故事创作助手**：自动选题 → 学习指定作者的文风生成故事 → 写入知乎草稿。
 一键安装，无需 Python、无需命令行。
 
 | 项目 | 内容 |
 |---|---|
-| **当前版本** | v5.9.2|
+| **当前版本** | v5.10.0|
 | **平台** | Windows 10 / 11（x64） |
 | **发布页** | [Releases](https://github.com/large-su/AutoQuill/releases) |
 | **变更记录** | [CHANGELOG.md](CHANGELOG.md) |
@@ -83,7 +83,7 @@
 **校验安装包**（可选）：同目录的 `.sha256` 文件为安装包的 SHA256 值。
 
 ```powershell
-certutil -hashfile AutoQuill-Setup-5.9.2.exe SHA256
+certutil -hashfile AutoQuill-Setup-5.10.0.exe SHA256
 ```
 
 ---
@@ -147,7 +147,7 @@ certutil -hashfile AutoQuill-Setup-5.9.2.exe SHA256
 | 通道 | 特点 | 要求 |
 |---|---|---|
 | API 直调 | 速度快、稳定，可精确控制参数 | 需要 API Key |
-| Web 网页版 | 免费 | 需要登录对应网站（DeepSeek / 豆包） |
+| Web 网页版 | 按网站提供的免费额度或账号权益使用 | 豆包 / DeepSeek / Kimi / 千问 / 腾讯元宝 / 智谱清言，需分别登录 |
 
 可在「设置」中随时切换，切换前会自动检测可用性，未就绪则引导补全。
 
@@ -187,7 +187,7 @@ certutil -hashfile AutoQuill-Setup-5.9.2.exe SHA256
 完整链路与批量运行都会写入草稿；环节测试中的「生成」只存盘。草稿可在知乎 App/网页的「草稿箱」找到，确认后手动发布。
 
 **Web 网页版通道需要登录吗？**
-需要。首次使用某个网页版大模型时会在 Edge 中打开其网站要求登录一次，登录态随浏览器配置持久保存。
+需要。在设置中选择网页版模型后，按提示打开对应网站登录；也可以在“网页版账号”中分别登录多个网站，并检查各自状态。新安装默认使用豆包，升级保留已有选择。登录态随浏览器配置保存，网站仍可能让会话过期或限制账号使用。明确受限时任务会停止，重新登录不能解除平台限制。各通道的用途、验证范围见[网页版模型说明](docs/WEB-PROVIDERS.md)。
 
 **升级安装会丢数据吗？**
 不会。数据位于 `%APPDATA%\AutoQuill\`，与程序目录分离。

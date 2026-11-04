@@ -189,6 +189,7 @@ class TaskRunner:
                        "finished": threading.Event(),
                        "watchdog_stop": threading.Event(), "timeout": None}
         from web_drivers.browser_pool import (WorkflowCancelled, WebLoginRequired,
+                                              WebAccountRestricted,
                                               cancellation_scope, _check_cancel)
         terminal = None
         _orig_input = builtins.input
@@ -258,6 +259,9 @@ class TaskRunner:
                 terminal = ("timeout", self.message, None)
             else:
                 terminal = ("stopped", f"已中断：{exc}", None)
+        except WebAccountRestricted as exc:
+            terminal = ("error", f"{exc}。任务已停止，未继续生成或发布",
+                        "web_account_restricted")
         except WebLoginRequired as exc:
             terminal = (
                 "error",

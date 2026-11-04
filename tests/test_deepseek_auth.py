@@ -2,7 +2,7 @@
 import unittest
 from unittest import mock
 
-from web_drivers.browser_pool import WebLoginRequired
+from web_drivers.browser_pool import WebAccountRestricted, WebLoginRequired
 from web_drivers.deepseek_auth import DeepSeekAuthObserver
 
 
@@ -36,6 +36,29 @@ class DeepSeekAuthTest(unittest.TestCase):
     def test_nested_business_missing_token_is_terminal(self):
         self.emit({"code": 0, "data": {"biz_code": 40002, "biz_msg": "private"}})
         with self.assertRaises(WebLoginRequired):
+            self.observer.raise_if_rejected()
+
+    def test_explicit_ban_and_mute_are_restrictions_not_relogin(self):
+        for code in (40012, 50006):
+            with self.subTest(code=code):
+                self.observer = DeepSeekAuthObserver(self.page)
+                self.emit({"code": 0, "data": {"biz_code": code, "biz_msg": "PRIVATE"}})
+                with self.assertRaises(WebAccountRestricted) as caught:
+                    self.observer.raise_if_rejected()
+                self.assertNotIn("PRIVATE", str(caught.exception))
+                self.assertNotIn("重新登录", str(caught.exception))
+
+    def test_ip_restriction_is_not_an_account_ban(self):
+        self.emit({"code": 40029})
+        self.observer.raise_if_rejected()
+
+    def test_interactive_login_ignores_initial_expiry_but_keeps_ban(self):
+        self.observer = DeepSeekAuthObserver(self.page, ignore_auth_errors=True)
+        self.emit(status=401, content_type="text/html")
+        self.emit({"code": 40003})
+        self.observer.raise_if_rejected()
+        self.emit({"code": 0, "data": {"biz_code": 40012}})
+        with self.assertRaises(WebAccountRestricted):
             self.observer.raise_if_rejected()
 
     def test_unauthorized_status_does_not_require_json(self):

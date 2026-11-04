@@ -28,6 +28,7 @@ router = APIRouter()
 _login_thread = None
 _login_error = ""
 _login_kind = ""  # 当前登录引导的站点："zhihu" / "deepseek" / ""
+_login_driver = ""
 
 # web_llm_logged_in 检查要启动独立浏览器，约数秒；缓存避免首启轮询
 # 反复拉起 Edge（_WEB_LLM_CACHE_TTL 秒内复用结果）。
@@ -104,14 +105,23 @@ def _web_llm_logged_in_cached(driver=None):
         try:
             ok = _web_llm_logged_in_for(key)
         except Exception as exc:
+            from web_drivers.browser_pool import WebAccountRestricted
+            if isinstance(exc, WebAccountRestricted):
+                from web_drivers import account_status
+                account_status.remember_status(key, "restricted", str(exc))
+                _web_llm_cache[key] = {"ts": time.time(), "ok": False}
+                _web_llm_check_errors.pop(key, None)
+                return False
             from web_drivers.browser_pool import WebLoginCheckError
             if not isinstance(exc, WebLoginCheckError):
                 raise
-            # 真实检测可花几十秒；从它结束的时刻计 TTL，才不会让刚产生的
-            # 诊断在返回状态前就过期。
             _web_llm_check_errors[key] = {"ts": time.time()}
             return entry["ok"] if entry else False
         _web_llm_cache[key] = {"ts": time.time(), "ok": ok}
+        from web_drivers import account_status
+        account_status.remember_status(
+            key, "ready" if ok else "logged_out",
+            "" if ok else "网页登录态无效")
         _web_llm_check_errors.pop(key, None)
         return ok
 
@@ -126,11 +136,12 @@ def _web_llm_logged_in_for(driver):
         return bool(mod.web_llm_logged_in())
     except Exception as exc:
         from web_drivers.browser_pool import (
-            WebLoginCheckError, WorkflowCancelled,
+            WebLoginCheckError, WebAccountRestricted, WorkflowCancelled,
         )
-        if isinstance(exc, (WebLoginCheckError, WorkflowCancelled)):
+        if isinstance(exc, (WebLoginCheckError, WebAccountRestricted,
+                            WorkflowCancelled)):
             raise
-        return False
+        raise WebLoginCheckError("网页登录状态暂时无法检测，请稍后重试。") from exc
 
 
 def _web_llm_check_error(driver=None):
@@ -144,6 +155,19 @@ def _web_llm_check_error(driver=None):
             _web_llm_check_errors.pop(key, None)
             return None
         return "网页登录状态暂时无法检测，请稍后重试。"
+
+
+def _web_account_status_for(driver):
+    """Return the provider's cheap cached account status, if available."""
+    try:
+        from web_drivers import account_status
+        result = account_status.get_account_status(driver)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+    return {"provider": driver, "status": "unknown", "message": "",
+            "checked_at": None}
 
 
 @router.get("/api/setup/status")
@@ -161,6 +185,9 @@ def api_setup_status():
     zhihu_logged_in = os.path.exists(STORAGE_STATE_PATH)
     web_ok = _web_llm_logged_in_cached() if edge_ok else False
     web_check_error = _web_llm_check_error() if edge_ok else None
+    account_status = _web_account_status_for(WEB_DRIVER_NAME)
+    from config import WEB_DRIVERS
+    web_accounts = [_web_account_status_for(name) for name in sorted(WEB_DRIVERS)]
     login_running = (_login_thread is not None and _login_thread.is_alive())
     # 登录态失效标记（2026-09-19）：cookie 还在但服务端已不认时，抓取/删除链路
     # 会把页面跳登录页的事实记下来，这里带给前端提示「重新登录知乎」。
@@ -172,6 +199,8 @@ def api_setup_status():
         "llm_configured": llm_configured,
         "web_llm_logged_in": web_ok,
         "web_llm_check_error": web_check_error,
+        "web_account_status": account_status,
+        "web_accounts": web_accounts,
         "web_driver": WEB_DRIVER_NAME,
         "zhihu_logged_in": zhihu_logged_in,
         "zhihu_login_stale": bool(stale.get("stale")),
@@ -179,6 +208,7 @@ def api_setup_status():
         "login_running": login_running,
         # 登录线程结束后也保留来源，前端才知道 login_error 属于哪个按钮。
         "login_kind": _login_kind,
+        "login_driver": _login_driver,
         "login_error": _login_error,
         "setup_needed": not (edge_ok and zhihu_logged_in
                              and (llm_configured or web_ok)),
@@ -236,7 +266,7 @@ def api_setup_test_api():
 
 def _start_login_thread(kind, flow_call, log_name, web_driver=None):
     """通用登录引导：后台线程拉起可见 Edge；前端轮询 setup/status 收尾。"""
-    global _login_error, _login_thread, _login_kind
+    global _login_error, _login_thread, _login_kind, _login_driver
     if _login_thread is not None and _login_thread.is_alive():
         raise HTTPException(409, "登录引导已在运行，请在弹出的 Edge 窗口完成登录")
     from applications.zhihu_story.browser_adapter import EDGE_PATH
@@ -245,6 +275,7 @@ def _start_login_thread(kind, flow_call, log_name, web_driver=None):
 
     _login_error = ""
     _login_kind = kind
+    _login_driver = web_driver or ""
 
     def _run():
         global _login_error
@@ -257,6 +288,8 @@ def _start_login_thread(kind, flow_call, log_name, web_driver=None):
                 key = web_driver or _web_llm_cache_key()
                 with _web_llm_cache_lock:
                     _web_llm_cache[key] = {"ts": time.time(), "ok": True}
+                    from web_drivers import account_status
+                    account_status.remember_status(key, "ready", "")
                     _web_llm_check_errors.pop(key, None)
                 runner.guide_needed = None  # 登录完成：引导标记解除
             if ok and kind == "zhihu":
@@ -322,17 +355,77 @@ def api_setup_zhihu_login():
                        "检测到登录后自动保存并关闭"}
 
 
+class _WebLoginSpec(BaseModel):
+    name: str = ""
+
+
 @router.post("/api/setup/web-login")
-def api_setup_web_login():
-    """后台线程拉起可见 Edge 引导登录当前网页版大模型；轮询 status 收尾。"""
-    from config import WEB_DRIVER_NAME
-    from web_drivers import login_web_flow
-    _start_login_thread("deepseek", login_web_flow,
-                        f"{WEB_DRIVER_NAME} 网页版登录",
-                        web_driver=WEB_DRIVER_NAME)
-    return {"ok": True,
-            "message": f"请在弹出的 Edge 窗口中登录 {WEB_DRIVER_NAME} 网页版，"
+def api_setup_web_login(spec: _WebLoginSpec = None):
+    """按指定驱动拉起登录；无 body 时兼容旧客户端并使用当前驱动。"""
+    from config import WEB_DRIVER_NAME, WEB_DRIVERS
+    target = (getattr(spec, "name", None) or WEB_DRIVER_NAME).strip()
+    if target not in WEB_DRIVERS:
+        raise HTTPException(400, f"未知网页版大模型：{target}")
+    from applications.zhihu_story.browser_adapter import EDGE_PATH
+    if not EDGE_PATH:
+        raise HTTPException(400, "未找到 Microsoft Edge，请先安装 Edge 后重试")
+    status = runner.status()
+    if status.get("worker_alive") or status.get("state") in ("running", "stopping"):
+        raise HTTPException(409, "任务正在运行，请完成后再登录网页版大模型")
+    from webui.browser_tasks import browser_busy
+    busy = browser_busy()
+    if busy:
+        raise HTTPException(409, "「%s」正在占用浏览器，请完成后再登录" % busy[0])
+    try:
+        from web_drivers.browser_pool import live_browsers, profile_in_use
+        if profile_in_use() or live_browsers() > 0:
+            raise HTTPException(409, "浏览器正被占用，请完成后再登录")
+    except ImportError:
+        pass
+    from web_drivers import account_status
+    flow = lambda: account_status.login_account(target, timeout=300)
+    _start_login_thread("deepseek", flow, f"{target} 网页版登录", web_driver=target)
+    return {"ok": True, "driver": target,
+            "message": f"请在弹出的 Edge 窗口中登录 {target} 网页版，"
                        "检测到登录后自动保存并关闭"}
+
+
+class _WebAccountSpec(BaseModel):
+    name: str
+
+
+@router.post("/api/setup/web-account-check")
+def api_setup_web_account_check(spec: _WebAccountSpec):
+    """检查指定网页版账号，不切换当前模型或写入选择。"""
+    from config import WEB_DRIVERS
+    if spec.name not in WEB_DRIVERS:
+        raise HTTPException(400, f"未知网页版大模型：{spec.name}")
+    status = runner.status()
+    checked_at = time.time()
+    if _login_thread is not None and _login_thread.is_alive():
+        return {"provider": spec.name, "status": "busy",
+                "message": "登录引导正在运行，请完成后再检查", "checked_at": checked_at}
+    if status.get("worker_alive") or status.get("state") in ("running", "stopping"):
+        return {"provider": spec.name, "status": "busy",
+                "message": "任务正在运行，请完成后再检查", "checked_at": checked_at}
+    from webui.browser_tasks import browser_busy
+    busy = browser_busy()
+    if busy:
+        return {"provider": spec.name, "status": "busy",
+                "message": "「%s」正在占用浏览器，请完成后再检查" % busy[0],
+                "checked_at": checked_at}
+    from web_drivers import account_status
+    result = account_status.check_account(spec.name)
+    observed = result.get("status") if isinstance(result, dict) else "unknown"
+    if observed in ("ready", "logged_out", "restricted"):
+        with _web_llm_cache_lock:
+            _web_llm_cache[spec.name] = {
+                "ts": time.time(), "ok": observed == "ready"}
+            _web_llm_check_errors.pop(spec.name, None)
+    return {"provider": spec.name,
+            "status": result.get("status", "unknown"),
+            "message": result.get("message", ""),
+            "checked_at": result.get("checked_at", checked_at)}
 
 
 # ============================================================

@@ -123,8 +123,10 @@ class LoginEntryUiTest(unittest.TestCase):
                        "reloginZhihu"):
             self.assertIn(needle, js, needle)
         # 打开设置弹窗时刷新一次状态（否则永远显示「检测中…」）
-        idx = js.index('$("btnSetup").addEventListener')
-        self.assertIn("refreshZhihuLoginState()", js[idx:idx + 400])
+        self.assertIn('$("btnSetup").addEventListener("click", openSettingsPanel)', js)
+        idx = js.index("function openSettingsPanel()")
+        end = js.index("\n}", idx)
+        self.assertIn("refreshZhihuLoginState()", js[idx:end])
 
     def test_setup_status_exposes_stale_flag(self):
         src = self._src("webui/api_setup.py")

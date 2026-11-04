@@ -148,11 +148,14 @@ class _WebDriverSpec(BaseModel):
 
 @router.get("/api/web-drivers")
 def api_web_drivers():
-    """列出可切换的网页版大模型（已实现驱动的）。"""
+    """列出可切换的网页版大模型及其独立账号操作信息。"""
     from config import WEB_DRIVERS, WEB_DRIVER_NAME
     from web_drivers import _DRIVER_REGISTRY
     drivers = [
-        {"name": name, "url": (WEB_DRIVERS[name] or {}).get("url", "")}
+        {"name": name,
+         "label": (WEB_DRIVERS[name] or {}).get("label", name),
+         "description": (WEB_DRIVERS[name] or {}).get("description", ""),
+         "url": (WEB_DRIVERS[name] or {}).get("url", "")}
         for name in sorted(WEB_DRIVERS)
         if name in _DRIVER_REGISTRY
     ]
@@ -163,30 +166,37 @@ def api_web_drivers():
 def api_set_web_driver(spec: _WebDriverSpec):
     """运行时切换网页版大模型（Web 通道用的浏览器驱动，持久化）。
 
-    闭环预检：当前处于 web 通道时切换需新目标已登录；未登录返回
-    needs=deepseek_login 让前端弹对应登录引导。切换后清掉旧驱动的
-    残留会话（避免旧站点会话堆积）。
+    切换只负责选择并保存目标驱动；目标账号是否登录由独立状态检查和
+    登录按钮处理。切换前关闭旧 driver，避免旧站点会话残留。
     """
-    from config import (LLM_MODE, WEB_DRIVERS, WEB_DRIVER_NAME,
-                        set_runtime_web_driver)
+    from config import WEB_DRIVERS, WEB_DRIVER_NAME, set_runtime_web_driver
     if spec.name not in WEB_DRIVERS:
         raise HTTPException(400, f"未知网页版大模型：{spec.name}")
-    if LLM_MODE == "web" and spec.name != WEB_DRIVER_NAME:
-        # 预检目标驱动是否已登录（按目标驱动名查/缓存，绝不沿用
-        # 旧驱动 DeepSeek 的登录结果——用户实测切豆包不弹登录的根因）
-        if not _web_llm_logged_in_cached(driver=spec.name):
-            raise HTTPException(400, {
-                "detail": f"{spec.name} 网页版尚未登录，无法切换。"
-                          "请在引导窗口中打开 Edge 完成登录后重试。",
-                "needs": "deepseek_login",
-            })
-    eff = set_runtime_web_driver(spec.name)
-    # 切换驱动后清掉旧驱动的单例会话（删除+关页）
+    if spec.name == WEB_DRIVER_NAME:
+        return {"ok": True, "effective": {"web_driver": WEB_DRIVER_NAME}}
+    status = runner.status()
+    if status.get("worker_alive") or status.get("state") in ("running", "stopping"):
+        raise HTTPException(409, "任务正在运行，完成后再切换网页版大模型")
+    from webui import api_setup
+    if api_setup._login_thread is not None and api_setup._login_thread.is_alive():
+        raise HTTPException(409, "登录引导正在运行，完成后再切换网页版大模型")
+    from webui.browser_tasks import browser_busy
+    busy = browser_busy()
+    if busy:
+        raise HTTPException(409, "「%s」正在占用浏览器，完成后再切换网页版大模型" % busy[0])
+    try:
+        from web_drivers.browser_pool import live_browsers, profile_in_use
+        if profile_in_use() or live_browsers() > 0:
+            raise HTTPException(409, "浏览器正被占用，完成后再切换网页版大模型")
+    except ImportError:
+        pass
+    # 空闲时先关闭旧 driver，再持久化新的选择；目标未登录由后续任务/登录按钮处理。
     try:
         from web_drivers import reset_driver
         reset_driver()
-    except Exception:
-        pass
+    except Exception as exc:
+        raise HTTPException(409, "当前网页版会话仍在关闭，请稍后重试") from exc
+    eff = set_runtime_web_driver(spec.name)
     log.info("Web 控制台切换网页版大模型 → %s", eff["web_driver"])
     return {"ok": True, "effective": eff}
 

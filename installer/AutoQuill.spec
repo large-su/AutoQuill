@@ -35,6 +35,12 @@ a = Analysis(
         # （_DRIVER_REGISTRY），PyInstaller 静态分析抓不到 —— 漏了会导致
         # 安装版 Web 通道报 No module named 'web_drivers.deepseek'
         'web_drivers.deepseek',
+        'web_drivers.doubao',
+        'web_drivers.text_chat',
+        'web_drivers.kimi',
+        'web_drivers.qianwen',
+        'web_drivers.yuanbao',
+        'web_drivers.chatglm',
         # uvicorn 用动态 import 加载内部实现，静态分析抓不全
         'uvicorn.logging',
         'uvicorn.loops',

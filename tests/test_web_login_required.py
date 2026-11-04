@@ -57,6 +57,25 @@ class TestWebLoginRequiredPropagation(unittest.TestCase):
         self.assertEqual(status["guide_needed"], "deepseek_login")
         self.assertIn("重新登录", status["message"])
 
+    def test_runner_preserves_restriction_instead_of_relogin_guide(self):
+        from web_drivers.browser_pool import WebAccountRestricted
+        from webui.run_manager import TaskRunner, _RunSpec
+
+        for preflight in (True, False):
+            runner = TaskRunner()
+            with self.subTest(preflight=preflight), \
+                    mock.patch("config.LLM_MODE", "web" if preflight else "api"), \
+                    mock.patch("webui.run_manager._llm_configured", return_value=True), \
+                    mock.patch("web_drivers.web_llm_logged_in", side_effect=WebAccountRestricted("账号受限")), \
+                    mock.patch.object(runner, "_dispatch", side_effect=WebAccountRestricted("账号受限")), \
+                    mock.patch("web_drivers.reset_driver"), \
+                    mock.patch("web_drivers.browser_pool.close_shared_browser"):
+                runner._run_task(_RunSpec(mode="single"))
+            status = runner.status()
+            self.assertEqual(status["guide_needed"], "web_account_restricted")
+            self.assertIn("账号受限", status["message"])
+            self.assertNotIn("重新登录", status["message"])
+
     def test_real_runner_dispatch_stops_multiround_workflow_after_logout(self):
         from web_drivers.browser_pool import WebLoginRequired
         from webui.run_manager import TaskRunner, _RunSpec

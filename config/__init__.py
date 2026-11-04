@@ -119,13 +119,15 @@ LLM_API_PRESENCE_PENALTY = 0.4  # 存在惩罚：已出现过的词后续一律�
 # ============================================================
 # 切换网站只需改 WEB_DRIVER_NAME，新增网站在 WEB_DRIVERS 中添加条目
 
-WEB_DRIVER_NAME = "DeepSeek"       # 当前使用的 Web 驱动："DeepSeek"
+WEB_DRIVER_NAME = "Doubao"         # 当前使用的 Web 驱动；已有持久化选择会在启动时恢复
 
 WEB_DRIVERS = {
     # DeepSeek 条目为 DOM 驱动（web_drivers/deepseek.py）使用；
     # 旧 OCR 参数（copy_icon 等）已随重写移除，并行参数为 DOM 版
     "DeepSeek": {
         "url": "https://chat.deepseek.com/",
+        "label": "DeepSeek",
+        "description": "推理、提纲与中文写作",
         # 2026-09 官网改版：取消「快速/专家/识图」三大模式，只留
         # 「深度思考 / 智能搜索」两个开关，且默认状态即账号上次的选择。
         # 驱动不再做任何模式/开关切换（setup() 空操作），一律用默认态。
@@ -143,6 +145,8 @@ WEB_DRIVERS = {
     # 待用户提供实测页面后校准（python -m web_drivers.doubao --probe）。
     "Doubao": {
         "url": "https://www.doubao.com/chat/",
+        "label": "豆包",
+        "description": "日常中文写作与改写",
         "model": "doubao_quick",    # 只使用默认「豆包快速」（用户约定）
         "model_label": "豆包快速",
         # 生成完成检测（与 DeepSeek 同构，先按通用参数，实测后按需调整）
@@ -153,6 +157,34 @@ WEB_DRIVERS = {
         "parallel_tabs": 1,
         "consecutive_fail_threshold": 2,
         "scan_interval": 2,
+    },
+    "Kimi": {
+        "url": "https://www.kimi.com/",
+        "label": "Kimi",
+        "description": "长材料阅读、整理与写作",
+        "poll_interval": 2, "stable_count": 2, "max_wait": 600,
+        "parallel_tabs": 1, "consecutive_fail_threshold": 2, "scan_interval": 2,
+    },
+    "Qianwen": {
+        "url": "https://www.qianwen.com/",
+        "label": "千问",
+        "description": "通用写作、改写与资料整理",
+        "poll_interval": 2, "stable_count": 2, "max_wait": 600,
+        "parallel_tabs": 1, "consecutive_fail_threshold": 2, "scan_interval": 2,
+    },
+    "Yuanbao": {
+        "url": "https://yuanbao.tencent.com/chat/naQivTmsDa",
+        "label": "元宝",
+        "description": "中文问答与资料辅助写作",
+        "poll_interval": 2, "stable_count": 2, "max_wait": 600,
+        "parallel_tabs": 1, "consecutive_fail_threshold": 2, "scan_interval": 2,
+    },
+    "ChatGLM": {
+        "url": "https://chatglm.cn/",
+        "label": "智谱清言",
+        "description": "提纲、文案与结构化写作",
+        "poll_interval": 2, "stable_count": 2, "max_wait": 600,
+        "parallel_tabs": 1, "consecutive_fail_threshold": 2, "scan_interval": 2,
     },
 }
 

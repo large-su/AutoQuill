@@ -54,6 +54,18 @@ async function showSetupGuide(need) {
   // 按 need 对应的具体配置判断就绪，而非整体 allDone：用户可能已配好
   // API Key 但切到 Web 未登录（整体配置「已完成」），此时仍须弹引导
   const st = setupCache || {};
+  const accountStatus = st.web_account_status && st.web_account_status.status;
+  // 受限账号不是登录态缺失：不要把平台风控结果再次引导成「重新登录」。
+  if (need === "web_account_restricted" ||
+      (need !== "api_key" && accountStatus === "restricted")) {
+    manualGuideOpen = true;
+    $("setupMask").classList.add("show");
+    renderModeCardState(st);
+    selectModeCard(st);
+    showStStatus((st.web_account_status && st.web_account_status.message) ||
+      "账号可能受到平台限制：请查看平台提示/申诉，或手动切换其他网页版模型。", "err");
+    return;
+  }
   const ready = need === "api_key" ? !!st.llm_configured
                                    : !!st.web_llm_logged_in;
   if (ready) {
@@ -537,24 +549,138 @@ async function loadMode() {
 const webDriverSel = $("webDriverSel");
 let webDrivers = [];
 let webDriverCurrent = null;
+let webDriversLoading = false;
 
 async function loadWebDrivers() {
+  if (webDriversLoading) return;
+  webDriversLoading = true;
   try {
     const r = await fetch("/api/web-drivers");
     const data = await r.json();
     webDrivers = data.drivers || [];
     webDriverCurrent = data.current || null;
+    renderWebDriverAccounts();
     webDriverSel.innerHTML = "";
     if (!webDrivers.length) { $("webDriverRow").hidden = true; return; }
     webDrivers.forEach((d) => {
       const opt = document.createElement("option");
       opt.value = d.name;
-      opt.textContent = d.name;
+      opt.textContent = d.label || d.name;
       webDriverSel.appendChild(opt);
     });
     if (webDriverCurrent) webDriverSel.value = webDriverCurrent;
   } catch (e) { /* 旧服务无该端点：隐藏选择器 */ $("webDriverRow").hidden = true; }
-  syncWebDriverUI();
+  finally {
+    // Keep the guard during sync: an empty/failed response must not recurse
+    // into another immediate request. A later settings open can retry.
+    syncWebDriverUI();
+    webDriversLoading = false;
+  }
+}
+
+function renderWebDriverAccounts() {
+  const row = $("webDriverAccountsRow");
+  const box = $("webDriverAccounts");
+  if (!row || !box) return;
+  row.hidden = !webDrivers.length;
+  box.innerHTML = "";
+  webDrivers.forEach((d) => {
+    const wrap = document.createElement("span");
+    wrap.className = "web-account-item";
+    wrap.dataset.driver = d.name;
+    const label = document.createElement("span");
+    label.textContent = d.label || d.name;
+    label.title = d.description || "";
+    const check = document.createElement("button");
+    check.className = "btn ghost";
+    check.textContent = "检查状态";
+    check.addEventListener("click", () => checkWebAccount(d.name, wrap));
+    const login = document.createElement("button");
+    login.className = "btn primary";
+    login.textContent = "登录";
+    login.addEventListener("click", () => loginWebAccount(d.name, wrap));
+    const state = document.createElement("span");
+    state.className = "web-account-state";
+    const cached = ((setupCache && setupCache.web_accounts) || []).find((x) => x.provider === d.name);
+    state.textContent = formatWebAccountStatus(cached);
+    wrap.append(label, check, login, state);
+    box.appendChild(wrap);
+  });
+}
+
+function formatWebAccountStatus(d) {
+  if (!d) return "未检查";
+  const labels = {ready: "已登录", logged_out: "未登录", restricted: "账号受限",
+    challenge: "需要验证", busy: "浏览器忙", unknown: "暂无法确认"};
+  return (labels[d.status] || "暂无法确认") + (d.message ? "：" + d.message : "");
+}
+
+async function checkWebAccount(name, wrap) {
+  const state = wrap && wrap.querySelector(".web-account-state");
+  if (state) state.textContent = "检查中…";
+  try {
+    const r = await fetch("/api/setup/web-account-check", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const d = await r.json();
+    if (state) state.textContent = formatWebAccountStatus(d);
+  } catch (e) {
+    if (state) state.textContent = "暂无法确认：" + e.message;
+  }
+}
+
+const webAccountPollers = {};
+function stopWebAccountPoll(name) {
+  if (webAccountPollers[name]) {
+    clearInterval(webAccountPollers[name].timer || webAccountPollers[name]);
+    delete webAccountPollers[name];
+  }
+}
+function pollWebAccount(name, wrap) {
+  stopWebAccountPoll(name);
+  const poll = { timer: null, inflight: false, deadline: Date.now() + 340000 };
+  const tick = async () => {
+    if (poll.inflight) return;
+    if (Date.now() >= poll.deadline) { stopWebAccountPoll(name); return; }
+    poll.inflight = true;
+    try {
+    const r = await fetchSetupStatus();
+    const st = setupCache || {};
+    const account = (st.web_accounts || []).find((x) => x.provider === name);
+    const currentCard = Array.from($("webDriverAccounts").children)
+      .find((card) => card.dataset.driver === name);
+    const state = currentCard && currentCard.querySelector(".web-account-state");
+    if (state) {
+      if (st.login_error && st.login_driver === name) state.textContent = "登录未完成：" + st.login_error;
+      else if (account) state.textContent = formatWebAccountStatus(account);
+    }
+    // 登录窗口对应的后台线程结束后才停止；初始 logged_out/unknown
+    // 都不能提前终止轮询。
+    if (st.login_driver === name && !st.login_running) {
+      stopWebAccountPoll(name);
+    }
+    } finally { poll.inflight = false; }
+  };
+  webAccountPollers[name] = poll;
+  poll.timer = setInterval(tick, 2500);
+}
+
+async function loginWebAccount(name, wrap) {
+  const state = wrap && wrap.querySelector(".web-account-state");
+  if (state) state.textContent = "登录引导中…";
+  try {
+    const r = await fetch("/api/setup/web-login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "启动失败");
+    if (state) state.textContent = "请在弹出的 Edge 中完成登录";
+    pollWebAccount(name, wrap);
+  } catch (e) {
+    if (state) state.textContent = "登录未启动：" + e.message;
+  }
 }
 
 async function applyWebDriver() {
@@ -578,8 +704,22 @@ async function applyWebDriver() {
     }
     const data = await r.json();
     webDriverCurrent = data.effective.web_driver;
-    addLog("网页版大模型已切换 → " + webDriverCurrent, "result");
-    showStStatus("网页版大模型 → " + webDriverCurrent, "ok");
+    if (setupCache) setupCache.web_driver = webDriverCurrent;
+    await fetchSetupStatus();
+    renderWebDriverAccounts();
+    const targetStatus = setupCache && setupCache.web_account_status;
+    if (targetStatus && targetStatus.status === "logged_out") {
+      showSetupGuide("web_login");
+    } else if (targetStatus && ["unknown", "challenge", "restricted"].includes(targetStatus.status)) {
+      // Keep the selected provider's actionable state visible in the setup
+      // card as well as in Settings. In particular a restriction must disable
+      // the login button instead of looking like a retryable logout.
+      if (targetStatus.status === "restricted") renderModeCardState(setupCache);
+      showStStatus(formatWebAccountStatus(targetStatus), "err");
+    } else {
+      addLog("网页版大模型已切换 → " + webDriverCurrent, "result");
+      showStStatus("网页版大模型 → " + webDriverCurrent, "ok");
+    }
     loadConfig();
   } catch (e) {
     if (webDriverCurrent) webDriverSel.value = webDriverCurrent;
@@ -590,8 +730,11 @@ async function applyWebDriver() {
 webDriverSel.addEventListener("change", applyWebDriver);
 
 function syncWebDriverUI() {
-  $("webDriverRow").hidden = (genMode !== "web");
-  if (genMode === "web" && !webDrivers.length) loadWebDrivers();
+  // Login state is per provider and can be prepared before switching the
+  // generation channel.  Hiding this in API mode made the Web model picker
+  // unreachable whenever the current Web account had expired.
+  $("webDriverRow").hidden = !webDrivers.length;
+  if (!webDrivers.length) loadWebDrivers();
 }
 
 /* 生成通道状态（setup/status 查询结果缓存，首次切换引导用） */
@@ -604,7 +747,11 @@ async function fetchSetupStatus() {
   try {
     const r = await fetch("/api/setup/status");
     setupCache = await r.json();
+    // setup/status 是登录检查和登录引导后的唯一共享状态源；刷新卡片
+    // 使六个提供商显示最新缓存，而不是只在首次加载时显示 unknown。
+    if (typeof renderWebDriverAccounts === "function") renderWebDriverAccounts();
   } catch (e) { setupCache = null; }
+  return setupCache;
 }
 
 
@@ -2169,6 +2316,7 @@ libMask.addEventListener("click", (e) => {
 
 let setupNeeded = false;
 let setupTimer = null;
+let settingsPanelOpen = false;
 
 async function fillSetupProviders() {
   try {
@@ -2233,12 +2381,21 @@ function renderModeCardState(st) {
     st.llm_configured ? "✓ 已配置 API Key，可随时切换使用。" :
     "付费、响应快。DeepSeek 开放平台申请 API Key。";
   mcWeb.classList.toggle("done", !!st.web_llm_logged_in);
-  const wd = st.web_driver || "DeepSeek";
+  const wd = st.web_driver || webDriverCurrent || "网页版大模型";
+  const accountState = (st.web_account_status && st.web_account_status.status) || "unknown";
+  const restricted = accountState === "restricted";
+  const uncertain = accountState === "unknown" || accountState === "challenge" || accountState === "busy";
   mcWeb.querySelector(".mc-d").textContent = checkError
     ? "登录状态检测暂不可用，请稍后重试。"
-    : (st.web_llm_logged_in ? "✓ 已登录该网页版大模型，可直接使用。" :
-      "免费。登录网页版大模型后由浏览器自动操作。");
-  if (st.login_running && st.login_kind === "deepseek") {
+    : (restricted ? "账号受到平台限制，请查看平台提示或申诉，也可切换其他网页版模型。" :
+      (uncertain ? "登录状态暂无法确认，请点击对应模型的‘检查状态’。" :
+      (st.web_llm_logged_in ? "✓ 已登录该网页版大模型，可直接使用。" :
+      "免费。登录网页版大模型后由浏览器自动操作。")));
+  if (restricted) {
+    const b = $("btnWebLogin");
+    b.disabled = true;
+    b.textContent = "账号受限，查看平台提示或切换模型";
+  } else if (st.login_running && st.login_kind === "deepseek") {
     const b = $("btnWebLogin");
     b.disabled = true;
     b.textContent = "登录引导中，请在弹出的 Edge 窗口完成…";
@@ -2249,6 +2406,8 @@ function renderModeCardState(st) {
   }
   if (st.login_error && st.login_kind === "deepseek") {
     webErr.textContent = "登录未完成：" + st.login_error;
+  } else if (restricted) {
+    webErr.textContent = "账号可能受到平台限制：请查看平台提示/申诉，或手动切换其他网页版模型。";
   } else if (checkError) {
     webErr.textContent = "登录状态检测暂不可用，请稍后重试。";
   }
@@ -2322,7 +2481,9 @@ async function loadSetupStatus() {
     }
     zhihu.style.display = "";
 
-    $("setupMask").classList.add("show");
+    // An open settings dialog is a valid configuration surface.  Do not let
+    // an in-flight setup refresh put the first-run mask above it.
+    if (!settingsPanelOpen) $("setupMask").classList.add("show");
     const allDone = st.edge_ok && st.zhihu_logged_in
       && (st.llm_configured || st.web_llm_logged_in);
     // allDone 收尾只适用于首启引导；按需引导（manual）等用户点
@@ -2432,19 +2593,28 @@ async function reloginZhihu() {
 $("btnZhihuCheck") && $("btnZhihuCheck").addEventListener("click", checkZhihuLogin);
 $("btnZhihuRelogin") && $("btnZhihuRelogin").addEventListener("click", reloginZhihu);
 
-$("btnSetup").addEventListener("click", () => {
-  // 首次引导未完成 → 打开引导向导；已完成 → 打开设置弹窗
-  if (setupNeeded) { loadSetupStatus(); return; }
+function openSettingsPanel() {
+  hideSetupWizard();
+  settingsPanelOpen = true;
   $("settingsMask").classList.add("show");
   loadConfig(); loadMode(); loadBrowserMode();
   loadAuthors(); loadQuestionSource();
   loadLauncherSettings();
   refreshZhihuLoginState();
-});
+}
 
-$("settingsClose").addEventListener("click", () => $("settingsMask").classList.remove("show"));
+$("btnSetup").addEventListener("click", openSettingsPanel);
+$("btnOpenSettingsModels").addEventListener("click", openSettingsPanel);
+
+$("settingsClose").addEventListener("click", () => {
+  settingsPanelOpen = false;
+  $("settingsMask").classList.remove("show");
+});
 $("settingsMask").addEventListener("click", (e) => {
-  if (e.target === $("settingsMask")) $("settingsMask").classList.remove("show");
+  if (e.target === $("settingsMask")) {
+    settingsPanelOpen = false;
+    $("settingsMask").classList.remove("show");
+  }
 });
 
 $("btnSetupFinish").addEventListener("click", hideSetupWizard);
@@ -2750,7 +2920,14 @@ $("btnWebLogin").addEventListener("click", async () => {
   $("webErr").textContent = "";
   $("webOk").textContent = "";
   try {
-    const r = await fetch("/api/setup/web-login", { method: "POST" });
+    const targetDriver = (setupCache && setupCache.web_driver) || webDriverCurrent;
+    if (!targetDriver) {
+      throw new Error("尚未加载模型配置，请重试");
+    }
+    const r = await fetch("/api/setup/web-login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: targetDriver }),
+    });
     if (!r.ok) throw new Error((await r.json()).detail || "启动失败");
     await setModeChoice("web");
     if (setupTimer) clearInterval(setupTimer);

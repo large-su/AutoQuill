@@ -123,9 +123,11 @@ def _full_chain(job, should_stop=None, progress=None):
             time.sleep(2)
         if st.get("guide_needed"):
             guide = st["guide_needed"]
-            message = ("网页版模型需要重新登录：%s" % guide
-                       if guide == "deepseek_login"
-                       else "运行前检测未通过：%s" % guide)
+            message = (st.get("message") or "网页版模型账号受限，请查看官网说明或在设置中切换模型"
+                       if guide == "web_account_restricted" else
+                       "网页版模型需要重新登录：%s" % guide
+                       if guide == "deepseek_login" else
+                       "运行前检测未通过：%s" % guide)
             raise NeedHuman(message)
     finally:
         _set_checkin_context(None)     # 作业结束（含异常路径）立即清理

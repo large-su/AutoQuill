@@ -37,6 +37,7 @@ import re
 import time
 
 from web_drivers.base import MARKDOWN_REBUILD_JS, WebLLMDriver
+from web_drivers.browser_pool import WebLoginRequired, WebLoginCheckError, WorkflowCancelled
 
 log = logging.getLogger(__name__)
 
@@ -231,6 +232,19 @@ class DoubaoDriver(WebLLMDriver):
         # 并行链路直接调 read_result → 由 read_result 做，避免重复补问）
         self._recovery_ran = False
 
+    def _raise_if_unavailable(self):
+        if self._page is None:
+            return
+        from web_drivers.account_status import inspect_account
+        from web_drivers.browser_pool import WebAccountRestricted, WebLoginRequired, WebLoginCheckError
+        state = inspect_account("Doubao", self._page.context, self._page)
+        if state["status"] == "restricted":
+            raise WebAccountRestricted(state["message"])
+        if state["status"] == "logged_out":
+            raise WebLoginRequired("豆包网页登录已失效，请在设置中登录豆包后继续")
+        if state["status"] == "challenge":
+            raise WebLoginCheckError(state["message"])
+
     def new_chat(self):
         """重置为全新对话：导航 + 显式点「新对话」+ 等待输入框。"""
         self._prepare_new_session()
@@ -366,6 +380,7 @@ class DoubaoDriver(WebLLMDriver):
 
     def input(self, prompt):
         """向输入框写入 prompt（fill 纯文本）。"""
+        self._raise_if_unavailable()
         sel, _ = self._probe_selectors(_INPUT_SELECTORS, attr="tagName")
         if not sel:
             self._dump_page_state("找不到豆包输入框（未登录或前端改版）")
@@ -555,6 +570,7 @@ class DoubaoDriver(WebLLMDriver):
         一次 evaluate 同时拿到「本次提问的回复正文」与「是否出现交付卡片」。
         探测失败返回 {}（调用方按空值兜底，不阻塞流程）。
         """
+        self._raise_if_unavailable()
         try:
             r = self._safe_evaluate(_MSG_STATE_JS, list(_CARD_SELECTORS))
         except Exception:
@@ -629,6 +645,8 @@ class DoubaoDriver(WebLLMDriver):
             if len(final) < _INLINE_MIN_CHARS:
                 log.warning("web_drivers[doubao]: 卡片兜底后对话仍只有 %d 字"
                             "（正文可能仍在交付界面）", len(final))
+        except (WebLoginRequired, WebLoginCheckError, WorkflowCancelled):
+            raise
         except Exception as exc:
             log.warning("web_drivers[doubao]: 卡片兜底补问失败：%s", exc)
 
@@ -651,6 +669,8 @@ class DoubaoDriver(WebLLMDriver):
         try:
             self.send(accept_timeout=timeout)
             return True
+        except (WebLoginRequired, WebLoginCheckError, WorkflowCancelled):
+            raise
         except Exception as exc:
             log.warning("web_drivers[doubao]: 补问发送失败：%s", exc)
             return False
@@ -887,63 +907,14 @@ def _has_doubao_cookies(context):
 
 
 def web_llm_logged_in():
-    """豆包网页版是否真实可登录：cookie + 加载未停在登录页。"""
-    from web_drivers.browser_pool import _browser_lock, create_browser
-    site_url = "https://www.doubao.com/chat/"
-    try:
-        with _browser_lock:
-            with create_browser(headless=True) as browser:
-                if not _has_doubao_cookies(browser.context):
-                    return False
-                page = browser.context.new_page()
-                try:
-                    page.goto(site_url, wait_until="domcontentloaded",
-                              timeout=20000)
-                    deadline = time.time() + 3.0
-                    prev = page.url
-                    while time.time() < deadline:
-                        page.wait_for_timeout(250)
-                        cur = page.url
-                        if any(k in cur.lower() for k in
-                               ("login", "signin", "passport")):
-                            return False
-                        if cur == prev:
-                            # URL 稳定且带登录域 cookie → 视为已登录
-                            return _has_doubao_cookies(browser.context)
-                        prev = cur
-                    return _has_doubao_cookies(browser.context)
-                finally:
-                    page.close()
-    except Exception:
-        return False
+    """Validate the Doubao account without confusing browser errors with logout."""
+    from web_drivers.account_status import logged_in
+    return logged_in("Doubao")
 
 
 def login_web_flow(timeout=300):
-    """打开可见 Edge 到豆包网页版，等待用户登录（供引导窗口调用）。
-
-    登录完成后写回持久化 profile；web_llm_logged_in() 判定为 True。"""
-    from web_drivers.browser_pool import _browser_lock, create_browser
-    site_url = "https://www.doubao.com/chat/"
-    try:
-        with _browser_lock:
-            with create_browser(headless=False) as browser:
-                page = browser.context.new_page()
-                try:
-                    page.goto(site_url, wait_until="domcontentloaded",
-                              timeout=30000)
-                    deadline = time.time() + timeout
-                    while time.time() < deadline:
-                        time.sleep(3)
-                        page.wait_for_timeout(500)
-                        if (_has_doubao_cookies(browser.context)
-                                and "login" not in page.url.lower()
-                                and "passport" not in page.url.lower()):
-                            return True, "检测到豆包登录成功"
-                    return False, f"超时（{timeout // 60} 分钟）未检测到登录"
-                finally:
-                    page.close()
-    except Exception as exc:
-        return False, f"豆包登录引导失败：{exc}"
+    from web_drivers.account_status import login_account
+    return login_account("Doubao", timeout=timeout)
 
 
 # ---------------- --probe CLI ----------------

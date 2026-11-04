@@ -35,6 +35,10 @@ class WebLoginRequired(RuntimeError):
     """网站明确要求重新登录；不得当作生成失败重试或切换 API。"""
 
 
+class WebAccountRestricted(WebLoginRequired):
+    """平台明确限制账号使用；停止任务，但重新登录不能解除该限制。"""
+
+
 _cancel_hook = None
 _cleanup_active = ContextVar("web_session_cleanup", default=False)
 _cancel_scope_unset = object()

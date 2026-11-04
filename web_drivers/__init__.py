@@ -17,6 +17,10 @@ _driver_instance = None
 _DRIVER_REGISTRY = {
     "DeepSeek": ("web_drivers.deepseek", "DeepSeekDriver"),
     "Doubao": ("web_drivers.doubao", "DoubaoDriver"),
+    "Kimi": ("web_drivers.kimi", "KimiDriver"),
+    "Qianwen": ("web_drivers.qianwen", "QianwenDriver"),
+    "Yuanbao": ("web_drivers.yuanbao", "YuanbaoDriver"),
+    "ChatGLM": ("web_drivers.chatglm", "ChatGLMDriver"),
 }
 
 
@@ -43,12 +47,11 @@ def web_llm_logged_in():
     except Exception as exc:
         # 无法启动浏览器、导航失败等只能说明本次未能判定，不能伪装成
         # "已登出"；调用方据此避免误导用户重新登录。
-        from web_drivers.browser_pool import (
-            WebLoginCheckError, WorkflowCancelled,
-        )
-        if isinstance(exc, (WebLoginCheckError, WorkflowCancelled)):
+        from web_drivers import browser_pool
+        if isinstance(exc, (browser_pool.WebLoginCheckError,
+                            browser_pool.WorkflowCancelled, browser_pool.WebLoginRequired)):
             raise
-        return False
+        raise browser_pool.WebLoginCheckError("网页登录检查暂不可用，请稍后重试") from exc
 
 
 def login_web_flow(timeout=300):
