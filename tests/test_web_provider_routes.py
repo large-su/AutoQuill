@@ -35,7 +35,7 @@ class WebProviderRoutesTest(unittest.TestCase):
         flow = {}
         with mock.patch("config.WEB_DRIVERS", self.providers), \
                 mock.patch("config.WEB_DRIVER_NAME", "DeepSeek"), \
-                mock.patch("webui.api_setup.EDGE_PATH", "edge.exe", create=True), \
+                mock.patch("applications.zhihu_story.browser_adapter.EDGE_PATH", "edge.exe"), \
                 mock.patch.object(api_setup.runner, "status", return_value={
                     "state": "idle", "worker_alive": False}), \
                 mock.patch("webui.browser_tasks.browser_busy", return_value=[]), \
@@ -56,7 +56,7 @@ class WebProviderRoutesTest(unittest.TestCase):
     def test_login_without_body_uses_current_provider(self):
         with mock.patch("config.WEB_DRIVERS", self.providers), \
                 mock.patch("config.WEB_DRIVER_NAME", "DeepSeek"), \
-                mock.patch("webui.api_setup.EDGE_PATH", "edge.exe", create=True), \
+                mock.patch("applications.zhihu_story.browser_adapter.EDGE_PATH", "edge.exe"), \
                 mock.patch.object(api_setup.runner, "status", return_value={
                     "state": "idle", "worker_alive": False}), \
                 mock.patch("webui.browser_tasks.browser_busy", return_value=[]), \
