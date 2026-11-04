@@ -31,6 +31,10 @@ class WorkflowCancelled(Exception):
     """用户取消操作（Web 控制台「停止」按钮）。"""
 
 
+class WebLoginRequired(RuntimeError):
+    """网站明确要求重新登录；不得当作生成失败重试或切换 API。"""
+
+
 _cancel_hook = None
 _cleanup_active = ContextVar("web_session_cleanup", default=False)
 _cancel_scope_unset = object()

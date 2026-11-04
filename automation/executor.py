@@ -122,7 +122,11 @@ def _full_chain(job, should_stop=None, progress=None):
                 log.info("自动化：收到停止请求，已请求中断当前撰写任务")
             time.sleep(2)
         if st.get("guide_needed"):
-            raise NeedHuman("运行前检测未通过：%s" % st["guide_needed"])
+            guide = st["guide_needed"]
+            message = ("网页版模型需要重新登录：%s" % guide
+                       if guide == "deepseek_login"
+                       else "运行前检测未通过：%s" % guide)
+            raise NeedHuman(message)
     finally:
         _set_checkin_context(None)     # 作业结束（含异常路径）立即清理
     ok = state == "done"

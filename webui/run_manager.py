@@ -188,7 +188,7 @@ class TaskRunner:
             control = {"id": None, "stop": self._stop_flag,
                        "finished": threading.Event(),
                        "watchdog_stop": threading.Event(), "timeout": None}
-        from web_drivers.browser_pool import (WorkflowCancelled,
+        from web_drivers.browser_pool import (WorkflowCancelled, WebLoginRequired,
                                               cancellation_scope, _check_cancel)
         terminal = None
         _orig_input = builtins.input
@@ -258,6 +258,12 @@ class TaskRunner:
                 terminal = ("timeout", self.message, None)
             else:
                 terminal = ("stopped", f"已中断：{exc}", None)
+        except WebLoginRequired as exc:
+            terminal = (
+                "error",
+                f"{exc}。任务已停止，未继续生成或发布；请点右上角「设置」重新登录后再运行",
+                "deepseek_login",
+            )
         except BaseException as exc:
             if control["timeout"]:
                 terminal = ("timeout", control["timeout"], None)
@@ -288,6 +294,7 @@ class TaskRunner:
 
     def _dispatch(self, spec: _RunSpec):
         from workflows.zhihu import ZhihuWorkflow
+        from web_drivers.browser_pool import WebLoginRequired
 
         wf = ZhihuWorkflow()
         mode = spec.mode
@@ -363,6 +370,8 @@ class TaskRunner:
                     if wf.run_clean(on_extracted=_on_clean_extracted,
                                     on_story=_on_clean_story):
                         success += 1
+                except WebLoginRequired:
+                    raise
                 except Exception as exc:
                     last_error = exc
                     log.warning("纯净模式第 %d/%d 轮失败：%s",
@@ -414,6 +423,8 @@ class TaskRunner:
                     if wf.run_single(on_extracted=_on_extracted,
                                      on_story=_on_story):
                         success += 1
+                except WebLoginRequired:
+                    raise
                 except Exception as exc:
                     last_error = exc
                     log.warning("经典模式第 %d/%d 轮失败：%s",

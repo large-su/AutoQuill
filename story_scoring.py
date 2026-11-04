@@ -103,13 +103,17 @@ def _web_llm_generate(prompt, what="请求"):
     """Web 模式：用共享浏览器里的网页版大模型生成一次回答。
 
     与故事生成的 Web 通道共用 web_drivers.get_driver()，不依赖任何
-    API Key。失败（未登录 / 页面异常 / 前端改版）返回 None，调用方
-    按「回退原顺序 / 原候选」处理，不阻断链路。
+    API Key。明确登录失效向上传递，暂停任务并引导登录；其他页面异常
+    返回 None，调用方按「回退原顺序 / 原候选」处理。
     """
+    from web_drivers.browser_pool import WebLoginRequired
     try:
         from web_drivers import get_driver
         driver = get_driver()
         return driver.generate(prompt)
+    except WebLoginRequired:
+        # A clear sign-out is actionable and must stop the write workflow.
+        raise
     except Exception as exc:
         log.warning("Web 模式%s失败：%s（自动回退）", what, exc)
         return None

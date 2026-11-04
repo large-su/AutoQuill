@@ -633,6 +633,7 @@ class ZhihuWorkflow(WorkflowBase):
         通道与主链路一致：API 模式走服务商 API，Web 模式走网页版大模型。
         """
         from config.story import QUESTION_AI_SCREEN
+        from web_drivers.browser_pool import WebLoginRequired
         if not QUESTION_AI_SCREEN:
             return None
         try:
@@ -661,6 +662,8 @@ class ZhihuWorkflow(WorkflowBase):
             log.info("大模型筛选：从 %d 个合格候选中挑出最适合写故事的 1 个：%s",
                      len(good), best_raw["q"]["title"][:40])
             return best_raw
+        except WebLoginRequired:
+            raise
         except Exception as exc:
             log.warning("大模型筛选不可用（沿用点赞最高）：%s", exc)
             return None

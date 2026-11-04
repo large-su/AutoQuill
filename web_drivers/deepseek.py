@@ -31,6 +31,7 @@ import logging
 import re
 import sys
 import time
+from urllib.parse import urlsplit
 
 from web_drivers.base import MARKDOWN_REBUILD_JS, WebLLMDriver
 
@@ -112,6 +113,29 @@ class DeepSeekDriver(WebLLMDriver):
         "a[aria-label*='新对话']",
     )
 
+    def _page_instance(self):
+        """Return the page and attach one page-scoped auth observer."""
+        page = super()._page_instance()
+        observer = getattr(self, "_auth_observer", None)
+        if observer is None or observer.page is not page:
+            from web_drivers.deepseek_auth import DeepSeekAuthObserver
+            self._auth_observer = DeepSeekAuthObserver(page)
+        return page
+
+    def _raise_if_logged_out(self, page=None):
+        """Stop promptly when the site gives explicit logout evidence."""
+        page = page or self._page_instance()
+        observer = getattr(self, "_auth_observer", None)
+        if observer is not None:
+            observer.raise_if_rejected()
+        parsed = urlsplit(page.url or "")
+        if parsed.scheme == "https" and parsed.netloc == "chat.deepseek.com" and parsed.path.rstrip("/") in (
+                "/sign_in", "/sign-in", "/login"):
+            from web_drivers.browser_pool import WebLoginRequired
+            raise WebLoginRequired(
+                "DeepSeek 网页登录已失效，请在设置中重新登录后继续")
+        return page
+
     def new_chat(self):
         """重置为全新对话：重新导航 + 显式点「新对话」+ 等输入框渲染。
 
@@ -122,10 +146,12 @@ class DeepSeekDriver(WebLLMDriver):
         """
         self._prepare_new_session()
         self.open_session()
+        self._raise_if_logged_out()
         if self._click_new_chat_button():
             log.info("web_drivers: 已点击「新对话」，确认落在全新会话")
             self._page_instance().wait_for_timeout(1000)
         for _ in range(10):
+            self._raise_if_logged_out()
             if self._probe_selectors(_INPUT_SELECTORS, attr="tagName")[0]:
                 if self._detect_session_id():
                     raise RuntimeError("DeepSeek 未进入空白新对话，停止发送以保护已有历史")
@@ -189,13 +215,15 @@ class DeepSeekDriver(WebLLMDriver):
         换行必达数千行，默认 30s 超时必失败——放宽后首次 fill 即完成，
         不会留下半写入内容让后续任务重复踩坑。
         """
+        page = self._raise_if_logged_out()
         sel, _ = self._probe_selectors(_INPUT_SELECTORS, attr="tagName")
         if not sel:
+            self._raise_if_logged_out(page)
             self._dump_page_state("找不到 DeepSeek 输入框")
-        page = self._page_instance()
         try:
             page.locator(sel).fill(prompt, timeout=120000)
         except Exception:
+            self._raise_if_logged_out(page)
             self._dump_page_state("输入框写入失败")
         log.info("web_drivers: prompt 已写入（%d 字符）", len(prompt))
         return self
@@ -206,8 +234,8 @@ class DeepSeekDriver(WebLLMDriver):
         锚点必须在发送前打：改版后消息列表是虚拟列表，发送后 DOM 里会同时
         挂着上一轮回复，读取时靠锚点区分「本次新回复」与「旧回复」。
         """
+        page = self._raise_if_logged_out()
         self._mark_reply_anchor()
-        page = self._page_instance()
         # fill 已聚焦 textarea，Enter 即发送（DeepSeek 默认 Enter 发送）
         try:
             page.keyboard.press("Enter")
@@ -253,7 +281,10 @@ class DeepSeekDriver(WebLLMDriver):
         last_beat = time.time()  # 兜底心跳：无长度信号超时后仍打日志
         while time.time() < deadline:
             _check_cancel()
+            self._raise_if_logged_out()
             probe = self._read_probe() or {}
+            # Browser events (including auth responses) are delivered during evaluate.
+            self._raise_if_logged_out()
             cur_len = len(probe.get("main") or "")
             think_len = int(probe.get("think_len") or 0)
             # 停止按钮只在生成中出现：探测到过且现在消失 → 完成。
@@ -293,6 +324,7 @@ class DeepSeekDriver(WebLLMDriver):
                 # READBACK 毫秒重读，长度变化则说明仍在生成、继续等待
                 page = self._page_instance()
                 page.wait_for_timeout(_READBACK_MS)
+                self._raise_if_logged_out(page)
                 re_probe = self._read_probe() or {}
                 re_len = len(re_probe.get("main") or "")
                 if re_len != cur_len:
@@ -316,7 +348,9 @@ class DeepSeekDriver(WebLLMDriver):
         的旧回复。这里只认发送前打的锚点（_mark_reply_anchor）之后的新消息；
         一条都没读到就直接报错（绝不把旧回复当结果返回）。
         """
+        self._raise_if_logged_out()
         probe = self._read_probe()
+        self._raise_if_logged_out()
         if probe is not None:
             text = (probe.get("main") or "").strip()
             if text:
@@ -632,10 +666,18 @@ _LOGIN_STATE_JS = r"""() => {
     const inputs = document.querySelectorAll(%s);
     const composer = [...inputs].some(e =>
         !e.disabled && !e.readOnly && !!(e.offsetWidth || e.offsetHeight));
-    const token = localStorage.getItem('userToken');
+    let tokenValue = null;
+    try {
+        const rawToken = localStorage.getItem('userToken');
+        const parsedToken = rawToken ? JSON.parse(rawToken) : null;
+        tokenValue = parsedToken && typeof parsedToken === 'object'
+            ? parsedToken.value : null;
+    } catch (_) {
+        tokenValue = null;
+    }
     return {signed_out: signedOut, ready: !signedOut &&
         location.origin === 'https://chat.deepseek.com' && composer &&
-        !!token && token !== 'null' && token !== 'undefined'};
+        typeof tokenValue === 'string' && tokenValue.trim().length > 0};
 }""" % json.dumps(",".join(_INPUT_SELECTORS))
 
 
@@ -659,7 +701,7 @@ def web_llm_logged_in():
     """
     from web_drivers.browser_pool import (
         _browser_lock, create_browser, live_browsers, profile_in_use,
-        WebLoginCheckError, WorkflowCancelled,
+        WebLoginCheckError, WebLoginRequired, WorkflowCancelled,
     )
     if profile_in_use() or live_browsers() > 0:
         # ★ 2026-09-26：有浏览器在跑（任务/登录引导/抓取）就**不发起检测**。
@@ -672,6 +714,8 @@ def web_llm_logged_in():
         with _browser_lock:
             with create_browser(headless=True) as browser:
                 page = browser.context.new_page()
+                from web_drivers.deepseek_auth import DeepSeekAuthObserver
+                auth = DeepSeekAuthObserver(page)
                 try:
                     from playwright.sync_api import TimeoutError as NavigationTimeout
                     try:
@@ -681,6 +725,10 @@ def web_llm_logged_in():
                         log.info("DeepSeek 导航等待超时，继续检查已渲染的聊天界面")
                     deadline = time.monotonic() + 8
                     while time.monotonic() < deadline:
+                        try:
+                            auth.raise_if_rejected()
+                        except WebLoginRequired:
+                            return False
                         state = _deepseek_login_state(page)
                         if state is not None:
                             return state
@@ -706,8 +754,8 @@ def login_deepseek_web_flow(timeout=300):
 
     供首启引导（/api/setup/web-login）使用；登录后 cookie 写入持久化
     profile，web_llm_logged_in() 即可判定。返回 (是否成功, 提示信息)。
-    登录完成判定 = cookie 存在 + 页面不在登录页（仅 cookie 会因残留
-    假阳性，导致引导秒过但实际未登录）。
+    登录完成判定 = 聊天输入框就绪 + userToken 内有效字符串值；
+    残留 cookie 或值为 null 的 token 包装对象都不能确认登录成功。
     独立可见实例 + 全程持 _browser_lock：
       - 共享浏览器（get_browser）归任务线程创建/使用，登录线程跨线程
         复用会触发 Playwright「cannot switch to a different thread」

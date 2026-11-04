@@ -30,6 +30,11 @@ class DeepSeekLoginRecoveryTest(unittest.TestCase):
     def test_explicit_signin_page_is_signed_out(self):
         self.assertFalse(self.check({"ready": False, "signed_out": True}))
 
+    def test_preflight_auth_rejection_is_signed_out_not_network_error(self):
+        with mock.patch("web_drivers.deepseek_auth.DeepSeekAuthObserver") as observer:
+            observer.return_value.raise_if_rejected.side_effect = browser_pool.WebLoginRequired("expired")
+            self.assertFalse(self.check({"ready": True, "signed_out": False}))
+
     def test_dom_ready_after_navigation_timeout_is_still_logged_in(self):
         from playwright.sync_api import TimeoutError
         self.assertTrue(self.check({"ready": True, "signed_out": False},
