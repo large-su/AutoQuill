@@ -99,6 +99,7 @@ _READBACK_MS = 3000
 
 
 class DeepSeekDriver(WebLLMDriver):
+    provider_name = "DeepSeek"
     """DeepSeek 网页版（chat.deepseek.com）DOM 驱动。"""
 
     # 「开启新对话」按钮候选（2026-09 改版文案 = 开启新对话，无 aria-label，
@@ -260,92 +261,30 @@ class DeepSeekDriver(WebLLMDriver):
         self._dump_page_state("发送失败（Enter 与按钮均不可用）")
         return self
 
+
+    def _generation_probe(self):
+        self._raise_if_logged_out()
+        probe = self._read_probe() or {}
+        return {
+            "text": probe.get("main") or "",
+            "thinking_chars": int(probe.get("think_len") or 0),
+            "generating": self._stop_button_present(),
+            "done": False,
+        }
+
+    def _generation_completed(self, facts, tracker):
+        # Preserve the old DeepSeek read-back protection without blocking the
+        # parallel scheduler: require a second stable DOM sample after its
+        # stop control has disappeared.
+        if not facts["text"] or facts["generating"]:
+            return False
+        # Preserve the stable/read-back path for responses whose entire stop
+        # control lifecycle occurred between two polls.
+        return tracker["stable"] >= int(self.config.get("stable_count", 2)) + 1
+
     def wait_complete(self, max_wait=None):
-        """轮询等待生成完成：停止按钮消失 + 锚点之后的新回复文本稳定。
-
-        与 API 模式观感一致：心跳日志「生成中… 已生成 N 字」由
-        webui/log_capture 识别为进度条事件（前端零改动）。
-        取消检查点每轮执行——Web 控制台「停止」按钮直接生效。
-        ★ 只看锚点之后的新消息（_read_probe）：虚拟列表里上一轮回复仍挂在
-        DOM 中，读旧回复会造成「11s 就稳定」的误判（2026-09-09 线上故障：
-        生成 prompt 发出 11s 后读回上一步筛选的 191 字）。
-        """
-        from web_drivers.browser_pool import _check_cancel
-        from config import WEB_DRIVERS, WEB_DRIVER_NAME
-        cfg = WEB_DRIVERS[WEB_DRIVER_NAME]
-        max_wait = max_wait or cfg.get("max_wait", 600)
-        poll_interval = cfg.get("poll_interval", 4)
-        stable_count = cfg.get("stable_count", 2)
-
-        deadline = time.time() + max_wait
-        last_len = 0
-        last_think = 0
-        stable = 0
-        stop_seen = False  # 停止按钮曾出现（生成中）→ 消失才算完成
-        body_started = False  # 正文已出现 → 之后只打生成心跳（两阶段）
-        start = time.time()
-        last_beat = time.time()  # 兜底心跳：无长度信号超时后仍打日志
-        while time.time() < deadline:
-            _check_cancel()
-            self._raise_if_logged_out()
-            probe = self._read_probe() or {}
-            # Browser events (including auth responses) are delivered during evaluate.
-            self._raise_if_logged_out()
-            cur_len = len(probe.get("main") or "")
-            think_len = int(probe.get("think_len") or 0)
-            # 停止按钮只在生成中出现：探测到过且现在消失 → 完成。
-            # 从未探测到（selector 改版等）→ 只用文本稳定判定，绝不误判完成。
-            if self._stop_button_present():
-                stop_seen = True
-            elif stop_seen:
-                log.info("web_drivers: 停止按钮已消失，生成完成（%.1fs，%d 字符）",
-                         time.time() - start, cur_len)
-                return True
-            # 双阶段心跳：正文增长→生成中；正文未出现且思考增长→思考中。
-            # 正文一旦出现（body_started）思考尾巴继续增长也不再打思考心跳，
-            # 保持「先思考后生成」的两阶段观感；无深度思考时 think_len 恒 0。
-            if cur_len != last_len:
-                stable = 0
-                last_len = cur_len
-                last_beat = time.time()
-                if cur_len:
-                    body_started = True
-                    log.info("故事生成中… 已生成 %d 字", cur_len)
-            elif not body_started and think_len != last_think:
-                stable = 0
-                last_think = think_len
-                last_beat = time.time()
-                if think_len:
-                    log.info("模型思考中… 已思考 %d 字符", think_len)
-            else:
-                stable += 1
-            # 兜底心跳：正文/思考长度选器在特定页面态下可能一直匹配不到，
-            # 导致长时间零日志（观感"卡死"）。超时后打进度，不静默。
-            if time.time() - last_beat >= 10:
-                log.info("模型响应中… 已用时 %.0fs（内容仍在生成/思考）",
-                         time.time() - start)
-                last_beat = time.time()
-            if stable >= stable_count and cur_len:
-                # read-back 验证：稳定可能是停顿（LLM 输出间歇），等
-                # READBACK 毫秒重读，长度变化则说明仍在生成、继续等待
-                page = self._page_instance()
-                page.wait_for_timeout(_READBACK_MS)
-                self._raise_if_logged_out(page)
-                re_probe = self._read_probe() or {}
-                re_len = len(re_probe.get("main") or "")
-                if re_len != cur_len:
-                    log.info("web_drivers: 稳定判定后输出仍增长"
-                             "（%d→%d），继续等待", cur_len, re_len)
-                    stable = 0
-                    last_len = re_len
-                    continue
-                log.info("web_drivers: 文本稳定 %d 轮，判定完成"
-                         "（%.1fs，%d 字符）",
-                         stable_count, time.time() - start, re_len)
-                return True
-            self._page_instance().wait_for_timeout(poll_interval * 1000)
-        log.warning("web_drivers: 生成超时（%ds）", max_wait)
-        return False
+        """Use the shared observer; completion remains DeepSeek-specific."""
+        return super().wait_complete(max_wait=max_wait)
 
     def read_result(self):
         """读取本次生成结果：锚点之后的最新助手回复全文（innerText）。
@@ -524,12 +463,8 @@ class DeepSeekDriver(WebLLMDriver):
 
     def _site_origin(self):
         """站点 origin（删除接口与页面同源）。"""
-        from config import WEB_DRIVERS, WEB_DRIVER_NAME
         from urllib.parse import urlsplit
-        try:
-            site_url = WEB_DRIVERS[WEB_DRIVER_NAME]["url"]
-        except Exception:
-            site_url = "https://chat.deepseek.com/"
+        site_url = self.config["url"]
         sp = urlsplit(site_url)
         return f"{sp.scheme}://{sp.netloc}" if sp.netloc else ""
 

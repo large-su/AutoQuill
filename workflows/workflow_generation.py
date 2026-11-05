@@ -82,7 +82,7 @@ class GenerationMixin:
         """
         from config.story import (WEB_FAILOVER_TO_API,
                                   WEB_FAILOVER_MAX_CONSECUTIVE)
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
         fails = getattr(self, "_web_fail_consecutive", 0)
         if fails >= WEB_FAILOVER_MAX_CONSECUTIVE:
             log.warning("Web 通道已连续失败 %d 次，本轮剩余尝试"
@@ -94,7 +94,7 @@ class GenerationMixin:
                                        feedback=feedback)
             self._web_fail_consecutive = 0
             return story
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             # A confirmed sign-out needs the login guide; never disguise it as
             # a transient DOM fault and spend the user's API fallback.
             raise
@@ -228,7 +228,7 @@ class GenerationMixin:
         generate_clean_with_retry 审核环节共同把关。
         """
         from config import LLM_MODE
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
         from story_prompt import build_clean_prompt
 
         log.info("=" * 50)
@@ -252,7 +252,7 @@ class GenerationMixin:
                 from core.story_text import clean_story_output
                 story = clean_story_output(story)
             return story or None
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             raise
         except Exception as exc:
             log.warning("纯净模式 Web 生成失败：%s", exc)

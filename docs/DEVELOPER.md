@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 |---|---|
-| **适用版本** | v5.0.8 起 |
-| **最后更新** | 2026-11-04 |
+| **适用版本** | v5.11.0 起 |
+| **最后更新** | 2026-11-05 |
 | **状态** | 活跃 |
 | **说明** | 架构分层、运行方式、CLI 命令、配置参考与扩展指南 |
 
@@ -42,14 +42,14 @@ AutoQuill 是一套以 LLM 为认知中枢、以 **Playwright DOM 通道**为浏
 │                        →生成→评分→发布            │
 ├──────────────────────────────────────────────────┤
 │  Layer 3: Adapters (适配器)                       │
-│  web_drivers/  →  Web LLM 驱动(DeepSeek/豆包)    │
+│  web_drivers/  →  Web LLM 驱动与能力适配         │
 │   ├ browser_pool.py  浏览器基础设施（共享单例/     │
 │   │                 取消钩子/有界交互；工厂由      │
 │   │                 应用层注册，不依赖上层）       │
-│   ├ deepseek.py      DeepSeek 网页版驱动+登录判定  │
-│   ├ doubao.py        豆包网页版驱动（卡片交付兜底）│
-│   └ base.py          WebLLMDriver 基类            │
-│                      markdown 逐块重建（共用）      │
+│   ├ base.py          WebLLMDriver 与统一生成快照   │
+│   ├ capabilities.py  站内模型目录/选择/验收记录   │
+│   ├ site_options.py  模型菜单及绑定参数发现/应用   │
+│   └ session_ui.py    本任务会话归属与精确清理      │
 │  llm_api.py    →  API LLM 调用 + 风格双层注入     │
 ├──────────────────────────────────────────────────┤
 │  Layer 2: Core Capabilities (核心能力)            │
@@ -175,7 +175,9 @@ V4 起程序文件与用户数据分离：
 | `POST /api/setup/apikey` | 写入服务商 API Key（DATA_ROOT 的 llm_providers.json）并立即生效 |
 | `POST /api/setup/test-api` | 实测当前配置的 API 连接（返回 ok + 服务端回复） |
 | `POST /api/setup/zhihu-login` | 后台线程拉起可见 Edge 登录知乎（前端轮询 status 收尾） |
-| `POST /api/setup/web-login` | 后台线程拉起可见 Edge 登录**当前网页版大模型**（DeepSeek / 豆包，前端轮询 status 收尾） |
+| `POST /api/setup/web-login` | 后台线程拉起可见 Edge 登录当前网页版大模型（前端轮询 status 收尾） |
+| `GET /api/web-preferences` | 读取站点能力目录、当前站内模型/参数和验收记录 |
+| `POST /api/web-preferences` | 校验并保存指定站点的模型与参数选择 |
 
 知乎登录逻辑抽为 `browser_adapter.login_zhihu_flow()`（CLI `--login` 与引导共用）；DeepSeek 网页版登录/判定在 `web_drivers/deepseek.web_llm_logged_in()` / `login_deepseek_web_flow()`（随驱动下沉 Layer 3，经 browser_pool 工厂创建独立实例）。
 
@@ -227,10 +229,9 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 | 模式 | 说明 | 适用场景 |
 |---|---|---|
 | **API** (`LLM_MODE = "api"`) | 直接调用 LLM API，快速稳定 | 日常批量生成 |
-| **Web** (`LLM_MODE = "web"`) | 通过浏览器操作网页版大模型 | 免费使用、API 不可用时 |
+| **Web** (`LLM_MODE = "web"`) | 通过浏览器操作网页版大模型 | 按网站额度使用、API 不可用时 |
 
-网页版通道支持多个站点驱动（`config.WEB_DRIVERS` 注册表：**DeepSeek / 豆包**），控制台
-「生成通道 → 网页版大模型」切换；登录态、会话归属、登录判定都按驱动名隔离。
+网页版通道支持多个站点驱动（`config.WEB_DRIVERS` 注册表），控制台先切换网站，再选择该网站能力检查发现的模型和参数。登录态、能力目录、选择、会话归属和验证记录都按驱动名隔离。能力发现不等于经典模式验收。
 
 ### 6.2 工作流生命周期
 
@@ -253,7 +254,7 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 
 ### 6.4 Web 控制台结构
 
-- `webui/server.py`：FastAPI 单进程（127.0.0.1:8787，Host/Origin 白名单防跨站盲打）。`webui/run_manager.py` 管理 TaskRunner 单任务线程、绑定本次运行的 watchdog（240s 无进展 / 900s 总时长）；取消检查由任务线程通过 `web_drivers.browser_pool.cancellation_scope` 注册，不再安装服务级停止钩子。
+- `webui/server.py`：FastAPI 单进程（127.0.0.1:8787，Host/Origin 白名单防跨站盲打）。TaskRunner 绑定本次运行的 watchdog；网页驱动通过 `browser_pool.generation_activity_scope` 报告健康轮询和实际生成推进，避免把正常网页检查的日志静默误判为卡死，驱动自身 `max_wait` 仍是生成期限。取消检查由任务线程通过 `cancellation_scope` 注册。
 - `webui/log_capture.py`：root logger 捕获 + 里程碑解析 → SSE 事件
 - `webui/static/index.html`：单页控制台（运行控制 / 配置速览 / 实时日志 / 结果卡片 / 首启引导）
 
@@ -268,6 +269,12 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 ---
 
 ## 7. 配置参考
+
+### 网页生成约束（v5.11.0）
+
+所有站点共享 `poll_generation()` 活动快照；watchdog 只依据生成活动推进判定健康，完成前不得读取旧答或未完成答。目录按站点持久化，同名模型用完整路径 ID 区分；图片和 DeepResearch 项的 `selectable=false` 不进入标准文字 workflow。验证码、平台 busy 和受限账号必须透传为可处理状态。
+
+Aizex 的登录顺序是中转站登录 → “一键使用”授权 → 动态聊天站。授权后的地址只在同一浏览器 context 内复用，不落盘为下次入口；每个 driver 持有独立聊天页面。模型路径 ID 区分跨组同名模型。实际验收组合见 [网页版模型与账号管理](WEB-PROVIDERS.md)，发现目录不代表所有组合已验收。千问长提示使用完整 TXT 附件，发送前验证输入完整性。显式验证码、平台拥堵和连续响应中断沿统一错误类型上传，不能伪装成评分或原创审核的回退结果。
 
 ### 框架级配置（config/__init__.py）
 
@@ -327,6 +334,8 @@ class NewSiteDriver(WebLLMDriver):
     def wait_complete(self):  ...  # 等待完成（文本稳定 + read-back 重读 + UI 空闲）
     def read_result(self):    ...  # 读回复：必须逐块重建 markdown（见下）
 ```
+
+新增驱动还必须提供站点模型菜单与绑定参数的发现/应用实现，使用 `capabilities.refresh_capabilities()` 保存目录，使用 `capabilities.apply_selection()` 在发送前再次确认网页实际选择。完成判定通过公共 `poll_generation()` 快照返回；不得让 workflow 或并行调度直接调用 DeepSeek 私有方法。真实验收使用隔离运行目录和 profile，不能用合成 DOM 或登录成功替代经典模式证据。
 
 **两条硬约束（2026-09-19 事故后固化）**：
 

@@ -41,6 +41,7 @@ a = Analysis(
         'web_drivers.qianwen',
         'web_drivers.yuanbao',
         'web_drivers.chatglm',
+        'web_drivers.aizex',
         # uvicorn 用动态 import 加载内部实现，静态分析抓不全
         'uvicorn.logging',
         'uvicorn.loops',

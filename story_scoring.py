@@ -106,12 +106,12 @@ def _web_llm_generate(prompt, what="请求"):
     API Key。明确登录失效向上传递，暂停任务并引导登录；其他页面异常
     返回 None，调用方按「回退原顺序 / 原候选」处理。
     """
-    from web_drivers.browser_pool import WebLoginRequired
+    from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
     try:
         from web_drivers import get_driver
         driver = get_driver()
         return driver.generate(prompt)
-    except WebLoginRequired:
+    except (WebInteractionError, WorkflowCancelled):
         # A clear sign-out is actionable and must stop the write workflow.
         raise
     except Exception as exc:

@@ -3,6 +3,8 @@ config/llm_providers.json
 
 # 界面运行时模型切换的持久化（本机偏好）
 config/webui_model.json
+config/web_llm_preferences.json
+data/web_llm_capabilities.json
 
 # 启动器偏好（关窗行为 / 开机自启，本机偏好）
 config/launcher.json

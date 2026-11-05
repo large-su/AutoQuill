@@ -151,15 +151,74 @@ def api_web_drivers():
     """列出可切换的网页版大模型及其独立账号操作信息。"""
     from config import WEB_DRIVERS, WEB_DRIVER_NAME
     from web_drivers import _DRIVER_REGISTRY
+    from web_drivers.capabilities import get_provider_settings
     drivers = [
         {"name": name,
          "label": (WEB_DRIVERS[name] or {}).get("label", name),
          "description": (WEB_DRIVERS[name] or {}).get("description", ""),
-         "url": (WEB_DRIVERS[name] or {}).get("url", "")}
+         "url": (WEB_DRIVERS[name] or {}).get("url", ""),
+         "settings": get_provider_settings(name)}
         for name in sorted(WEB_DRIVERS)
         if name in _DRIVER_REGISTRY
     ]
     return {"current": WEB_DRIVER_NAME, "drivers": drivers}
+
+
+class _WebPreferencesSpec(BaseModel):
+    name: str
+    model: str = ""
+    options: dict = {}
+
+
+def _web_preferences_busy():
+    """Return a user-facing busy reason, or None when selection is safe."""
+    status = runner.status()
+    if status.get("worker_alive") or status.get("state") in ("running", "stopping"):
+        return "任务正在运行，完成后再修改网页模型设置"
+    from webui import api_setup
+    if api_setup._login_thread is not None and api_setup._login_thread.is_alive():
+        return "登录引导正在运行，完成后再修改网页模型设置"
+    from webui.browser_tasks import browser_busy
+    busy = browser_busy()
+    if busy:
+        return "「%s」正在占用浏览器，完成后再修改网页模型设置" % busy[0]
+    from web_drivers.browser_pool import live_browsers, profile_in_use
+    if profile_in_use() or live_browsers():
+        return "浏览器正在使用中，完成后再修改网页模型设置"
+    return None
+
+
+@router.get("/api/web-preferences")
+def api_web_preferences(name: str = ""):
+    """Read the selected in-site model/options and the last discovered catalog."""
+    from config import WEB_DRIVERS, WEB_DRIVER_NAME
+    target = (name or WEB_DRIVER_NAME).strip()
+    if target not in WEB_DRIVERS:
+        raise HTTPException(400, f"未知网页版大模型：{target}")
+    try:
+        from web_drivers.capabilities import get_provider_settings
+        return get_provider_settings(target)
+    except Exception as exc:
+        log.warning("读取网页模型设置失败：%s", exc)
+        raise HTTPException(503, "网页模型设置暂时不可用") from exc
+
+
+@router.post("/api/web-preferences")
+def api_set_web_preferences(spec: _WebPreferencesSpec):
+    from config import WEB_DRIVERS
+    if spec.name not in WEB_DRIVERS:
+        raise HTTPException(400, f"未知网页版大模型：{spec.name}")
+    busy = _web_preferences_busy()
+    if busy:
+        raise HTTPException(409, busy)
+    from web_drivers.capabilities import save_provider_selection
+    try:
+        return save_provider_selection(spec.name, spec.model, dict(spec.options or {}))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        log.warning("保存网页模型设置失败：%s", exc)
+        raise HTTPException(503, "网页模型设置暂时不可用") from exc
 
 
 @router.post("/api/web-driver")

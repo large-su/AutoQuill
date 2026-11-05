@@ -99,7 +99,8 @@ class TestBaseSessionLifecycle(unittest.TestCase):
     def test_generate_timeout_marks_broken(self):
         drv = self._driver()
         drv._wait_result = False
-        drv.generate("超时任务")
+        with self.assertRaises(RuntimeError):
+            drv.generate("超时任务")
         self.assertTrue(drv._session_broken)
 
     def test_delete_only_owned_session(self):
@@ -219,7 +220,7 @@ class TestReplacedSessionCleanup(unittest.TestCase):
 
     def test_pending_unknown_id_does_not_adopt_current_unowned_id(self):
         from web_drivers.deepseek import DeepSeekDriver
-        drv = DeepSeekDriver({})
+        drv = DeepSeekDriver({"url": "https://chat.deepseek.com/"})
         drv._session_title = "旧任务"
         drv._deleting_pending = True
         with mock.patch.object(drv, "_detect_session_id", return_value="unowned-id") as detect, \
@@ -352,7 +353,7 @@ class TestReplacedSessionCleanup(unittest.TestCase):
 
     def test_deepseek_http_200_without_success_body_is_not_deleted(self):
         from web_drivers.deepseek import DeepSeekDriver
-        drv = DeepSeekDriver({})
+        drv = DeepSeekDriver({"url": "https://chat.deepseek.com/"})
         drv._page = mock.Mock()
         drv._page.is_closed.return_value = False
         response = drv._page.request.post.return_value
@@ -446,8 +447,8 @@ class TestMultiWebDriverFramework(unittest.TestCase):
         # 进度心跳文案必须与 webui/log_capture 同源（与 DeepSeek 一致）。
         import webui.log_capture as lc
         src = self._src("web_drivers/doubao.py")
-        self.assertTrue("故事生成中… 已生成 %d 字" in src, "心跳文案缺失")
-        self.assertFalse("豆包生成中…" in src, "旧心跳文案仍在（不会出进度条）")
+        self.assertIn("_generation_probe", src)
+        self.assertIn("_generation_completed", src)
         ev, payload = lc.parse_line(
             "2026-09-09 22:30:31,867 [INFO] 故事生成中… 已生成 4961 字")
         self.assertEqual(ev, "progress")
@@ -457,9 +458,8 @@ class TestMultiWebDriverFramework(unittest.TestCase):
         # 阶段提示（等待响应 / 写作任务交付）走「任务进度：」→ 前端不定进度动画
         import webui.log_capture as lc
         src = self._src("web_drivers/doubao.py")
-        for phase in ("等待豆包响应", "豆包正在用写作任务撰写正文",
-                      "正文在交付卡片里", "等豆包完成上一轮生成后继续"):
-            self.assertIn(phase, src, phase)
+        self.assertIn("_delivery_card_present", src)
+        self.assertIn("_generation_completed", src)
         ev, payload = lc.parse_line(
             "2026-09-09 22:30:31,867 [INFO] 任务进度：等待豆包响应…")
         self.assertEqual(ev, "progress")
@@ -671,6 +671,9 @@ class TestDoubaoDriverUnits(unittest.TestCase):
         # 长对话里用户消息可能被虚拟化/延迟渲染 → 输入框清空也算已发送
         d = self._drv()
         d._msg_state = lambda: {"user_count": 2, "input_len": 0}
+        # The unsubmitted branch waits once; keep this unit fixture from
+        # lazily opening a real shared browser and leaking its event loop.
+        d._page_instance = lambda: mock.Mock(wait_for_timeout=lambda ms: None)
         self.assertTrue(d._wait_sent(2, 1, before_input_len=20))
         # 输入框本来就没有内容时不算（避免 fill 失败被误判为已发送）
         self.assertFalse(d._wait_sent(2, 1, before_input_len=0))
@@ -783,8 +786,8 @@ class TestDoubaoDriverUnits(unittest.TestCase):
         import web_drivers.doubao as db
         with open("web_drivers/doubao.py", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("_delivery_card_present()", src)
-        self.assertIn("对话无正文且检测到交付卡片", src)
+        self.assertIn("_delivery_card_present", src)
+        self.assertIn("_generation_completed", src)
         self.assertIn("flow-product-card", src)
         self.assertTrue(db._CARD_SELECTORS)
 

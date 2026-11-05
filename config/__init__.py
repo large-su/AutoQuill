@@ -130,7 +130,7 @@ WEB_DRIVERS = {
         "description": "推理、提纲与中文写作",
         # 2026-09 官网改版：取消「快速/专家/识图」三大模式，只留
         # 「深度思考 / 智能搜索」两个开关，且默认状态即账号上次的选择。
-        # 驱动不再做任何模式/开关切换（setup() 空操作），一律用默认态。
+        # 用户未保存站内选择时保持网页当前状态；能力检查读取实际模型菜单。
         # 生成完成检测
         "poll_interval": 4,        # 轮询间隔（秒）
         "stable_count": 2,         # 文本长度连续 N 轮不变 → 完成
@@ -140,15 +140,11 @@ WEB_DRIVERS = {
         "consecutive_fail_threshold": 2,     # 连续失败 N 次后重置该 slot 的会话
         "scan_interval": 2,                  # 主循环每轮扫描间隔（秒）
     },
-    # 豆包网页版（www.doubao.com/chat/）。用户诉求：网页端模式只用一个
-    # 默认模型「豆包快速」。selectors 基于 DeepSeek 同构做法给出候选，
-    # 待用户提供实测页面后校准（python -m web_drivers.doubao --probe）。
+    # 豆包网页版：模型与模式由能力检查发现，按网站分别保存用户选择。
     "Doubao": {
         "url": "https://www.doubao.com/chat/",
         "label": "豆包",
         "description": "日常中文写作与改写",
-        "model": "doubao_quick",    # 只使用默认「豆包快速」（用户约定）
-        "model_label": "豆包快速",
         # 生成完成检测（与 DeepSeek 同构，先按通用参数，实测后按需调整）
         "poll_interval": 4,
         "stable_count": 2,
@@ -184,6 +180,12 @@ WEB_DRIVERS = {
         "label": "智谱清言",
         "description": "提纲、文案与结构化写作",
         "poll_interval": 2, "stable_count": 2, "max_wait": 600,
+        "parallel_tabs": 1, "consecutive_fail_threshold": 2, "scan_interval": 2,
+    },
+    "Aizex": {
+        "url": "https://aizex.net/plusPool",
+        "label": "Aizex 中转站", "description": "中转站积分模型，先登录并一键使用",
+        "poll_interval": 2, "stable_count": 2, "max_wait": 900,
         "parallel_tabs": 1, "consecutive_fail_threshold": 2, "scan_interval": 2,
     },
 }

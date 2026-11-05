@@ -87,7 +87,7 @@ class ParallelWebRunner:
     def setup(self):
         """初始化：每 slot 一个独立 driver 实例并打开全新对话。"""
         from web_drivers import create_driver
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
 
         log.info("=" * 60)
         log.info("Web 并行模式启动：%d 个页面，失败阈值 %d，扫描间隔 %ds",
@@ -103,7 +103,7 @@ class ParallelWebRunner:
             try:
                 drv.new_chat()
                 drv.setup()
-            except WebLoginRequired:
+            except (WebInteractionError, WorkflowCancelled):
                 raise
             except Exception as exc:
                 # 初始化失败不中断：派发时走失败路径自愈
@@ -206,9 +206,11 @@ class ParallelWebRunner:
         同步但快速（约 1-3s，期间其他 slot 在浏览器后台继续生成）；
         绝不调用阻塞的 wait_complete。
         """
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
         drv = slot.driver
         try:
+            if continue_session:
+                drv.setup()
             if continue_session:
                 # 复用当前会话继续提问：不重置历史、不新开窗口
                 log.info("[Slot %d] 同会话继续提问（窗口复用）", slot.slot_id)
@@ -222,7 +224,7 @@ class ParallelWebRunner:
                 if hasattr(drv, "_mark_session_used"):
                     drv._mark_session_used(prompt)
                 drv.send()
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             raise
         except Exception as exc:
             log.error("[Slot %d] 派发异常：%s", slot.slot_id, exc)
@@ -240,6 +242,7 @@ class ParallelWebRunner:
         slot.pending_readback = None
         slot.body_started = False
         slot.start_time = time.time()
+        drv.reset_generation_poll()
         log.info("[Slot %d] → 派发任务 %d（%s）", slot.slot_id,
                  slot.task_idx, slot.task_title or "")
         return True
@@ -259,77 +262,24 @@ class ParallelWebRunner:
         check_login = getattr(drv, "_raise_if_logged_out", None)
         if callable(check_login):
             check_login()
-        # 2026-09 改版：优先用驱动的新回复探针（_read_probe 只读「本次
-        # 发送之后的新消息」，避免虚拟列表里读到上一轮旧回复）；老驱动/
-        # 单测假驱动（FakeDriver）没有该接口时退回旧的两个原语
-        probe = drv._read_probe() if hasattr(drv, "_read_probe") else None
-        if isinstance(probe, dict):
-            cur_len = len(probe.get("main") or "")
-            think_len = int(probe.get("think_len") or 0)
-        else:
-            cur_len = (drv._current_reply_len()
-                       if hasattr(drv, "_current_reply_len") else 0)
-            # 思考阶段心跳（与 deepseek.py:wait_complete 同构；无 _think_len
-            # 的驱动/假驱动兜底为 0，行为退化为纯正文心跳）
-            think_len = drv._think_len() if hasattr(drv, "_think_len") else 0
-        if drv._stop_button_present():
-            slot.stop_seen = True
-        elif slot.stop_seen:
-            log.info("[Slot %d] 停止按钮已消失，生成完成（%.1fs，%d 字符）",
-                     slot.slot_id, time.time() - slot.start_time, cur_len)
+        snapshot = drv.poll_generation(max_wait=cfg.get("max_wait"))
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("poll_generation() must return a snapshot")
+        state = snapshot.get("state")
+        if state == "completed":
             return "DONE"
-        if cur_len != slot.last_len:
-            slot.stable = 0
-            slot.last_len = cur_len
-            slot.pending_readback = None  # 长度变化 → 挂起的验证作废
-            if cur_len:
-                slot.body_started = True
-                log.info("[Slot %d] 故事生成中… 已生成 %d 字",
-                         slot.slot_id, cur_len)
-        elif not slot.body_started and think_len != slot.last_think:
-            slot.stable = 0
-            slot.last_think = think_len
-            if think_len:
-                log.info("[Slot %d] 模型思考中… 已思考 %d 字符",
-                         slot.slot_id, think_len)
-        else:
-            slot.stable += 1
-        if slot.stable >= cfg.get("stable_count", 2) and cur_len:
-            # read-back 验证（与 deepseek.py:wait_complete 同构）：LLM
-            # 流式输出可能中途停顿 >8s（长 JSON 间歇），稳定判定可能是
-            # 暂停而非完成——连续 2 轮重读长度不变才判定完成
-            if slot.pending_readback is None:
-                slot.pending_readback = (cur_len, 0)
-                return "CONTINUING"
-            exp_len, rounds = slot.pending_readback
-            if cur_len != exp_len:
-                log.info("[Slot %d] 稳定判定后输出仍增长（%d→%d），继续等待",
-                         slot.slot_id, exp_len, cur_len)
-                slot.pending_readback = None
-                slot.stable = 0
-                slot.last_len = cur_len
-                return "CONTINUING"
-            if rounds >= 1:
-                slot.pending_readback = None
-                log.info("[Slot %d] 文本稳定 %d 轮，判定完成"
-                         "（%.1fs，%d 字符）",
-                         slot.slot_id, cfg.get("stable_count", 2),
-                         time.time() - slot.start_time, cur_len)
-                return "DONE"
-            slot.pending_readback = (exp_len, rounds + 1)
-            return "CONTINUING"
-        if time.time() - slot.start_time > cfg.get("max_wait", 600):
-            log.warning("[Slot %d] 生成超时（%ds），重置会话",
-                        slot.slot_id, cfg.get("max_wait", 600))
+        if state == "failed":
             return "TIMEOUT"
-        return "CONTINUING"
+        if state in {"waiting", "thinking", "generating"}:
+            return "CONTINUING"
+        raise RuntimeError("未知生成状态：%s" % state)
 
     def _collect(self, slot):
         """读取该 slot 的最终回复（read_result 是一次快速 evaluate）。"""
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
         try:
             return slot.driver.read_result()
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             raise
         except Exception as exc:
             log.error("[Slot %d] 读取结果失败：%s", slot.slot_id, exc)
@@ -365,14 +315,14 @@ class ParallelWebRunner:
     def _replace_slot(self, slot):
         """损坏的 slot 用新窗口（新标签页）补位，继续服务队列任务。"""
         from web_drivers import create_driver
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
         log.warning("[Slot %d] 页面损坏，开新窗口补位（当前 %d/上限 %d）",
                     slot.slot_id, len(self.slots), _MAX_SLOTS)
         try:
             drv = create_driver()
             drv.new_chat()
             drv.setup()
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             try:
                 drv.close_session()
             except Exception:
@@ -400,7 +350,7 @@ class ParallelWebRunner:
 
     def _do_reset(self, slot):
         """重建 slot 会话（对应旧版「关 tab 重建」）。"""
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
         drv = slot.driver
         try:
             drv.delete_current_session()
@@ -417,7 +367,7 @@ class ParallelWebRunner:
             slot.last_session = None
             slot.consecutive_fails = 0
             slot.reset_fails = 0
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             raise
         except Exception as exc:
             slot.reset_fails += 1

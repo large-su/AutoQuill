@@ -293,6 +293,13 @@ class TestValidateStoryFormat(unittest.TestCase):
 
 
 class TestParseScoreJson(unittest.TestCase):
+    def test_valid_json_with_natural_score_and_followup_text(self):
+        payload = json.dumps([{"index": 1, "hook": 8, "natural": 9,
+                               "total": 45, "comment": "有说服力"}], ensure_ascii=False)
+        out = parse_score_json(payload + "\n需要我提供修改建议吗？", 1)
+        self.assertEqual(out[0]["natural"], 9)
+        self.assertEqual(out[0]["total"], 45)
+
     def test_valid_json_list(self):
         payload = json.dumps([{"index": 1, "hook": 8, "plot": 7, "emotion": 6,
                                "authenticity": 5, "ending": 9, "format": 8,

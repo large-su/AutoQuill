@@ -14,6 +14,7 @@ _SITES = {
     "Qianwen": ("www.qianwen.com", "qianwen.com"),
     "Yuanbao": ("yuanbao.tencent.com",),
     "ChatGLM": ("chatglm.cn",),
+    "Aizex": ("aizex.net",),
 }
 _MESSAGES = {
     "ready": "已登录，聊天界面可用",
@@ -35,7 +36,8 @@ _STATE_JS = r"""(name) => {
         Kimi: '.chat-input-editor[contenteditable="true"]',
         Qianwen: '[data-slate-editor="true"][contenteditable="true"]',
         Yuanbao: '.ql-editor[contenteditable="true"]',
-        ChatGLM: 'textarea.scroll-display-none,textarea'
+        ChatGLM: 'textarea.scroll-display-none,textarea',
+        Aizex: '#prompt-textarea'
     };
     const composer = [...document.querySelectorAll(inputs[name] || 'textarea')]
         .some(e => visible(e) && !e.disabled && !e.readOnly);
@@ -52,7 +54,7 @@ _STATE_JS = r"""(name) => {
     const restricted = (name === 'ChatGLM' && any('.ban-container')) ||
         /(?:账号|账户|帐号).{0,18}(?:封禁|封停|封号|禁用|限制使用|禁止使用|暂停服务)|(?:account).{0,30}(?:banned|suspended|disabled)/i.test(notices);
     const challenge = any('iframe[src*="captcha"],iframe[src*="challenge"],#challenge-running,.tcaptcha-popup,.secsdk-captcha-drag-wrapper') ||
-        /^(Just a moment|安全验证|人机验证)/i.test(document.title);
+        /^(Just a moment|安全验证|人机验证|滑动验证|滑块验证|访问验证)/i.test(document.title);
     let credential = false;
     if (name === 'DeepSeek') {
         try { const t = JSON.parse(localStorage.getItem('userToken') || 'null');
@@ -72,6 +74,9 @@ _STATE_JS = r"""(name) => {
         const nick = document.querySelector('.nick-info-name');
         account = account || !!(visible(nick) && (nick.innerText || '').trim() &&
             !/未登录|登录/.test(nick.innerText));
+    }
+    if (name === 'Aizex') {
+        account = account || any('[data-testid="accounts-profile-button"]');
     }
     return {composer, login, account, restricted, challenge, credential};
 }"""
@@ -132,7 +137,11 @@ def inspect_account(name, context, page):
     """Inspect an already-open page without navigation or changing selection."""
     _validate(name)
     url = urlsplit(page.url if isinstance(page.url, str) else "")
-    if url.scheme != "https" or url.netloc not in _SITES[name]:
+    allowed = url.scheme == "https" and url.netloc in _SITES[name]
+    if name == "Aizex":
+        from web_drivers.aizex import is_chat_url
+        allowed = is_chat_url(page.url)
+    if not allowed:
         return remember_status(name, "unknown")
     observer = getattr(page, "_aq_account_observer", None)
     if observer:
@@ -161,7 +170,7 @@ def inspect_account(name, context, page):
     return remember_status(name, "unknown")
 
 
-def _visit(name, login, timeout):
+def _visit(name, login, timeout, discover=False):
     url = _validate(name)
     if pool.profile_in_use() or pool.live_browsers() or not pool._browser_lock.acquire(blocking=False):
         return remember_status(name, "busy")
@@ -175,9 +184,17 @@ def _visit(name, login, timeout):
             try:
                 from playwright.sync_api import TimeoutError as NavigationTimeout
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    if name != "Aizex":
+                        page.goto(url, wait_until="domcontentloaded", timeout=20000)
                 except NavigationTimeout:
                     pass  # A usable SPA may render before navigation finishes.
+                if name == "Aizex":
+                    from web_drivers.aizex import enter_chat
+                    chat = enter_chat(browser.context, page, login=login,
+                                      timeout=timeout if login else 10)
+                    if chat is not page:
+                        page.close()
+                        page = chat
                 deadline = time.monotonic() + timeout
                 result = get_account_status(name)
                 while time.monotonic() < deadline:
@@ -186,6 +203,11 @@ def _visit(name, login, timeout):
                     if result["status"] in ("ready", "restricted"):
                         if login and result["status"] == "ready":
                             browser.save_storage_state()
+                        if discover and result["status"] == "ready":
+                            from web_drivers.capabilities import refresh_capabilities
+                            result["capabilities"] = refresh_capabilities(name, page)
+                            with _lock:
+                                _states[name] = dict(result)
                         return result
                     if not login and result["status"] in ("logged_out", "challenge"):
                         return result
@@ -197,6 +219,8 @@ def _visit(name, login, timeout):
         raise
     except pool.ProfileBusy:
         return remember_status(name, "busy")
+    except pool.WebLoginRequired as exc:
+        return remember_status(name, "logged_out", str(exc))
     except Exception:
         # Browser errors can include page content/URLs. Keep status messages static.
         return remember_status(name, "unknown")
@@ -204,21 +228,23 @@ def _visit(name, login, timeout):
         pool._browser_lock.release()
 
 
-def check_account(name):
-    return _visit(name, login=False, timeout=8)
+def check_account(name, refresh=True):
+    return _visit(name, login=False, timeout=8, discover=refresh)
 
 
 def login_account(name, timeout=300):
-    result = _visit(name, login=True, timeout=timeout)
+    result = _visit(name, login=True, timeout=timeout, discover=True)
     return result["status"] == "ready", result["message"]
 
 
 def logged_in(name):
-    result = check_account(name)
+    result = check_account(name, refresh=False)
     if result["status"] == "ready":
         return True
     if result["status"] == "logged_out":
         return False
     if result["status"] == "restricted":
         raise pool.WebAccountRestricted(result["message"])
+    if result["status"] == "challenge":
+        raise pool.WebVerificationRequired(result["message"])
     raise pool.WebLoginCheckError(result["message"])

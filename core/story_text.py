@@ -754,12 +754,9 @@ def parse_score_json(reply_text, expected_count):
     解析评分 JSON，优先直解，失败后用正则逐个提取对象。
     返回解析出的评分列表 [{index, hook, plot, ...}, ...]
     """
-    try:
-        scores = json.loads(reply_text)
-        if isinstance(scores, list) and len(scores) > 0:
-            return scores
-    except json.JSONDecodeError:
-        pass
+    scores = extract_json_block(reply_text)
+    if isinstance(scores, list) and scores:
+        return scores
 
     # 正则回退：逐个提取 {"index": N, ...} 对象
     scores = []

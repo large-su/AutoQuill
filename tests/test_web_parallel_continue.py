@@ -41,6 +41,12 @@ class FakeDriver:
 
     def _think_len(self): return 0
 
+    def reset_generation_poll(self): pass
+
+    def poll_generation(self, max_wait=None):
+        return {"state": "completed" if self.turn else "waiting",
+                "text": self.produce if self.turn else ""}
+
     def read_result(self): return self.produce
 
     def close_session(self): self.closed += 1

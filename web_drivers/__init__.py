@@ -21,6 +21,7 @@ _DRIVER_REGISTRY = {
     "Qianwen": ("web_drivers.qianwen", "QianwenDriver"),
     "Yuanbao": ("web_drivers.yuanbao", "YuanbaoDriver"),
     "ChatGLM": ("web_drivers.chatglm", "ChatGLMDriver"),
+    "Aizex": ("web_drivers.aizex", "AizexDriver"),
 }
 
 

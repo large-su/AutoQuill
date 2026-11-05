@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 |---|---|
-| **适用版本** | v5.0.6 之后的验证与发布流程 |
-| **最后更新** | 2026-10-16 |
+| **适用版本** | v5.11.0 起 |
+| **最后更新** | 2026-11-05 |
 | **状态** | 活跃 |
 | **说明** | 测试、校验、打包脚本清单与发布前检查清单 |
 
@@ -22,6 +22,16 @@
 | `tools/archive/probes/` | 历史一次性探查脚本（已归档，只读参考）。其中 `probe_markdown_rebuild.py` 是逐块重建 markdown 的**合成 DOM 真机验证**（不登录不联网，改 walker 后跑一次）；`spike_tray.py` 是 M4 托盘常驻的真机验证（**直接跑生产代码** `launcher.TrayController` + 本地假 API，15 项检查） | 浏览器 DOM / 托盘排查时的历史参考 | `python tools/archive/probes/probe_markdown_rebuild.py`<br>`python tools/archive/probes/spike_tray.py` |
 
 ## 二、推荐工作流（按场景）
+
+### 网页模型与真实验收
+
+```bash
+python -m unittest tests.test_web_capabilities tests.test_web_preferences_routes tests.test_web_generation_contract tests.test_web_generation_watchdog
+python -m unittest tests.test_aizex_driver tests.test_aizex_options tests.test_qianwen_long_input tests.test_web_session_lifecycle
+python tools/test_web_workflows.py --help
+```
+
+真实验收必须使用独立 `--data-dir` 与 profile；支持 `classic`、`clean`、`interactions`、`business`、`generation`、`--checks`、`--visible`、`--human-verify`。classic 只写知乎草稿，不公开发布、不覆盖已有草稿。记录 provider、模型路径 ID、强度、workflow、版本、cleanup 和日志路径；官方五家 classic/business 六项与 clean/parallel 的状态以 `logs/web-workflows-runtime/logs`、`web-acceptance-lane-b/logs` 为准。DS 账号受限时跳过真实测试但保留回归；进行中的 Aizex 组合不写成通过。
 
 ### 日常改代码
 ```bash

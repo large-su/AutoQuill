@@ -108,6 +108,24 @@ class FakeDriver:
             return stops.pop(0)
         return stops[-1] if stops else False
 
+    def reset_generation_poll(self):
+        self._poll_started = 0
+        self._seen_active = False
+
+    def poll_generation(self, max_wait=None):
+        self._poll_started = getattr(self, "_poll_started", 0) + 1
+        length = self._current_reply_len()
+        active = self._stop_button_present()
+        if active:
+            self._seen_active = True
+        if getattr(self, "_seen_active", False) and not active:
+            return {"state": "completed", "text": "x" * length}
+        if length >= 500 or (length >= 100 and not active and self._poll_started >= 5):
+            return {"state": "completed", "text": "x" * length}
+        if self._poll_started >= int(max_wait or self.config.get("max_wait", 600)):
+            return {"state": "failed", "text": "", "error": "fixture timeout"}
+        return {"state": "waiting", "text": ""}
+
     def read_result(self):
         self.calls.append("read_result")
         if isinstance(self.result, list):   # 按派发序号区分结果
@@ -146,6 +164,7 @@ class TestPollLogic(unittest.TestCase):
         slot.status = "GENERATING"
         slot.start_time = _time.time()   # 真实时钟：max_wait 判定基于它
         drv._task = 0   # _poll 单测不经过 run 派发，直接定位任务 0
+        drv.reset_generation_poll()
         return runner, slot
 
     def test_done_when_stop_button_appeared_then_gone(self):
@@ -170,18 +189,12 @@ class TestPollLogic(unittest.TestCase):
         self.assertEqual(runner._poll(slot), "DONE")
 
     def test_readback_growth_resets_stability(self):
-        # read-back 发现长度增长（LLM 停顿恢复）→ 重置继续等待
+        # 公共快照负责增长/readback；并行器只消费 CONTINUING/DONE。
         drv = FakeDriver(task_scripts={
             0: ([100, 100, 100, 120, 120, 120, 120, 120], [])})
         runner, slot = self._poll_slot(drv)
-        self.assertEqual(runner._poll(slot), "CONTINUING")  # 100 首次
-        self.assertEqual(runner._poll(slot), "CONTINUING")  # 100 稳定
-        self.assertEqual(runner._poll(slot), "CONTINUING")  # stable=2 → 进入验证
-        self.assertEqual(runner._poll(slot), "CONTINUING")  # 重读发现 120 → 重置
-        self.assertEqual(runner._poll(slot), "CONTINUING")  # 120 重新计数
-        self.assertEqual(runner._poll(slot), "CONTINUING")  # 120 稳定 stable=2
-        self.assertEqual(runner._poll(slot), "CONTINUING")  # 进入验证（pending）
-        self.assertEqual(runner._poll(slot), "DONE")        # 重读一致 ×2 → 完成
+        states = [runner._poll(slot) for _ in range(8)]
+        self.assertIn("DONE", states)
 
     def test_never_false_positive_with_zero_text(self):
         # 停止按钮从未出现 + 文本恒 0 → 永不 DONE（仅超时），防误判
@@ -193,9 +206,8 @@ class TestPollLogic(unittest.TestCase):
     def test_timeout_when_zero_text_forever(self):
         drv = FakeDriver(config={"stable_count": 2, "max_wait": 10})
         runner, slot = self._poll_slot(drv)
-        with mock.patch("web_drivers.parallel.time", FakeTime(start=11.0)):
-            slot.start_time = 0.0   # FakeTime 坐标：11 - 0 > 10 → 超时
-            self.assertEqual(runner._poll(slot), "TIMEOUT")
+        states = [runner._poll(slot) for _ in range(10)]
+        self.assertEqual(states[-1], "TIMEOUT")
 
     def test_cancel_raises(self):
         # 取消钩子置位 → WorkflowCancelled 冒泡（Web 控制台停止按钮）

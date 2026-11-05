@@ -190,7 +190,8 @@ class TaskRunner:
                        "watchdog_stop": threading.Event(), "timeout": None}
         from web_drivers.browser_pool import (WorkflowCancelled, WebLoginRequired,
                                               WebAccountRestricted,
-                                              cancellation_scope, _check_cancel)
+                                              cancellation_scope, _check_cancel,
+                                              generation_activity_scope, WebVerificationRequired)
         terminal = None
         _orig_input = builtins.input
         watchdog = None
@@ -202,7 +203,19 @@ class TaskRunner:
                 return (f"任务超时：{control['timeout']}"
                         if control["timeout"] else control["stop"].is_set())
 
-            with cancellation_scope(_run_cancel_reason):
+            def _observe_generation(driver_id, snapshot):
+                # The browser thread publishes plain facts; the watchdog never
+                # calls Playwright or creates a driver in its own thread.
+                with self._lock:
+                    generations = control.setdefault("generations", {})
+                    if snapshot["state"] in ("completed", "failed"):
+                        generations.pop(driver_id, None)
+                    else:
+                        generations[driver_id] = {
+                            k: snapshot[k] for k in ("state", "at", "deadline")}
+                    control["last_generation_check"] = snapshot["at"]
+
+            with cancellation_scope(_run_cancel_reason), generation_activity_scope(_observe_generation):
                 _check_cancel()
                 # 防卡死：workflow 内部有阻塞 input()（base.py:98 API 失败回退、
                 # zhihu.py:204 手动选题编号），Web 运行一律给默认值
@@ -222,12 +235,19 @@ class TaskRunner:
                                  "profile", "general_profile"):
                     from config import LLM_MODE, WEB_DRIVER_NAME
                     if LLM_MODE == "web":
+                        from web_drivers.capabilities import get_provider_settings
+                        selected = get_provider_settings(WEB_DRIVER_NAME)["selection"]
+                        log.info("本次网页模型：%s / %s / %s", WEB_DRIVER_NAME,
+                                 selected.get("model") or "网页当前模型",
+                                 selected.get("options") or {})
                         from web_drivers import reset_driver, web_llm_logged_in
                         from web_drivers.browser_pool import WebLoginCheckError
                         reset_driver()
                         _check_cancel()
                         try:
                             logged_in = web_llm_logged_in()
+                        except WebVerificationRequired as exc:
+                            raise _RunTerminal("error", str(exc), guide="web_verification") from exc
                         except WebLoginCheckError as exc:
                             _check_cancel()
                             raise _RunTerminal(
@@ -262,6 +282,8 @@ class TaskRunner:
         except WebAccountRestricted as exc:
             terminal = ("error", f"{exc}。任务已停止，未继续生成或发布",
                         "web_account_restricted")
+        except WebVerificationRequired as exc:
+            terminal = ("error", f"{exc}。请完成网页验证后重新运行", "web_verification")
         except WebLoginRequired as exc:
             terminal = (
                 "error",
@@ -298,7 +320,7 @@ class TaskRunner:
 
     def _dispatch(self, spec: _RunSpec):
         from workflows.zhihu import ZhihuWorkflow
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebLoginRequired, WebVerificationRequired
 
         wf = ZhihuWorkflow()
         mode = spec.mode
@@ -374,7 +396,7 @@ class TaskRunner:
                     if wf.run_clean(on_extracted=_on_clean_extracted,
                                     on_story=_on_clean_story):
                         success += 1
-                except WebLoginRequired:
+                except (WebLoginRequired, WebVerificationRequired):
                     raise
                 except Exception as exc:
                     last_error = exc
@@ -427,7 +449,7 @@ class TaskRunner:
                     if wf.run_single(on_extracted=_on_extracted,
                                      on_story=_on_story):
                         success += 1
-                except WebLoginRequired:
+                except (WebLoginRequired, WebVerificationRequired):
                     raise
                 except Exception as exc:
                     last_error = exc
@@ -548,6 +570,7 @@ class TaskRunner:
         overall = OVERALL_LIMIT_BATCH if (spec.mode == "batch" or multi_round) \
             else OVERALL_LIMIT
         deadline = time.time() + overall
+        last_tick = time.time()
         # 文风提炼是一次性 LLM 剖析（非流式），调用期间无日志，
         # 单独放宽卡死阈值（剖析请求最长可达 10 分钟）
         stall = STALL_LIMIT * 3 if spec.mode in ("profile", "general_profile") \
@@ -561,14 +584,32 @@ class TaskRunner:
                 if (control.get("id") is not None
                         and self._active_control is not control):
                     return
-            age = time.time() - _last_log_ts[0]
+            now = time.time()
+            with self._lock:
+                generations = list(control.get("generations", {}).values())
+                checked_at = control.get("last_generation_check", 0)
+            if any(now > sample["deadline"] for sample in generations):
+                control["timeout"] = "网页模型超过本轮生成等待期限"
+                control["stop"].set()
+                return
+            if any(now - sample["at"] > stall for sample in generations):
+                control["timeout"] = "网页生成状态长时间未更新，浏览器可能已失去响应"
+                control["stop"].set()
+                return
+            # Every generation has its own bounded deadline. Healthy browser
+            # observations suspend the generic task wall-clock budget, allowing
+            # valid thinking/retry turns without an unrelated 900s cutoff.
+            if generations:
+                deadline += max(0, now - last_tick)
+            last_tick = now
+            age = now - max(_last_log_ts[0], checked_at)
             if age > stall:
                 log.warning("watchdog：日志 %.0fs 无进展，判定卡死并中断（非用户操作）",
                             age)
                 control["timeout"] = f"日志 {age:.0f}s 无进展，已判定卡死"
                 control["stop"].set()  # scoped cancel checker observes it
                 return
-            if time.time() > deadline:
+            if now > deadline:
                 log.warning("watchdog：总时长超 %.0fs（非用户操作），强制中断", overall)
                 control["timeout"] = f"总时长超 {overall:.0f}s"
                 control["stop"].set()

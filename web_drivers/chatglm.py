@@ -13,6 +13,8 @@ class ChatGLMDriver(ConfiguredTextChatDriver):
     stop_selectors = ("#search-input-box .enter.searching .enter-icon-container",)
     thinking_selectors = (".advance-thinking",)
     done_selectors = (".interact .shim.copy.canuse",)
+    copy_selectors = (".interact .shim.copy.canuse",)
+    copy_owner_selector = ".answer"
 
 
 def web_llm_logged_in(): return generic_logged_in("ChatGLM", WEB_DRIVERS["ChatGLM"])

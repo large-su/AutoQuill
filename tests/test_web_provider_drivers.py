@@ -130,6 +130,12 @@ class ProviderDOMTests(unittest.TestCase):
         self.account.stop()
         self.context.close()
 
+    def test_input_truncation_is_detected_before_send(self):
+        self.page.set_content('<textarea oninput="this.value=this.value.slice(0,5)"></textarea>')
+        self.driver.input_selectors = ('textarea',)
+        with self.assertRaisesRegex(RuntimeError, "输入未完整写入"):
+            self.driver.input('这段提示必须完整输入')
+
     def test_real_js_excludes_old_reply_and_thought_and_preserves_heading(self):
         self.page.set_content('<div class="assistant"><p>旧回答</p></div>')
         self.driver._mark_reply_anchor()
@@ -168,6 +174,13 @@ class ProviderDOMTests(unittest.TestCase):
         self.assertTrue(self.driver.wait_complete(max_wait=1))
         self.assertEqual(self.driver.read_result(), "新答案")
 
+    def test_visible_selector_skips_offscreen_duplicate(self):
+        self.page.set_content('''
+          <button class="new" style="position:absolute;left:-1000px">旧入口</button>
+          <button class="new">可用入口</button>''')
+        selected = self.driver._visible_selector(("button.new",))
+        self.assertEqual(selected, "button.new >> nth=1")
+
     def test_stable_partial_reply_with_stop_remains_incomplete(self):
         self.page.set_content('<button id="stop">停止</button>')
         self.driver._mark_reply_anchor()
@@ -196,6 +209,22 @@ class ProviderDOMTests(unittest.TestCase):
     def test_cannot_read_history_without_send_anchor(self):
         self.page.set_content('<div class="assistant"><p>旧回答</p></div>')
         self.assertEqual(self.driver._new_reply_text(), "")
+
+    def test_raw_copy_preserves_json_and_restores_clipboard_function(self):
+        self.driver.copy_selectors = (".done",)
+        self.driver.copy_owner_selector = ".assistant"
+        self.page.set_content('<div class="assistant"><button class="done">旧复制</button></div>')
+        self.driver._mark_reply_anchor()
+        self.page.evaluate("""() => {
+          window.originalClipboardWrite=navigator.clipboard.writeText;
+          const reply=document.createElement('div');reply.className='assistant';
+          reply.innerHTML='<p>{“ok”:true}</p><button class="done">复制</button>';
+          reply.querySelector('button').onclick=()=>navigator.clipboard.writeText('{"ok":true}');
+          document.body.appendChild(reply);
+        }""")
+        self.assertEqual(self.driver._copy_current_reply(), '{"ok":true}')
+        self.assertTrue(self.page.evaluate("navigator.clipboard.writeText===window.originalClipboardWrite"))
+        self.assertIsNone(self.page.evaluate("window.__aqCopyCapture"))
 
     def test_account_dom_does_not_treat_story_about_bans_as_account_restriction(self):
         from web_drivers.account_status import _STATE_JS

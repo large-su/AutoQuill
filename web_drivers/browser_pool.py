@@ -31,7 +31,11 @@ class WorkflowCancelled(Exception):
     """用户取消操作（Web 控制台「停止」按钮）。"""
 
 
-class WebLoginRequired(RuntimeError):
+class WebInteractionError(RuntimeError):
+    """An explicit website state that callers must not replace with a fallback."""
+
+
+class WebLoginRequired(WebInteractionError):
     """网站明确要求重新登录；不得当作生成失败重试或切换 API。"""
 
 
@@ -43,6 +47,7 @@ _cancel_hook = None
 _cleanup_active = ContextVar("web_session_cleanup", default=False)
 _cancel_scope_unset = object()
 _cancel_scope_hook = ContextVar("web_cancel_scope", default=_cancel_scope_unset)
+_generation_activity = ContextVar("web_generation_activity", default=None)
 
 
 @contextmanager
@@ -57,6 +62,27 @@ def cancellation_scope(fn):
         yield
     finally:
         _cancel_scope_hook.reset(token)
+
+
+@contextmanager
+def generation_activity_scope(callback):
+    """Publish plain generation snapshots to the owning task context.
+
+    ``callback`` must not call Playwright.  It normally copies the snapshot
+    into a task-control dictionary so a watchdog thread can read it safely.
+    """
+    token = _generation_activity.set(callback)
+    try:
+        yield
+    finally:
+        _generation_activity.reset(token)
+
+
+def publish_generation_activity(driver_id, snapshot):
+    """Send one already-sampled state to the current task observer."""
+    callback = _generation_activity.get()
+    if callback is not None:
+        callback(driver_id, dict(snapshot))
 
 
 @contextmanager
@@ -150,8 +176,20 @@ class ProfileBusy(RuntimeError):
     """浏览器 profile 正被其它实例独占（拿不到生命周期租约）。"""
 
 
-class WebLoginCheckError(RuntimeError):
+class WebLoginCheckError(WebInteractionError):
     """The browser could not determine login state; this is not a logout."""
+
+
+class WebVerificationRequired(WebLoginCheckError):
+    """The website explicitly requests interactive verification."""
+
+
+class WebModelUnavailable(WebInteractionError):
+    """The selected web model explicitly refused a request or has no capacity."""
+
+
+class WebResponseInterrupted(WebInteractionError):
+    """The website ended this response early; partial text is not a result."""
 
 
 def acquire_profile(timeout=0.0, purpose=""):

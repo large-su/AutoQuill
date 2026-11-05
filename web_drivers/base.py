@@ -18,6 +18,7 @@
 # ============================================================
 
 import logging
+import time
 
 log = logging.getLogger(__name__)
 
@@ -111,8 +112,7 @@ class WebLLMDriver:
         20s + 重试 35s（慢站点放宽），两次都失败才抛错。
         """
         from web_drivers.browser_pool import _check_cancel
-        from config import WEB_DRIVERS, WEB_DRIVER_NAME
-        url = WEB_DRIVERS[WEB_DRIVER_NAME]["url"]
+        url = self.config["url"]
         attempts = [(20000, "domcontentloaded"), (35000, "domcontentloaded")]
         page = self._page_instance()
         last_exc = None
@@ -275,6 +275,191 @@ class WebLLMDriver:
         """
         return None
 
+    # ---------------- generation observation ----------------
+
+    def reset_generation_poll(self):
+        """Forget the previous response sample before a newly sent prompt.
+
+        ``poll_generation`` is deliberately a small, site-neutral seam used by
+        both the blocking driver path and the parallel scheduler.  Concrete
+        drivers provide DOM facts; this method owns only the transition from
+        those facts to a stable public state.
+        """
+        self._generation_poll = {
+            "started_at": time.time(), "previous": "", "previous_thinking": 0, "stable": 0,
+            "stop_seen": False,
+        }
+        self._last_generation_status = None
+
+    def active_generation_status(self):
+        """Return the latest sampled generation state for a watchdog.
+
+        This is intentionally read-only and does not touch Playwright.  A
+        watchdog can distinguish a live browser poll from real model progress
+        by inspecting ``progressed`` and the text/thinking sizes.
+        """
+        status = getattr(self, "_last_generation_status", None)
+        return dict(status) if status else None
+
+    def _remember_generation_status(self, snapshot):
+        self._last_generation_status = dict(snapshot)
+        return snapshot
+
+    def _generation_probe(self):
+        """Return current DOM facts for the active reply.
+
+        Adapters may override this with stronger site evidence.  The legacy
+        DeepSeek hooks are intentionally recognized here so old adapters and
+        tests cross the same public seam during the migration.
+        """
+        probe = None
+        reader = getattr(self, "_read_probe", None)
+        if callable(reader):
+            probe = reader()
+        if isinstance(probe, dict):
+            text = probe.get("main") or probe.get("text") or ""
+            thinking = int(probe.get("think_len") or probe.get("thinking_chars") or 0)
+        else:
+            text, thinking = "", 0
+            reply = getattr(self, "_new_reply_text", None)
+            if callable(reply):
+                text = reply() or ""
+            elif hasattr(self, "_extract_reply_text"):
+                text = self._extract_reply_text() or ""
+        active = False
+        stop = getattr(self, "_stop_button_present", None)
+        if callable(stop):
+            active = bool(stop())
+        elif hasattr(self, "_stop_visible"):
+            active = bool(self._stop_visible())
+        elif hasattr(self, "_generating"):
+            active = bool(self._generating())
+        done = False
+        done_visible = getattr(self, "_done_visible", None)
+        if callable(done_visible):
+            done = bool(done_visible())
+        return {"text": str(text), "thinking_chars": thinking,
+                "generating": active, "done": done}
+
+    def _generation_completed(self, facts, tracker):
+        """Site-independent minimum completion proof.
+
+        A reply must be non-empty and the site must either expose an explicit
+        completed marker or have shown its generation control and then become
+        idle.  Text stability alone is deliberately not proof: a long reply
+        can pause between streamed chunks.
+        """
+        return bool(facts["text"]) and not facts["generating"] and (
+            facts["done"] or (tracker["stop_seen"] and not facts["generating"]))
+
+    def discover_capabilities(self):
+        """Read the provider's model menu on this already-open page."""
+        from web_drivers.site_options import discover_options
+        return discover_options(self.provider_name, self._page_instance())
+
+    def apply_preferences(self):
+        """Apply and confirm this provider's explicitly saved model/options."""
+        from web_drivers.capabilities import apply_selection
+        return apply_selection(self)
+
+    def poll_generation(self, max_wait=None):
+        """Sample the current reply without blocking.
+
+        Returns a provider-independent snapshot with states ``waiting``,
+        ``thinking``, ``generating``, ``completed`` or ``failed``.  A stable
+        reply alone never completes a turn while a site still reports active
+        generation.  This makes progress observable without treating a timer
+        heartbeat as proof that the model is advancing.
+        """
+        if not hasattr(self, "_generation_poll"):
+            self.reset_generation_poll()
+        tracker = self._generation_poll
+        now = time.time()
+        limit = float(max_wait or self.config.get("max_wait", 600))
+        facts = self._generation_probe() or {}
+        text = facts.get("text") or ""
+        thinking = int(facts.get("thinking_chars") or 0)
+        active = bool(facts.get("generating"))
+        done = bool(facts.get("done"))
+        tracker["stop_seen"] = tracker["stop_seen"] or active
+        progressed = (text != tracker["previous"]
+                      or thinking != tracker["previous_thinking"])
+        if progressed:
+            tracker["previous"] = text
+            tracker["previous_thinking"] = thinking
+            tracker["stable"] = 0
+        else:
+            tracker["stable"] += 1
+        facts.update(text=text, thinking_chars=thinking, generating=active, done=done)
+        completed = self._generation_completed(facts, tracker)
+        if completed:
+            state = "completed"
+        elif now - tracker["started_at"] >= limit:
+            state = "failed"
+        elif text:
+            state = "generating"
+        elif thinking or active:
+            state = "thinking"
+        else:
+            state = "waiting"
+        snapshot = {
+                "state": state, "text": text, "thinking_chars": thinking,
+                "error": (f"生成超时（{int(limit)}s）" if state == "failed" else None),
+                "progressed": progressed, "at": now,
+                "elapsed": now - tracker["started_at"]}
+        from web_drivers.browser_pool import publish_generation_activity
+        snapshot["driver_id"] = id(self)
+        snapshot["deadline"] = tracker["started_at"] + limit
+        if state == "completed":
+            self._completed = True
+        self._remember_generation_status(snapshot)
+        last_beat = tracker.get("last_beat", 0)
+        if progressed or state in ("completed", "failed") or now - last_beat >= 10:
+            if text and progressed:
+                log.info("故事生成中… 已生成 %d 字", len(text))
+            elif thinking and progressed:
+                log.info("模型思考中… 已思考 %d 字符", thinking)
+            else:
+                labels = {"waiting": "等待响应", "thinking": "思考中", "generating": "生成中",
+                          "completed": "生成完成", "failed": "生成失败"}
+                log.info("%s：%s，已用时 %.0fs，正文 %d 字，思考 %d 字符",
+                         getattr(self, "provider_name", type(self).__name__),
+                         labels[state], snapshot["elapsed"], len(text), thinking)
+            tracker["last_beat"] = now
+        publish_generation_activity(id(self), snapshot)
+        return snapshot
+
+    def wait_complete(self, max_wait=None):
+        """Blocking facade over the same public generation observer.
+
+        Drivers no longer maintain a second, subtly different completion loop.
+        ``poll_generation`` remains non-blocking for parallel callers.
+        """
+        from web_drivers.browser_pool import _check_cancel
+        self.reset_generation_poll()
+        interval = float(self.config.get("poll_interval", 2))
+        completed = False
+        try:
+            while True:
+                _check_cancel()
+                snapshot = self.poll_generation(max_wait=max_wait)
+                state = snapshot["state"]
+                if state == "completed":
+                    completed = True
+                    return True
+                if state == "failed":
+                    return False
+                self._page_instance().wait_for_timeout(int(interval * 1000))
+        finally:
+            # Terminal/cancelled waits must never leave stale "healthy"
+            # progress in a later task's watchdog view.
+            from web_drivers.browser_pool import publish_generation_activity
+            last = self.active_generation_status() or {}
+            if not completed and last.get("state") not in {"failed"}:
+                last = dict(last, state="failed", error="生成等待已中止", at=time.time(),
+                            driver_id=id(self))
+            publish_generation_activity(id(self), last)
+
     # ---------------- 有界页面交互 ----------------
 
     def _safe_evaluate(self, js, *args, timeout=_EVAL_TIMEOUT):
@@ -336,11 +521,14 @@ class WebLLMDriver:
         self._mark_session_broken()
         # 站点名/驱动模块按当前驱动动态给出（豆包/DeepSeek 共用本兜底，
         # 写死 DeepSeek 会把豆包故障指向错误文件）
-        from config import WEB_DRIVER_NAME
+        provider_name = getattr(self, "provider_name", None)
+        if not provider_name:
+            from config import WEB_DRIVER_NAME
+            provider_name = WEB_DRIVER_NAME
         from web_drivers import _DRIVER_REGISTRY
-        module_path = _DRIVER_REGISTRY.get(WEB_DRIVER_NAME, ("", ""))[0]
+        module_path = _DRIVER_REGISTRY.get(provider_name, ("", ""))[0]
         raise RuntimeError(
-            f"{hint}。{WEB_DRIVER_NAME} 前端可能改版，上方日志中的页面状态"
+            f"{hint}。{provider_name} 前端可能改版，上方日志中的页面状态"
             f"可协助修复 {module_path or 'web_drivers/*'}.py 选择器")
 
     # ---------------- 生命周期（子类实现） ----------------
@@ -354,13 +542,23 @@ class WebLLMDriver:
     def send(self):
         raise NotImplementedError
 
-    def wait_complete(self, max_wait=None):
-        raise NotImplementedError
-
     def read_result(self):
         raise NotImplementedError
 
     def generate(self, prompt, reuse_session=True):
+        """Generate a complete answer, retrying one explicit interrupted turn."""
+        from web_drivers.browser_pool import WebResponseInterrupted
+        for attempt in range(2):
+            try:
+                return self._generate_once(prompt, reuse_session=reuse_session)
+            except WebResponseInterrupted:
+                self._mark_session_broken()
+                if attempt:
+                    raise
+                log.warning("%s 本轮响应中断，保留诊断内容并在原模型重试一次",
+                            getattr(self, 'provider_name', type(self).__name__))
+
+    def _generate_once(self, prompt, reuse_session=True):
         """完整生成流程（生命周期固定，子类复用）。
 
         reuse_session=True（默认）：若已有本驱动创建的健康会话，在
@@ -388,7 +586,7 @@ class WebLLMDriver:
             completed = self.wait_complete(max_wait=self.config.get("max_wait"))
             if not completed:
                 self._mark_session_broken()
-                log.warning("web_drivers: 生成未在期限内完成，会话标记损坏")
+                raise RuntimeError("网页模型生成未在期限内完成，未采用部分回复")
             self._refresh_session_id()
             self._after_wait_before_read()
             return self.read_result()

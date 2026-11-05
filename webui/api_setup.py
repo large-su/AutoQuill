@@ -422,10 +422,14 @@ def api_setup_web_account_check(spec: _WebAccountSpec):
             _web_llm_cache[spec.name] = {
                 "ts": time.time(), "ok": observed == "ready"}
             _web_llm_check_errors.pop(spec.name, None)
-    return {"provider": spec.name,
-            "status": result.get("status", "unknown"),
-            "message": result.get("message", ""),
-            "checked_at": result.get("checked_at", checked_at)}
+    response = dict(result or {})
+    response.setdefault("provider", spec.name)
+    response.setdefault("status", "unknown")
+    response.setdefault("message", "")
+    response.setdefault("checked_at", checked_at)
+    # Account status and capability discovery are separate facts. The driver
+    # may attach a safe catalog/validation snapshot; preserve it for the UI.
+    return response
 
 
 # ============================================================

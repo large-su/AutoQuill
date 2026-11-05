@@ -657,7 +657,7 @@
           <div class="st-ctl">
             <span class="seg">
               <label class="seg-opt"><input type="radio" name="genMode" value="api">API（付费，快）</label>
-              <label class="seg-opt"><input type="radio" name="genMode" value="web">Web 网页版（免费）</label>
+              <label class="seg-opt"><input type="radio" name="genMode" value="web">Web 网页版（按网站额度）</label>
             </span>
           </div>
           <div class="st-d">未配置的通道首次切换时会弹出引导完成配置</div>
@@ -667,7 +667,12 @@
           <div class="st-ctl">
             <select id="webDriverSel"><option value="">（加载中…）</option></select>
           </div>
-          <div class="st-d">Web 通道用的网页端模型（豆包只使用「豆包快速」）</div>
+          <div class="st-d">先选择网站，再在下面选择该网站实际提供的模型和参数。</div>
+        </div>
+        <div class="st-row" id="webPreferenceRow" hidden>
+          <div class="st-k">站内模型与强度</div>
+          <div class="st-ctl" id="webPreferencesControls"></div>
+          <div class="st-d" id="webPreferencesHint">请先检查当前网站状态以发现可选模型。</div>
         </div>
         <div class="st-row" id="webDriverAccountsRow" hidden>
           <div class="st-k">网页版账号</div>

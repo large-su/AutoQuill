@@ -292,7 +292,7 @@ class BatchGenerationMixin:
         from llm_api import build_story_prompt, _load_author_profile_or_none
         from core.story_text import clean_story_output, fix_story_format
         from web_drivers.parallel import ParallelWebRunner
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
 
         num_slots = min(drv_cfg.get("parallel_tabs", 2), len(materials))
         threshold = drv_cfg.get("consecutive_fail_threshold", 2)
@@ -321,7 +321,7 @@ class BatchGenerationMixin:
         try:
             runner.setup()
             results = runner.run(tasks)
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             raise
         except Exception as e:
             log.error(f"并行运行器异常：{e}")
@@ -350,7 +350,7 @@ class BatchGenerationMixin:
     def _batch_generate_web_serial(self, materials):
         """Web 串行生成：每篇独立会话，篇内追问复用，篇末清理。"""
         from core.story_text import clean_story_output, fix_story_format
-        from web_drivers.browser_pool import WorkflowCancelled, WebLoginRequired
+        from web_drivers.browser_pool import WorkflowCancelled, WebInteractionError
 
         for i, mat in enumerate(materials):
             log.info(f"\n  Web 串行生成 {i+1}/{len(materials)}："
@@ -370,7 +370,7 @@ class BatchGenerationMixin:
                 else:
                     mat['story'] = None
                     log.warning("    ✗ 生成失败或过短")
-            except (WorkflowCancelled, WebLoginRequired):
+            except (WorkflowCancelled, WebInteractionError):
                 raise
             except Exception as e:
                 mat['story'] = None
@@ -487,7 +487,7 @@ class BatchGenerationMixin:
             clean_story_output, fix_story_format, validate_story_format
         )
         from web_drivers.parallel import ParallelWebRunner
-        from web_drivers.browser_pool import WebLoginRequired
+        from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
 
         num_slots = min(drv_cfg.get("parallel_tabs", 2), len(non_compliant))
         threshold = drv_cfg.get("consecutive_fail_threshold", 2)
@@ -514,7 +514,7 @@ class BatchGenerationMixin:
         try:
             runner.setup()
             results = runner.run(tasks)
-        except WebLoginRequired:
+        except (WebInteractionError, WorkflowCancelled):
             raise
         except Exception as e:
             log.error(f"并行重试运行器异常：{e}")
@@ -557,7 +557,7 @@ class BatchGenerationMixin:
         from core.story_text import (
             clean_story_output, fix_story_format, validate_story_format
         )
-        from web_drivers.browser_pool import WorkflowCancelled, WebLoginRequired
+        from web_drivers.browser_pool import WorkflowCancelled, WebInteractionError
 
         retried_ok = 0
         for mat in non_compliant:
@@ -586,7 +586,7 @@ class BatchGenerationMixin:
                         log.info(f"  ✓ 重试合规（{retry_fmt}/10）")
                     else:
                         log.info("  ✗ 重试仍不合规，标记废稿")
-            except (WorkflowCancelled, WebLoginRequired):
+            except (WorkflowCancelled, WebInteractionError):
                 raise
             except Exception as e:
                 log.error(f"  重试异常：{e}")

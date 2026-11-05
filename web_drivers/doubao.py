@@ -2,7 +2,7 @@
 # web_drivers/doubao.py — 豆包网页版驱动（DOM 语义化）
 #
 # 目标站点：https://www.doubao.com/chat/
-# 用户约定（2026-09）：网页端模式只用默认的「豆包快速」模型。
+# 模型在设置中按当前网页能力选择，未保存选择时沿用网页状态。
 #
 # ── 抓故事的完整路径（核心就这三件事）──────────────────────────
 #   1. 读：_msg_state() 一次 evaluate 拿全部事实
@@ -220,6 +220,7 @@ _INLINE_ASK_PROMPT = (
 
 
 class DoubaoDriver(WebLLMDriver):
+    provider_name = "Doubao"
     """豆包网页版（www.doubao.com/chat/）DOM 驱动。
 
     与 DeepSeek 同构生命周期；setup() 负责把模型选择到「豆包快速」。
@@ -295,23 +296,9 @@ class DoubaoDriver(WebLLMDriver):
             return False
 
     def setup(self):
-        """确认模型为「豆包快速」（用户约定：只用这一个，默认即是）。
-
-        正常情况什么都不做（豆包默认就是快速）；只有明确探到「未选中」
-        才点一下。日志走 DEBUG——每条链路都会调它，不值得占终端一行。
-        """
-        candidates = ("豆包 快速", "豆包快速", "快速")
-        for label in candidates:
-            if self._model_selected(label) is True:
-                log.debug("web_drivers[doubao]: 模型已是「%s」", label)
-                return self
-        for label in candidates:
-            if self._click_text(label):
-                log.info("web_drivers[doubao]: 已切换模型到「%s」", label)
-                self._page_instance().wait_for_timeout(800)
-                return self
-        log.warning("web_drivers[doubao]: 未找到「豆包快速」模型选项"
-                    "（前端改版？可 --probe 校准）")
+        """Apply the explicit per-site choice; keep the website state if unset."""
+        self._raise_if_unavailable()
+        self.apply_preferences()
         return self
 
     def _model_selected(self, label):
@@ -463,106 +450,34 @@ class DoubaoDriver(WebLLMDriver):
             except Exception:
                 return False
 
+
+    def _generation_probe(self):
+        text = self._extract_reply_text() or ""
+        card = self._delivery_card_present()
+        return {
+            "text": text,
+            "thinking_chars": 0,
+            "generating": self._generating(),
+            # A card is an explicit handoff to _after_wait_before_read; it is
+            # complete for the observer even though inline text is empty.
+            "done": bool(card),
+            "card": bool(card),
+        }
+
+    def _generation_completed(self, facts, tracker):
+        if facts.get("card") and not facts.get("generating"):
+            return tracker["stable"] >= int(self.config.get("stable_count", 2))
+        text = facts.get("text") or ""
+        if not text or facts.get("generating"):
+            return False
+        if reply_tail_is_chapter_heading(text):
+            log.warning("web_drivers[doubao]: 正文末尾仍停在章节标题（当前 %d 字，疑似只读到半截稿），继续等待…",
+                        len(text))
+            return False
+        return tracker["stable"] >= int(self.config.get("stable_count", 2))
+
     def wait_complete(self, max_wait=None):
-        """轮询等待生成完成：正文长度稳定 + UI 空闲（发送按钮恢复可用）。
-
-        完成判据（四条同时满足）：正文长度连续 stable_count 轮不变、
-        read-back 重读仍不变、豆包 UI 空闲（生成期间发送按钮 disabled）、
-        正文末尾不停在章节标题上（reply_tail_is_chapter_heading）。
-        第三条是 2026-09-09 补上的关键判据——文本稳定不等于生成结束；
-        第四条是 2026-09-19 补的残稿判据——那天的真实事故里前三条都成立，
-        但读到的是「引言 + 第 1 章正文 + 5 个空壳标题」的 597 字半截稿。
-
-        进度上报（与 DeepSeek 同构，webui/log_capture 解析成前端进度条）：
-        - 「故事生成中… 已生成 N 字」→ 百分比进度条
-        - 「任务进度：…」→ 阶段提示（等待响应 / 写作任务交付）
-        """
-        from web_drivers.browser_pool import _check_cancel
-        from config import WEB_DRIVERS, WEB_DRIVER_NAME
-        cfg = WEB_DRIVERS.get(WEB_DRIVER_NAME, {})
-        max_wait = max_wait or cfg.get("max_wait", 600)
-        poll_interval = cfg.get("poll_interval", 4)
-        stable_count = cfg.get("stable_count", 2)
-
-        deadline = time.time() + max_wait
-        last_len = 0
-        stable = 0
-        start = time.time()
-        wait_logged = False      # 「等待响应」阶段提示只打一次
-        card_logged = False      # 「写作任务交付」阶段提示只打一次
-        busy_logged = False      # 「仍在收尾」只提示一次，其余降 DEBUG
-        tail_logged = False      # 「末尾停在章节标题」只提示一次
-        tail_blocked = False     # 是否因残稿判据没敢判完成
-        while time.time() < deadline:
-            _check_cancel()
-            cur_len = len(self._extract_reply_text())
-            if cur_len != last_len:
-                stable = 0
-                last_len = cur_len
-                if cur_len:
-                    # 与 DeepSeek 同一文案：log_capture._PROGRESS_RE 据此
-                    # 推前端进度条（旧文案带「豆包」前缀不匹配 → 无进度条）
-                    log.info("故事生成中… 已生成 %d 字", cur_len)
-            else:
-                stable += 1
-                # 正文还没出来（< 兜底阈值）时给阶段提示：交付卡片优先，
-                # 否则是「等待响应」。有卡片意味着豆包在跑写作任务，可能
-                # 好几分钟——不能只让进度条停在 1% 不动。
-                if cur_len < _INLINE_MIN_CHARS:
-                    if not card_logged and self._delivery_card_present():
-                        card_logged = True
-                        log.info("任务进度：豆包正在用写作任务撰写正文…")
-                    elif not wait_logged:
-                        wait_logged = True
-                        log.info("任务进度：等待豆包响应…")
-            if stable >= stable_count and cur_len:
-                page = self._page_instance()
-                page.wait_for_timeout(_READBACK_MS)
-                re_text = self._extract_reply_text()
-                re_len = len(re_text)
-                if re_len != cur_len:
-                    stable = 0
-                    last_len = re_len
-                    continue
-                if self._generating():
-                    if not busy_logged:
-                        busy_logged = True
-                        log.info("web_drivers[doubao]: 正文已稳定，等豆包收尾…")
-                    else:
-                        log.debug("web_drivers[doubao]: 仍在生成中，继续等待")
-                    stable = 0
-                    continue
-                # 残稿判据：末尾停在章节标题 = 只抓到半截（2026-09-19 事故），
-                # 不判完成、继续等；等到超时走「未完成」分支交给重试，
-                # 绝不把半截稿当成品交给下游（不然就是 597 字废稿）
-                if reply_tail_is_chapter_heading(re_text):
-                    tail_blocked = True
-                    if not tail_logged:
-                        tail_logged = True
-                        log.warning("web_drivers[doubao]: 正文末尾仍停在章节标题"
-                                    "（当前 %d 字，疑似只读到半截），继续等待…",
-                                    re_len)
-                    stable = 0
-                    continue
-                log.info("web_drivers[doubao]: 文本稳定 %d 轮且 UI 空闲，"
-                         "判定完成（%.1fs，%d 字符）", stable_count,
-                         time.time() - start, re_len)
-                return True
-            # 卡片式交付：对话里没有正文（只有交付卡片），正文永远不会再
-            # 增长——不必空等到 max_wait，直接交给读取前兜底补问
-            if stable >= stable_count and not cur_len \
-                    and self._delivery_card_present():
-                log.info("web_drivers[doubao]: 对话无正文且检测到交付卡片，"
-                         "交给读取前兜底（%.1fs）", time.time() - start)
-                return True
-            self._page_instance().wait_for_timeout(poll_interval * 1000)
-        if tail_blocked:
-            log.warning("web_drivers[doubao]: 生成超时（%ds）——末次正文（%d 字）"
-                        "末尾仍停在章节标题，判定为半截稿，不当作完成",
-                        max_wait, last_len)
-        else:
-            log.warning("web_drivers[doubao]: 生成超时（%ds）", max_wait)
-        return False
+        return super().wait_complete(max_wait=max_wait)
 
     def _msg_state(self):
         """页面消息状态：{user_count, answer_count, text, card}。
@@ -801,7 +716,7 @@ class DoubaoDriver(WebLLMDriver):
                     "() => {"
                     "  const el = Array.from(document.querySelectorAll("
                     "      '[role=menuitem]')).find(e =>"
-                    "      (e.innerText || '').trim() === '删除');"
+                    "      ((e.querySelector('.truncate.h-22') || e).innerText || '').trim() === '删除');"
                     "  if (!el) return false; el.click(); return true;"
                     "}"):
                 log.info("web_drivers[doubao]: 会话菜单里没有「删除」项")
@@ -845,11 +760,7 @@ class DoubaoDriver(WebLLMDriver):
     def _delete_session_via_api(self):
         """用当前页面同源登录态尝试删除会话接口（候选端点，日志降 DEBUG）。"""
         from urllib.parse import urlsplit
-        from config import WEB_DRIVERS, WEB_DRIVER_NAME
-        try:
-            site_url = WEB_DRIVERS[WEB_DRIVER_NAME]["url"]
-        except Exception:
-            site_url = "https://www.doubao.com/chat/"
+        site_url = self.config["url"]
         sp = urlsplit(site_url)
         if not sp.netloc:
             return False

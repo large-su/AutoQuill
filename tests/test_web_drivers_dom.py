@@ -107,8 +107,9 @@ class TestWebDriversDomSemantics(unittest.TestCase):
         import web_drivers.deepseek as d
         import webui.log_capture as lc
         dsrc = self._src("web_drivers/deepseek.py")
-        self.assertIn("故事生成中", dsrc)   # 生成阶段心跳
-        self.assertIn("模型思考中", dsrc)   # 思考阶段心跳
+        bsrc = self._src("web_drivers/base.py")
+        self.assertIn("poll_generation", bsrc)
+        self.assertIn("_generation_probe", bsrc)
         self.assertIn("think_len", dsrc)   # 思考容器长度（_read_probe 返回）
         # 2026-09 改版：正文长度只在 div.ds-message 里按正文容器
         # （ds-assistant-message-main-content）取，思考容器另算，
@@ -126,16 +127,16 @@ class TestWebDriversDomSemantics(unittest.TestCase):
     def test_deepseek_cancel_checkpoints_in_wait(self):
         # 生成中轮询必须带取消检查点（Web 控制台停止按钮）
         src = self._src("web_drivers/deepseek.py")
-        self.assertIn("_check_cancel()", src)
+        self.assertIn("_check_cancel()", self._src("web_drivers/base.py"))
 
     def test_deepseek_readback_verifies_stability(self):
         # 回归：文本稳定判定前必须重读验证——LLM 流式输出间歇停顿
         # 可 >8s（长 JSON 输出），「连续 N 轮不变」可能是暂停而非完成，
         # 判定点读回残缺内容会解析失败（2026-08-15 线上剖析两次失败）
         src = self._src("web_drivers/deepseek.py")
-        self.assertIn("_READBACK_MS", src)          # 重读验证窗口常量
-        self.assertIn("re_len", src)                # 判定前重读
-        self.assertIn("稳定判定后输出仍增长", src)   # 增长则继续等待
+        self.assertIn("_READBACK_MS", src)          # adapter readback constant
+        self.assertIn("_generation_completed", src)
+        self.assertIn("poll_generation", self._src("web_drivers/base.py"))
 
     def test_deepseek_failure_dump_page_state(self):
         # 全探测失败 → 子类调用 _dump_page_state（基类实现 raise RuntimeError）

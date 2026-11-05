@@ -547,8 +547,11 @@ def _call_profile_llm_web(prompt):
     webui 前端进度条自动激活，与故事生成观感一致。
     """
     from web_drivers import get_driver
+    from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
     try:
         return get_driver().generate(prompt)
+    except (WebInteractionError, WorkflowCancelled):
+        raise
     except Exception as exc:
         log.error("author_profiler: 网页版剖析失败：%s", exc)
         return None

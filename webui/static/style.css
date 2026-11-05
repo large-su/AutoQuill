@@ -232,6 +232,7 @@
   }
   .st-ctl #providerSel, .st-ctl #modelSel { flex: 1 1 120px; min-width: 0; }
   .st-d { flex: 0 0 100%; font-size: 11px; color: var(--muted); margin: -6px 0 0 106px; }
+  #webPreferencesHint { flex-basis: calc(100% - 106px); overflow-wrap: anywhere; }
   .tun-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; margin-bottom: 6px; }
   .tun-row input[type="number"] { width: 92px; }
   .tun-k { font-size: 12.5px; min-width: 80px; }

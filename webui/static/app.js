@@ -55,6 +55,11 @@ async function showSetupGuide(need) {
   // API Key 但切到 Web 未登录（整体配置「已完成」），此时仍须弹引导
   const st = setupCache || {};
   const accountStatus = st.web_account_status && st.web_account_status.status;
+  if (need === "web_verification") {
+    $("setupMask").classList.add("show");
+    showStStatus("网页需要验证，请打开当前网站完成验证后再运行。", "err");
+    return;
+  }
   // 受限账号不是登录态缺失：不要把平台风控结果再次引导成「重新登录」。
   if (need === "web_account_restricted" ||
       (need !== "api_key" && accountStatus === "restricted")) {
@@ -550,6 +555,9 @@ const webDriverSel = $("webDriverSel");
 let webDrivers = [];
 let webDriverCurrent = null;
 let webDriversLoading = false;
+let webPreferences = null;
+let webPreferencesSaveTimer = null;
+let webPreferencesRequest = 0;
 
 async function loadWebDrivers() {
   if (webDriversLoading) return;
@@ -569,6 +577,7 @@ async function loadWebDrivers() {
       webDriverSel.appendChild(opt);
     });
     if (webDriverCurrent) webDriverSel.value = webDriverCurrent;
+    loadWebPreferences(webDriverCurrent);
   } catch (e) { /* 旧服务无该端点：隐藏选择器 */ $("webDriverRow").hidden = true; }
   finally {
     // Keep the guard during sync: an empty/failed response must not recurse
@@ -576,6 +585,114 @@ async function loadWebDrivers() {
     syncWebDriverUI();
     webDriversLoading = false;
   }
+}
+
+function preferenceModelCatalog(pref) {
+  return (pref && pref.catalog && Array.isArray(pref.catalog.models)) ? pref.catalog.models.filter((m) => m.selectable !== false) : [];
+}
+
+function renderWebPreferences(pref) {
+  webPreferences = pref || null;
+  const row = $("webPreferenceRow");
+  const box = $("webPreferencesControls");
+  const hint = $("webPreferencesHint");
+  if (!row || !box || !hint) return;
+  row.hidden = !webDriverCurrent;
+  box.innerHTML = "";
+  const catalog = pref && pref.catalog;
+  const models = preferenceModelCatalog(pref);
+  if (!catalog || catalog.status !== "ready" || !models.length) {
+    hint.textContent = (catalog && catalog.message) || "请点击对应网站的“检查状态”以发现可选模型与强度。";
+    return;
+  }
+  const model = document.createElement("select");
+  model.id = "webPreferenceModel";
+  model.setAttribute("aria-label", "站内模型");
+  const selected = (pref.selection && pref.selection.model) || (catalog.current && catalog.current.model);
+  const selectedAvailable = !selected || models.some((m) => m.id === selected);
+  if (selected && !selectedAvailable) {
+    const unavailable = document.createElement("option");
+    unavailable.value = ""; unavailable.textContent = "原选择已不可用：" + selected + "，请重新选择";
+    model.appendChild(unavailable); model.disabled = false;
+  }
+  models.forEach((m) => {
+    const opt = document.createElement("option"); opt.value = m.id; opt.textContent = (m.label || m.id) + (m.group ? " · " + m.group : "");
+    model.appendChild(opt);
+  });
+  if (selected && models.some((m) => m.id === selected)) model.value = selected;
+  box.appendChild(model);
+  const renderOptions = () => {
+    box.querySelectorAll("select.web-preference-option").forEach((e) => e.remove());
+    const m = models.find((x) => x.id === model.value) || {};
+    const sameModel = !!(pref.selection && pref.selection.model === model.value);
+    if (!model.value) return;
+    const savedOptions = sameModel ? (pref.selection.options || {}) : {};
+    const defaults = m.defaults || {};
+    (m.options || []).forEach((group) => {
+      const select = document.createElement("select"); select.className = "web-preference-option"; select.dataset.key = group.key;
+      select.setAttribute("aria-label", group.label || group.key);
+      (group.choices || []).forEach((choice) => { const o = document.createElement("option"); o.value = choice.id; o.textContent = choice.label || choice.id; select.appendChild(o); });
+      const current = savedOptions[group.key] || defaults[group.key] || group.current;
+      if (current && (group.choices || []).some((x) => x.id === current)) select.value = current;
+      select.addEventListener("change", scheduleSaveWebPreferences); box.appendChild(select);
+    });
+  };
+  model.addEventListener("change", () => { renderOptions(); scheduleSaveWebPreferences(); });
+  renderOptions();
+  const changes = catalog.changes || {};
+  const added = changes.added || [], removed = changes.removed || [], updated = changes.updated || [];
+  const checked = catalog.checked_at ? new Date(catalog.checked_at * 1000).toLocaleString() : "未知时间";
+  const currentOptions = {};
+  box.querySelectorAll(".web-preference-option").forEach((e) => { currentOptions[e.dataset.key] = e.value; });
+  const validation = (pref && pref.validation) || {};
+  const validatedItem = Object.values(validation).find((item) => {
+    if (!item || item.workflow !== "classic" || item.result !== "passed" || !item.selection || item.selection.model !== model.value) return false;
+    const expected = item.selection.options || {}; const keys = new Set([...Object.keys(expected), ...Object.keys(currentOptions)]);
+    return [...keys].every((key) => expected[key] === currentOptions[key]);
+  });
+  const parts = ["最近检查：" + checked, "已发现 " + models.length + " 个可选模型。"];
+  if (selected && !selectedAvailable) parts.push("原选择已不可用：" + selected + "，请重新选择。");
+  if (added.length) parts.push("新增：" + added.join("、"));
+  if (removed.length) parts.push("移除：" + removed.join("、"));
+  if (updated.length) parts.push("参数更新：" + updated.join("、"));
+  parts.push(validatedItem ? "当前模型与参数已有经典模式验收记录（版本 " + (validatedItem.version || "未知") + "）。" : "当前模型与参数尚未完成经典模式验收。");
+  hint.textContent = parts.join(" ");
+}
+
+async function loadWebPreferences(name) {
+  if (!name) return;
+  const requestId = ++webPreferencesRequest;
+  try {
+    const r = await fetch("/api/web-preferences?name=" + encodeURIComponent(name));
+    if (!r.ok) throw new Error("读取失败");
+    const result = await r.json();
+    if (requestId === webPreferencesRequest && result.provider === webDriverCurrent) renderWebPreferences(result);
+  } catch (e) {
+    if (requestId === webPreferencesRequest && name === webDriverCurrent) {
+      renderWebPreferences({provider: name, catalog: {status: "error", models: [], message: "暂无法读取网站模型设置"}});
+    }
+  }
+}
+
+function scheduleSaveWebPreferences() {
+  clearTimeout(webPreferencesSaveTimer);
+  const model = $("webPreferenceModel");
+  if (!model || !webDriverCurrent) return;
+  const name = webDriverCurrent;
+  const selectedModel = model.value;
+  const options = {};
+  document.querySelectorAll(".web-preference-option").forEach((e) => { options[e.dataset.key] = e.value; });
+  webPreferencesSaveTimer = setTimeout(() => saveWebPreferences(name, selectedModel, options), 180);
+}
+
+async function saveWebPreferences(name, selectedModel, options) {
+  if (!name || name !== webDriverCurrent) return;
+  try {
+    const r = await fetch("/api/web-preferences", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name, model: selectedModel, options})});
+    if (!r.ok) throw new Error((await r.json().catch(() => null) || {}).detail || "保存失败");
+    const result = await r.json();
+    if (name === webDriverCurrent && result.provider === name) renderWebPreferences(result);
+  } catch (e) { showStStatus("站内模型设置保存失败：" + e.message, "err"); }
 }
 
 function renderWebDriverAccounts() {
@@ -625,6 +742,7 @@ async function checkWebAccount(name, wrap) {
     });
     const d = await r.json();
     if (state) state.textContent = formatWebAccountStatus(d);
+    if (name === webDriverCurrent) loadWebPreferences(name);
   } catch (e) {
     if (state) state.textContent = "暂无法确认：" + e.message;
   }
@@ -686,6 +804,9 @@ async function loginWebAccount(name, wrap) {
 async function applyWebDriver() {
   const name = webDriverSel.value;
   if (!name || name === webDriverCurrent) return;
+  clearTimeout(webPreferencesSaveTimer);
+  webPreferencesSaveTimer = null;
+  ++webPreferencesRequest;
   try {
     const r = await fetch("/api/web-driver", {
       method: "POST",
@@ -705,6 +826,7 @@ async function applyWebDriver() {
     const data = await r.json();
     webDriverCurrent = data.effective.web_driver;
     if (setupCache) setupCache.web_driver = webDriverCurrent;
+    loadWebPreferences(webDriverCurrent);
     await fetchSetupStatus();
     renderWebDriverAccounts();
     const targetStatus = setupCache && setupCache.web_account_status;
