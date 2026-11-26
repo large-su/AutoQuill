@@ -1555,26 +1555,27 @@
       ],
       "writing_code_id": "1b6c20a6fbe27566c05e67d0470a383465441305bd1c618a839dbfca5b709f45",
       "provenance": "git-tag",
-      "interval_end": "2026-11-26T00:25:55+00:00"
+      "interval_end": "2026-11-26T08:28:58+08:00"
     },
     {
       "version": "5.12.0",
       "tag": "v5.12.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "dd902d0ee1ffbde0ccc87ae2c5b7fc610a592cea",
+      "source_commit": "dd902d0ee1ffbde0ccc87ae2c5b7fc610a592cea",
       "parent": "0a0597b6cde92deda3525d35b3ea8b29a3c83e1d",
       "date": "2026-11-26",
-      "released_at": "2026-11-26T00:25:55+00:00",
-      "release_time_source": "build-time-estimate",
+      "released_at": "2026-11-26T08:28:58+08:00",
+      "release_time_source": "git-commit",
       "summary": "v5.12.0: 修复元宝正文提取并收敛故事提示规则",
       "summaries": [
         "v5.12.0: 修复元宝正文提取并收敛故事提示规则"
       ],
-      "changed_file_count": 12,
+      "changed_file_count": 13,
       "changed_files": [
         "CHANGELOG.md",
         "README.md",
         "applications/zhihu_story/prompts.py",
+        "core/evolution_history.json",
         "core/version.py",
         "docs/research/YUANBAO-UPGRADE-2026-11.md",
         "installer/AutoQuill.iss",
@@ -1590,6 +1591,34 @@
         "applications/zhihu_story/prompts.py",
         "story_prompt.py"
       ],
+      "writing_code_id": "893d008b486d8b424b0925c6a16da3f4ad064f55a36926bdefc016a31fafba49",
+      "provenance": "git-tag",
+      "interval_end": "2026-11-26T00:45:27+00:00"
+    },
+    {
+      "version": "5.12.1",
+      "tag": "v5.12.1",
+      "commit": null,
+      "source_commit": null,
+      "parent": "dd902d0ee1ffbde0ccc87ae2c5b7fc610a592cea",
+      "date": "2026-11-26",
+      "released_at": "2026-11-26T00:45:27+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.12.1: 清理故事尾部交付提问与快捷选项",
+      "summaries": [
+        "v5.12.1: 清理故事尾部交付提问与快捷选项"
+      ],
+      "changed_file_count": 6,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "core/story_text.py",
+        "core/version.py",
+        "installer/AutoQuill.iss",
+        "tests/test_story_text.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
       "writing_code_id": "893d008b486d8b424b0925c6a16da3f4ad064f55a36926bdefc016a31fafba49",
       "provenance": "working-tree",
       "pending": true,

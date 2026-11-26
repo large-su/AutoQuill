@@ -87,12 +87,39 @@ def _is_meta_plan_line(line):
     return False
 
 
+def _assistant_tail_start(lines):
+    """定位故事之后的交付提问/快捷选项；不处理正文内的同类对白。"""
+    tail = [(i, line.strip()) for i, line in enumerate(lines) if line.strip()][-8:]
+    for pos, (index, line) in enumerate(tail):
+        following = [value for _, value in tail[pos + 1:]]
+        offer = (re.fullmatch(r'(?:还)?(?:需要|是否需要|要不要)我(?:再)?(?:帮|为)[你您].{0,160}[？?]', line)
+                 and any(word in line for word in
+                         ('故事', '爽点', '推荐语', '简介', '大纲', '章节', '番外', '文案')))
+        reply = all(re.fullmatch(r'(?:好的[，,]?\s*)?帮我(?:写|提炼|整理)(?:一下)?[。！!]?', value)
+                    for value in following)
+        continuation = (re.fullmatch(
+            r'(?:(?:这[个篇])?故事[^。\n]{0,40}[，。]\s*)?'
+            r'(?:接下来|[你您]想).{0,160}[？?：:]', line)
+            and any(word in line for word in ('篇', '视角', '后续', '打磨', '完善')))
+        choices = (2 <= len(following) <= 5
+                   and all(len(value) <= 30 and not re.search(r'[。！？?：「」“”]', value)
+                           for value in following))
+        if not ((offer and reply) or (continuation and choices)):
+            continue
+        # 元宝文档卡片有时连同标题/创建时间一起进入回复，只有交付尾部确证后才去掉。
+        if (pos >= 2 and tail[pos - 2][1] == '无标题'
+                and re.fullmatch(r'创建于\s+\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}', tail[pos - 1][1])):
+            index = tail[pos - 2][0]
+        return index
+    return len(lines)
+
+
 def clean_story_output(text):
     """
     清洗 LLM 生成的故事文本：
     1. 去除开头的废话（"收到""好的""以下是为您创作的故事"等）
     1.5 去除开头的「写作计划」式元说明（"我将贴合…风格，遵守…要求"）
-    2. 去除结尾的废话（"希望您喜欢""如有修改需求"等）
+    2. 去除结尾的废话、交付提问与快捷选项
     3. 去除 DeepSeek R1 的 <think> 标签
     """
     if not text:
@@ -133,8 +160,8 @@ def clean_story_output(text):
         re.compile(r'(期待您|欢迎).*(反馈|评论|点赞)'),
     ]
 
-    end_idx = len(lines)
-    for i in range(len(lines) - 1, start_idx - 1, -1):
+    end_idx = _assistant_tail_start(lines)
+    for i in range(end_idx - 1, start_idx - 1, -1):
         stripped = lines[i].strip()
         if not stripped:
             continue

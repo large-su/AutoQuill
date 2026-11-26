@@ -37,6 +37,50 @@ class TestCleanStoryOutput(unittest.TestCase):
         self.assertNotIn("希望您喜欢", out)
         self.assertNotIn("修改需求", out)
 
+    def test_removes_document_footer_and_delivery_reply(self):
+        body = "路是自己走出来的。\n\n越走越宽。"
+        footer = ("\n\n无标题\n\n创建于 11-05 11:41\n\n"
+                  "需要我帮你提炼这个故事的核心逆袭爽点，或撰写一段吸引读者的推荐语吗？"
+                  "\n\n好的，帮我写")
+        self.assertEqual(clean_story_output(body + footer), body)
+
+    def test_removes_continuation_choices_after_story(self):
+        for question, choices in [
+            ("接下来想先看婚礼篇、职场篇，还是陆闻舟的视角篇？",
+             ["婚礼篇", "职场篇", "他视角"]),
+            ("你想让这个故事的后续停在哪个节点：伞坏那天、拍灯那天，还是冬至之后？",
+             ["伞坏那天", "拍灯那天", "冬至之后"]),
+            ("故事已经完整，接下来可以选择一个方向继续打磨：",
+             ["把全文压缩成更紧的短篇版本", "扩写拾意与沈家对峙的高光章节"]),
+            ("这个故事的温柔基调已经落地，接下来可以选择一个方向继续完善：",
+             ["把全文压缩成知乎高赞回答版", "再写一段番外，聚焦周迟视角的三年"]),
+            ("这篇故事已经完整，接下来可以选择一个方向继续打磨：",
+             ["把东厢权谋线写得更细更狠", "扩写婚后日常与闺女成长片段"]),
+        ]:
+            with self.subTest(question=question):
+                body = "屋里很暖。\n\n江边的事。\n\n留在那年了。"
+                text = body + "\n\n" + question + "\n\n" + "\n\n".join(choices)
+                self.assertEqual(clean_story_output(text), body)
+
+    def test_preserves_delivery_words_in_story_dialogue(self):
+        text = ("他把笔递给我。\n\n"
+                "「需要我帮你撰写这个故事的推荐语吗？」\n\n"
+                "「好的，帮我写。」\n\n我把稿纸推给他。")
+        self.assertEqual(clean_story_output(text), text)
+
+    def test_preserves_delivery_offer_before_more_narrative(self):
+        text = ("他打开电脑。\n\n需要我帮你撰写这个故事的推荐语吗？"
+                "\n\n好的，帮我写\n\n我盯着屏幕，把整段对话删了。")
+        self.assertEqual(clean_story_output(text), text)
+
+    def test_removes_standalone_story_delivery_offer(self):
+        body = "我关上门。\n\n明天，再往前走。"
+        self.assertEqual(clean_story_output(body + "\n\n需要我帮你写这个故事的番外吗？"), body)
+
+    def test_preserves_ordinary_choice_ending(self):
+        text = "她问我。\n\n你想先喝什么：红茶，还是咖啡？\n\n红茶\n\n咖啡"
+        self.assertEqual(clean_story_output(text), text)
+
     def test_removes_meta_plan_opener(self):
         # ★ 2026-09-08 豆包实测：正文前先说一句「我将贴合…风格/遵守…要求」
         # 的写作计划（不是故事正文），留在文首会被当成引言污染发布内容
