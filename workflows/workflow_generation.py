@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 class GenerationMixin:
     def generate_story(self, question_title, top_answer, recipe=None,
-                       feedback=None):
+                       feedback=None, previous_story=None):
         """根据 LLM_MODE 分发到 API 或 Web 模式生成故事。
 
         feedback：重试修正反馈（str 或 str 列表，可选），透传给 prompt
@@ -31,42 +31,60 @@ class GenerationMixin:
         log.info("=" * 50)
 
         if LLM_MODE == "api":
+            if previous_story is None:
+                return self._generate_api(question_title, top_answer, recipe,
+                                          feedback=feedback)
             return self._generate_api(question_title, top_answer, recipe,
-                                      feedback=feedback)
+                                      feedback=feedback,
+                                      previous_story=previous_story)
         else:
             # Web 通道带断路器与 API 自动降级（P1：8/29 DeepSeek 前端
             # 改版 3 连败教训；同任务内连续失败 N 次后跳过 Web 直走 API）
+            if previous_story is None:
+                return self._generate_web_with_failover(
+                    question_title, top_answer, recipe, feedback=feedback)
             return self._generate_web_with_failover(
-                question_title, top_answer, recipe, feedback=feedback)
+                question_title, top_answer, recipe, feedback=feedback,
+                previous_story=previous_story)
 
     def _generate_api(self, question_title, top_answer, recipe=None,
-                      feedback=None):
+                      feedback=None, previous_story=None):
         """API 模式：流式 HTTP 请求"""
         from story_generation import generate_story
         from core.story_model_index import api_chain
 
         author = getattr(self, "author", None)
         model_chain = api_chain()
-        story = generate_story(question_title, top_answer, recipe=recipe,
-                               author=author, feedback=feedback)
+        kwargs = dict(recipe=recipe, author=author, feedback=feedback)
+        if previous_story is not None:
+            kwargs['previous_story'] = previous_story
+        story = generate_story(question_title, top_answer, **kwargs)
         if not story:
             log.error("API 生成失败")
             from desktop_utils import focus_edge
             fallback = input("切换到网页模式重试？(y/n) >> ").strip().lower()
             if fallback == 'y':
                 focus_edge()
+                if previous_story is None:
+                    return self._generate_web(
+                        question_title, top_answer, recipe, feedback=feedback)
                 return self._generate_web(
-                    question_title, top_answer, recipe, feedback=feedback
+                    question_title, top_answer, recipe, feedback=feedback,
+                    previous_story=previous_story
                 )
             return None
         self._last_story_model_chain = model_chain
         return story
 
     def _generate_web(self, question_title, top_answer, recipe=None,
-                      feedback=None):
+                      feedback=None, previous_story=None):
         """Web 模式：通过 Web Driver 操控 LLM 网站（单轮生成）"""
+        if previous_story is None:
+            return self._generate_web_short_form(
+                question_title, top_answer, recipe, feedback=feedback)
         return self._generate_web_short_form(
-            question_title, top_answer, recipe, feedback=feedback
+            question_title, top_answer, recipe, feedback=feedback,
+            previous_story=previous_story
         )
 
     _WEB_BREAK_HINTS = (
@@ -75,7 +93,8 @@ class GenerationMixin:
     )
 
     def _generate_web_with_failover(self, question_title, top_answer,
-                                    recipe=None, feedback=None):
+                                    recipe=None, feedback=None,
+                                    previous_story=None):
         """Web 生成，带「前端改版/输入框丢失」类故障的自动降级。
 
         - 单次失败：告警并立即用 API 通道补跑本轮（需已配置 API Key）
@@ -90,11 +109,20 @@ class GenerationMixin:
         if fails >= WEB_FAILOVER_MAX_CONSECUTIVE:
             log.warning("Web 通道已连续失败 %d 次，本轮剩余尝试"
                         "自动降级到 API 通道", fails)
+            if previous_story is None:
+                return self._generate_api(question_title, top_answer, recipe,
+                                          feedback=feedback)
             return self._generate_api(question_title, top_answer, recipe,
-                                      feedback=feedback)
+                                      feedback=feedback,
+                                      previous_story=previous_story)
         try:
-            story = self._generate_web(question_title, top_answer, recipe,
-                                       feedback=feedback)
+            if previous_story is None:
+                story = self._generate_web(question_title, top_answer, recipe,
+                                           feedback=feedback)
+            else:
+                story = self._generate_web(question_title, top_answer, recipe,
+                                           feedback=feedback,
+                                           previous_story=previous_story)
             self._web_fail_consecutive = 0
             return story
         except (WebInteractionError, WorkflowCancelled):
@@ -109,23 +137,28 @@ class GenerationMixin:
                 log.warning(
                     "Web 通道故障（%s…），自动降级到 API 通道"
                     "（连续第 %d 次）", msg[:70], self._web_fail_consecutive)
+                if previous_story is None:
+                    return self._generate_api(question_title, top_answer,
+                                              recipe, feedback=feedback)
                 return self._generate_api(question_title, top_answer,
-                                          recipe, feedback=feedback)
+                                          recipe, feedback=feedback,
+                                          previous_story=previous_story)
             raise
 
     def _generate_web_short_form(self, question_title, top_answer, recipe=None,
-                                 feedback=None):
+                                 feedback=None, previous_story=None):
         """Web 短文模式：单轮 prompt 直接出正文"""
         from web_drivers import get_driver
         from story_prompt import build_story_prompt
         from story_generation import _load_author_profile_or_none
 
         author = getattr(self, "author", None)
+        prompt_kwargs = dict(author_profile=_load_author_profile_or_none(author),
+                             feedback=feedback)
+        if previous_story is not None:
+            prompt_kwargs['previous_story'] = previous_story
         full_prompt, mode_str = build_story_prompt(
-            question_title, top_answer, recipe,
-            author_profile=_load_author_profile_or_none(author),
-            feedback=feedback,
-        )
+            question_title, top_answer, recipe, **prompt_kwargs)
         log.info(f"  Prompt 模式：{mode_str}")
 
         driver = get_driver()
@@ -145,15 +178,18 @@ class GenerationMixin:
                 parts.append(f"原因：{v}")
             else:
                 parts.append(f"{k}：{v}")
+            if k == "章节":
+                parts.append("将现有情节按推进分成至少6节，标题用 `## **1**`、`## **2**` 等阿拉伯数字；不要把全文再重述一遍")
+            elif k == "环境空镜":
+                parts.append("将连续纯景物段落合并进人物正在进行的行动，保留影响处境的环境细节")
         return "；".join(parts)
 
     def generate_story_with_retry(self, title, answer, max_attempts=None,
                                   min_length=500):
         """生成故事；无输出 / 过短 / 格式不合规时带失败原因反馈重试。
 
-        ★ 带反馈的重试：每轮把上一版的失败原因（字数/章节/长段/引号等）
-        注入重试 prompt，让模型针对性修正——比同 prompt 盲目重试的收敛率
-        显著更高，明显提升「单轮完整链路」一次成功概率。
+        带反馈的重试会把上一版的问题传给下一轮；经安全门槛的完整稿在
+        全文编辑开启时可以定向修订，其余失败仍从头创作。
 
         达到 STORY_GENERATE_MAX_ATTEMPTS（默认 3）次仍未产出合格文本时，
         返回最高分版本（可能非空，调用方存盘供人工核对）且 ok=False。
@@ -163,7 +199,7 @@ class GenerationMixin:
         min_length；ok=False 表示多次尝试仍未合格（story 为最高分版本）。
         """
         from config import LLM_MODE
-        from config.story import STORY_GENERATE_MAX_ATTEMPTS
+        from config.story import STORY_EDITOR_ENABLE, STORY_GENERATE_MAX_ATTEMPTS
         from core.story_text import (
             clean_story_output, fix_story_format, validate_story_format,
         )
@@ -174,10 +210,15 @@ class GenerationMixin:
         best_chain = None
         best_score = -1
         last_reason = None     # 上一轮失败原因（重试反馈）
+        revision_source = None
         self._web_fail_consecutive = 0  # 每轮任务重置 Web 断路器计数
 
         for attempt in range(max_attempts):
-            story = self.generate_story(title, answer, feedback=last_reason)
+            generate_kwargs = {'feedback': last_reason}
+            if revision_source is not None:
+                generate_kwargs['previous_story'] = revision_source
+            story = self.generate_story(title, answer, **generate_kwargs)
+            revision_source = None
             if story and LLM_MODE == "web":
                 story = fix_story_format(clean_story_output(story))
 
@@ -213,6 +254,15 @@ class GenerationMixin:
                             risk["run"], attempt + 1, max_attempts)
                 continue
 
+            from core.story_text import story_content_issues
+            content_issues = story_content_issues(story)
+            if content_issues:
+                last_reason = "正文内容检查未通过：" + "；".join(
+                    i["message"] for i in content_issues[:3])
+                log.warning("故事正文未通过内容检查，第 %d/%d 次重试…",
+                            attempt + 1, max_attempts)
+                continue
+
             fmt_score, is_valid, details = validate_story_format(story)
             if is_valid:
                 from core.story_editor import review_story, revision_feedback
@@ -225,6 +275,7 @@ class GenerationMixin:
                     log.warning("全文编辑复核未完成，留存本地稿并停止本篇发布：%s", review['reason'])
                     break
                 last_reason = revision_feedback(review)
+                revision_source = story
                 log.info("全文编辑复核需修正（%d项），沿用生成重试预算", len(review['issues']))
                 continue
             if fmt_score > best_score:
@@ -232,6 +283,10 @@ class GenerationMixin:
                 best_chain = getattr(self, '_last_story_model_chain', None)
             last_reason = (self._format_format_failure(details)
                            or f"格式不合规（{fmt_score}/10）")
+            # Only the opt-in editorial workflow can reuse a full draft. When
+            # disabled, preserve the legacy fresh-generation retry behavior.
+            if STORY_EDITOR_ENABLE:
+                revision_source = story
             log.warning("故事格式不合规（%d/10），第 %d/%d 次重试…",
                         fmt_score, attempt + 1, max_attempts)
 
@@ -243,7 +298,7 @@ class GenerationMixin:
     # ============================================================
 
     def generate_clean_story(self, question_title, reference_answer,
-                             feedback=None):
+                             feedback=None, previous_story=None):
         """纯净模式：极简 prompt（风格学习 + 原创禁令），API/Web 分发。
 
         与 generate_story 的区别：不做格式/字数硬约束，也不注入
@@ -262,16 +317,22 @@ class GenerationMixin:
             from story_generation import generate_story_clean
             from core.story_model_index import api_chain
             model_chain = api_chain()
+            kwargs = {'feedback': feedback}
+            if previous_story is not None:
+                kwargs['previous_story'] = previous_story
             story = generate_story_clean(question_title, reference_answer,
-                                         feedback=feedback)
+                                         **kwargs)
             self._last_story_model_chain = model_chain
             return story
 
         # Web 模式：网页版大模型（无 API Key 依赖）
         try:
             from web_drivers import get_driver
+            kwargs = {'feedback': feedback}
+            if previous_story is not None:
+                kwargs['previous_story'] = previous_story
             full_prompt, mode_str = build_clean_prompt(
-                question_title, reference_answer, feedback=feedback)
+                question_title, reference_answer, **kwargs)
             log.info(f"  Prompt 模式：{mode_str}")
             driver = get_driver()
             story = driver.generate(full_prompt)
@@ -302,6 +363,7 @@ class GenerationMixin:
         last_audit = None
         best = None
         best_chain = None
+        revision_source = None
 
         wash_streak = 0
         for attempt in range(max_attempts):
@@ -324,7 +386,11 @@ class GenerationMixin:
                             "与参考完全不同的背景（如换成现代/校园/职场/科幻/都市等），"
                             "人物关系、关键事件、推进顺序全部从头构思，不要借鉴参考的"
                             "任何情节骨架，只保留风格上的借鉴。\n\n" + feedback)
-            story = self.generate_clean_story(title, answer, feedback=feedback)
+            generate_kwargs = {'feedback': feedback}
+            if revision_source is not None:
+                generate_kwargs['previous_story'] = revision_source
+            story = self.generate_clean_story(title, answer, **generate_kwargs)
+            revision_source = None
             if not story or not str(story).strip():
                 last_reason = "生成失败（模型无输出）"
                 log.warning("纯净模式生成失败（无输出），第 %d/%d 次重试…",
@@ -365,6 +431,7 @@ class GenerationMixin:
                     if review['status'] == 'unavailable':
                         log.warning("全文编辑复核未完成，停止本篇发布：%s", review['reason'])
                         break
+                    revision_source = story
             reasons = last_audit.get("reasons") or []
             if last_audit.get("passed"):
                 log.info(f"  原创审核通过：{last_audit.get('verdict')}")

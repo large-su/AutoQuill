@@ -11,7 +11,10 @@ def explicit_range(question):
 
 
 def body_chars(story):
-    body = re.sub(r'(?m)^\s*#{1,6}\s*\*?\*?\d+\*?\*?\s*$', '', story)
+    from core.story_text import is_chapter_heading_line
+    body = '\n'.join(line for line in story.splitlines()
+                     if not (line.lstrip().startswith('#')
+                             and is_chapter_heading_line(line)))
     return len(re.sub(r'\s+', '', body))
 
 

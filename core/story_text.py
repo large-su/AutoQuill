@@ -466,6 +466,7 @@ def replace_em_dashes(text):
 # 无一含 ## **，格式校验「章节 0 个」必扣 4 分，通道满分只剩 6/10），
 # 老一代模型也可能写「第一章」。三种形态都认，避免合规稿被误判。
 _CHAPTER_MD_RE = re.compile(r'##\s*\*\*\d+\*\*')
+_CHAPTER_CN_MD_LINE_RE = re.compile(r'##\s*\*\*[一二三四五六七八九十百千万零两]+\*\*')
 _CHAPTER_PLAIN_LINE_RE = re.compile(
     r'^(?:#{1,6}\s*)?(?:'
     r'第\s*[0-9一二三四五六七八九十百千万零两]+\s*[章节回]'
@@ -475,12 +476,17 @@ _CHAPTER_PLAIN_LINE_RE = re.compile(
 # 引言判定的「章节标题行」：规范形态 / 「第一章」 / 裸章节号（独占一行）
 _CHAPTER_HEAD_LINE_RE = re.compile(
     r'^(?:'
-    r'#{1,6}\s*\*{0,2}\d+\*{0,2}'
+    r'#{1,6}\s*\*{0,2}(?:\d+|[一二三四五六七八九十百千万零两]+)\*{0,2}'
     r'|#{1,6}\s*第\s*[0-9一二三四五六七八九十百千万零两]+\s*[章节回]'
     r'|第\s*[0-9一二三四五六七八九十百千万零两]+\s*[章节回]'
     r'|\d{1,2}'
     r')\s*$'
 )
+
+
+def is_chapter_heading_line(line):
+    """Recognize a whole heading line; prose after a number remains prose."""
+    return bool(_CHAPTER_HEAD_LINE_RE.fullmatch(line.strip()))
 
 
 def count_chapter_headings(text):
@@ -494,7 +500,8 @@ def count_chapter_headings(text):
         s = line.strip()
         if not s:
             continue
-        if _CHAPTER_MD_RE.search(s) or _CHAPTER_PLAIN_LINE_RE.match(s):
+        if (_CHAPTER_MD_RE.search(s) or _CHAPTER_CN_MD_LINE_RE.fullmatch(s)
+                or _CHAPTER_PLAIN_LINE_RE.match(s)):
             n += 1
     return n
 
@@ -670,7 +677,7 @@ def validate_story_format(text):
         s = line.strip()
         if not s:
             continue  # 跳过前导空行
-        if _CHAPTER_HEAD_LINE_RE.match(s):
+        if is_chapter_heading_line(s):
             intro_reason = ("开头直接是章节标题、缺少引言段（请在正文最前面"
                             "补 3-8 句、60-300 字的引言，先抛冲突/钩子再进入章节）")
         elif s.startswith(("引言", "引子")) and len(s) < 12:

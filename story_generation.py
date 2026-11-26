@@ -21,7 +21,8 @@ log = logging.getLogger(__name__)
 
 
 def generate_story(question_title, reference_answer=None, recipe=None,
-                   meta_knowledge=None, author=None, feedback=None):
+                   meta_knowledge=None, author=None, feedback=None,
+                   previous_story=None):
     """
     通过 API 生成故事，支持流式输出到终端。
 
@@ -52,11 +53,12 @@ def generate_story(question_title, reference_answer=None, recipe=None,
     author_profile = _load_author_profile_or_none(author)
 
     # ===== 统一 prompt 构建 =====
+    prompt_kwargs = dict(meta_knowledge=meta_knowledge,
+                         author_profile=author_profile, feedback=feedback)
+    if previous_story is not None:
+        prompt_kwargs['previous_story'] = previous_story
     user_message, mode_str = build_story_prompt(
-        question_title, reference_answer, recipe,
-        meta_knowledge=meta_knowledge, author_profile=author_profile,
-        feedback=feedback,
-    )
+        question_title, reference_answer, recipe, **prompt_kwargs)
 
     log.info(f"API 流式调用开始")
     log.info(f"  模型：{LLM_API_MODEL} | 模式：{mode_str}")
@@ -243,7 +245,8 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
 # 纯净模式生成（工作台 · 完整链路）
 # ============================================================
 
-def generate_story_clean(question_title, reference_answer=None, feedback=None):
+def generate_story_clean(question_title, reference_answer=None, feedback=None,
+                         previous_story=None):
     """纯净模式：极简 prompt（风格学习 + 原创禁令），流式生成。
 
     与 generate_story 的区别：刻意不套格式/字数/章节/去AI味等硬约束，
@@ -257,8 +260,11 @@ def generate_story_clean(question_title, reference_answer=None, feedback=None):
         return None
 
     from story_prompt import build_clean_prompt
+    prompt_kwargs = {'feedback': feedback}
+    if previous_story is not None:
+        prompt_kwargs['previous_story'] = previous_story
     user_message, mode_str = build_clean_prompt(
-        question_title, reference_answer, feedback=feedback)
+        question_title, reference_answer, **prompt_kwargs)
 
     log.info("纯净模式 API 流式调用开始")
     log.info(f"  模型：{LLM_API_MODEL} | 模式：{mode_str}")

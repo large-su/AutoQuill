@@ -195,16 +195,17 @@ class TestRetryFeedbackRendering(unittest.TestCase):
         user_message, _mode = build_story_prompt(
             "测试问题?", reference_answer="参考文本",
             feedback=["字数过短（仅 1234 字，要求至少 500 字）"])
-        self.assertIn("上一版不符合发布要求", user_message)
+        self.assertIn("上一稿需要重新创作的原因", user_message)
         self.assertIn("字数过短（仅 1234 字", user_message)
-        self.assertIn("不少于 6 节", user_message)
-        self.assertIn("不少于 4000 字", user_message)
+        self.assertIn("至少6节", user_message)
+        self.assertIn("未指定篇幅时写约4500-5500字", user_message)
+        self.assertEqual(user_message.count("## 发布前自检"), 1)
 
     def test_build_prompt_without_feedback_is_unchanged(self):
         from story_prompt import build_story_prompt
         user_message, _mode = build_story_prompt(
             "测试问题?", reference_answer="参考文本")
-        self.assertNotIn("上一版不符合发布要求", user_message)
+        self.assertNotIn("上一稿需要重新创作的原因", user_message)
 
     def test_format_format_failure_renders_dict(self):
         from workflows.base import WorkflowBase

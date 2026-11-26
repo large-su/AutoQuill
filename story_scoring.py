@@ -99,17 +99,22 @@ def build_score_preview(story):
     return "\n\n".join(output)
 
 
-def _web_llm_generate(prompt, what="请求"):
+def _web_llm_generate(prompt, what="请求", *, reuse_session=True):
     """Web 模式：用共享浏览器里的网页版大模型生成一次回答。
 
     与故事生成的 Web 通道共用 web_drivers.get_driver()，不依赖任何
     API Key。明确登录失效向上传递，暂停任务并引导登录；其他页面异常
     返回 None，调用方按「回退原顺序 / 原候选」处理。
+
+    全文编辑传 reuse_session=False，隔离创作上下文；驱动沿用既有
+    自有会话清理契约。其他调用保持默认复用。
     """
     from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
     try:
         from web_drivers import get_driver
         driver = get_driver()
+        if not reuse_session:
+            return driver.generate(prompt, reuse_session=False)
         return driver.generate(prompt)
     except (WebInteractionError, WorkflowCancelled):
         # A clear sign-out is actionable and must stop the write workflow.

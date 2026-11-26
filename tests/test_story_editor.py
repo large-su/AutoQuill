@@ -57,6 +57,19 @@ class ReviewChannelTests(unittest.TestCase):
         self.assertTrue(result['passed'])
         request.assert_called_once()
         self.assertIn(story, request.call_args.args[0])
+        self.assertEqual(request.call_args.kwargs, {'reuse_session': False})
+
+    def test_web_review_separates_writer_context_without_changing_other_requests(self):
+        from story_scoring import _web_llm_generate
+        from unittest.mock import Mock
+        driver = Mock()
+        driver.generate.return_value = 'reply'
+        with patch('web_drivers.get_driver', return_value=driver):
+            self.assertEqual(_web_llm_generate('全文', reuse_session=False), 'reply')
+            driver.generate.assert_called_once_with('全文', reuse_session=False)
+            driver.generate.reset_mock()
+            self.assertEqual(_web_llm_generate('普通评分'), 'reply')
+            driver.generate.assert_called_once_with('普通评分')
 
     def test_over_budget_is_not_silently_truncated(self):
         with patch('story_scoring._web_llm_generate') as request:
@@ -85,6 +98,12 @@ class ReviewChannelTests(unittest.TestCase):
         text = '## **1**\n\n' + '花' * 1100 + '\n\n'
         self.assertIsNone(editor.length_review('1000～1200字', text))
         self.assertIsNone(editor.length_review('讲一个2000年前的故事', text))
+
+    def test_length_uses_the_same_markdown_chapter_recognition_as_format(self):
+        from core.story_length import body_chars
+        self.assertEqual(body_chars('## **一**\n\n花开了。\n\n## **二**\n\n她来了。'), 8)
+        self.assertEqual(body_chars('## 一起回家\n\n花开了。'), 10)
+        self.assertEqual(body_chars('## **1** 她来了。'), 11)
 
     def test_disabled_review_preserves_previous_no_request_behavior(self):
         with patch.object(story_config, 'STORY_EDITOR_ENABLE', False), \
