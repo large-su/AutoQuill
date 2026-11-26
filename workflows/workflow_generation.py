@@ -215,7 +215,18 @@ class GenerationMixin:
 
             fmt_score, is_valid, details = validate_story_format(story)
             if is_valid:
-                return story, True
+                from core.story_editor import review_story, revision_feedback
+                review = review_story(title, story)
+                if review['passed']:
+                    return story, True
+                best, best_chain = story, getattr(self, '_last_story_model_chain', None)
+                best_score = fmt_score
+                if review['status'] == 'unavailable':
+                    log.warning("全文编辑复核未完成，留存本地稿并停止本篇发布：%s", review['reason'])
+                    break
+                last_reason = revision_feedback(review)
+                log.info("全文编辑复核需修正（%d项），沿用生成重试预算", len(review['issues']))
+                continue
             if fmt_score > best_score:
                 best_score, best = fmt_score, story
                 best_chain = getattr(self, '_last_story_model_chain', None)
@@ -296,7 +307,10 @@ class GenerationMixin:
         for attempt in range(max_attempts):
             feedback = None
             if attempt > 0 and last_audit and not last_audit.get("passed"):
-                if last_audit.get('verdict') == '非故事内容':
+                if last_audit.get('editor_review'):
+                    from core.story_editor import revision_feedback
+                    feedback = revision_feedback(last_audit['editor_review'])
+                elif last_audit.get('verdict') == '非故事内容':
                     feedback = ('上一稿混入非故事内容：' + '；'.join(last_audit.get('reasons') or [])
                                 + '。请重新输出完整故事正文，不附思考过程、写作说明或续写选项。')
                 else:
@@ -338,11 +352,19 @@ class GenerationMixin:
                 last_audit = {"passed": True, "verdict": "原创（审核已关闭）",
                               "reasons": [], "signals": {},
                               "llm_detail": None, "originality": None}
-                log.info("纯净模式审核已关闭（CLEAN_AUDIT_ENABLE=False），直接通过")
-                return story, last_audit
-
-            from core.originality import audit_originality
-            last_audit = audit_originality(title, story, answer)
+            else:
+                from core.originality import audit_originality
+                last_audit = audit_originality(title, story, answer)
+            if last_audit.get('passed'):
+                from core.story_editor import review_story
+                review = review_story(title, story)
+                last_audit['editor_review'] = review
+                if not review['passed']:
+                    last_audit.update(passed=False, verdict='编辑复核未通过',
+                                      reasons=[i['problem'] for i in review['issues']] or [review['reason']])
+                    if review['status'] == 'unavailable':
+                        log.warning("全文编辑复核未完成，停止本篇发布：%s", review['reason'])
+                        break
             reasons = last_audit.get("reasons") or []
             if last_audit.get("passed"):
                 log.info(f"  原创审核通过：{last_audit.get('verdict')}")

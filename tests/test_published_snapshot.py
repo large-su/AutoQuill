@@ -23,7 +23,8 @@ def _raw_rows():
 
 class PublishedSnapshotTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="aq_pub_t_"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="aq_pub_t_")) / 'data'
+        self.tmp.mkdir()
         # 落盘路径全部打补丁：published 的快照目录 + （scrape 末尾会自动
         # 入账的）反馈闭环台账。此前只改了前者，fixture 会被写进真实的
         # data/state/story_performance.jsonl（每次跑测试脏一个入库文件）
@@ -109,6 +110,9 @@ class PublishedSnapshotTest(unittest.TestCase):
         class Fake:
             def __init__(self, headless=True):
                 self.page = types.SimpleNamespace(goto=lambda *a, **k: None)
+                self.context = types.SimpleNamespace(request=types.SimpleNamespace(
+                    get=lambda *a, **kw: types.SimpleNamespace(ok=True, json=lambda: {
+                        'id': 'fixture-account', 'follower_count': 0, 'name': 'private profile'})))
             def start(self): pass
             def close(self): pass
             def _safe_evaluate(self, js):
@@ -128,6 +132,10 @@ class PublishedSnapshotTest(unittest.TestCase):
             self.assertEqual(len(list(self.tmp.glob("published_answers_*.json"))), 2)
             state = json.loads((self.tmp / "evolution.json").read_text(encoding="utf-8"))
             self.assertIsNone(state["articles"]["1"]["observations"][0]["collects"])
+            account_file = self.tmp / 'state/account_metrics.jsonl'
+            observed = json.loads(account_file.read_text(encoding='utf-8').splitlines()[0])
+            self.assertEqual(observed['count'], 0)
+            self.assertEqual(set(observed), {'at', 'id', 'count', 'source'})
         finally:
             ba.ZhihuBrowser = orig
 

@@ -68,9 +68,11 @@ CRAFT_LEARNING_RULE = """
 ## 人物、细节与情节的衔接
 
 以下是可取舍的通用技法，题目要求和参考文风优先，不必逐条套用：
-- 用人物的关键选择表现性格，代价贴合题意，可以是时间、劳动或让步，不为煽情擅加悲剧。对同一冲突连续回应时，让信息、筹码或关系发生变化，压缩重复受辱和空洞宣言。
+- 让读者先在意一个具体的人：他当下想争取或保住什么，为什么值得在意？用他为此作出的选择表现性格，代价贴合题意，可以是时间、劳动或让步，不为煽情擅加悲剧。
+- 新信息要改变行动。人物发现异常、听到承诺或拿到证据后，让判断和下一步做法随之改变；对同一冲突连续回应时，信息、筹码或关系要有进展，压缩重复受辱、问答和空洞宣言。
 - 感情发展要让双方通过具体相处改变对彼此的判断，并作出回应；甜宠中的亲近符合双方意愿，控制、羞辱或威胁不能直接充当感情成立的证据。不要只用脸红、占有欲或结尾调情跳过关系发展的过程。
-- 与主线有关的细节再次出现时，让它带来证据、阻力或关系变化；没有新作用的重复可以删去。不强制设置象征物，也不照搬参考中的物件、事件或结构顺序。
+- 对立者也有自己的目标与制约，会回应主角的行动。关键转折让人物面临实际取舍，不靠所有人突然降智或轮流认罪推进；温和题材可以只有立场差异，不必制造恶人。
+- 与主线有关的细节再次出现时，让它带来证据、阻力或关系变化；结尾写出选择带来的具体结果，给已经发生的事留下余味。不强制设置象征物，也不照搬参考中的物件、事件或结构顺序。
 - 若依靠特殊能力、制度或计谋解决危机，先展示它的作用条件和限制，高潮利用已建立的条件推进，让代价产生后果；核对条件前后一致，不用术语代替因果，不临时添加万能规则脱困。喜剧可以荒诞，前后逻辑仍需一致。
 在心中取舍和检查，直接输出正文，不展示检查清单或复述所学作品。
 """
@@ -571,12 +573,16 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
         STORY_SYSTEM_PROMPT,
     )
     from config.story import (READER_CONTRACT_ENABLE, STORY_MATERIAL_MODE,
-                              REFERENCE_NARRATIVE_SAMPLE_ENABLE)
+                              REFERENCE_NARRATIVE_SAMPLE_ENABLE, STORY_EDITOR_ENABLE)
 
     system_template = (READER_CONTRACT_STORY_SYSTEM_PROMPT
                        if READER_CONTRACT_ENABLE else STORY_SYSTEM_PROMPT)
     recipe_template = (READER_CONTRACT_STORY_RECIPE_PROMPT
                        if READER_CONTRACT_ENABLE else STORY_RECIPE_PROMPT)
+    from core.story_length import fit_template, budget_instruction
+    if STORY_EDITOR_ENABLE:
+        system_template = fit_template(system_template, question_title)
+        recipe_template = fit_template(recipe_template, question_title)
 
     # 预先格式化 meta 节（占位符注入 + 追加节 两种路径共用）
     _meta_text_for_placeholder = ""  # 填进 {meta_knowledge} 占位符的完整文本
@@ -813,12 +819,15 @@ def build_story_prompt(question_title, reference_answer=None, recipe=None,
     user_message += OPENING_EVENT_RULE
     if _opening_block:
         user_message += OPENING_VARIETY_RULE
-    user_message += FORMAT_SELF_CHECK_RULE
+    user_message += (fit_template(FORMAT_SELF_CHECK_RULE, question_title)
+                     if STORY_EDITOR_ENABLE else FORMAT_SELF_CHECK_RULE)
     if _opening_block:
         # 起手方式放在公共守则之后（越靠后越醒目），并写进 mode_str 便于日志核对
         user_message += _opening_block
         mode_str += f" · 起手式:{_opening_tag}"
     user_message += INLINE_OUTPUT_RULE
+    if STORY_EDITOR_ENABLE:
+        user_message += budget_instruction(question_title)
 
     # === 重试修正反馈（如有：放在最末尾，最醒目，模型应先读到它） ===
     if feedback:
@@ -889,6 +898,10 @@ def build_clean_prompt(question_title, reference_answer=None, feedback=None):
     user_message += _reader_experience_rule()
     user_message += _craft_learning_rule()
     user_message += INLINE_OUTPUT_RULE
+    from config.story import STORY_EDITOR_ENABLE
+    if STORY_EDITOR_ENABLE:
+        from core.story_length import budget_instruction
+        user_message += budget_instruction(question_title)
 
     if feedback:
         user_message += (

@@ -71,6 +71,31 @@ class TestServerAPI(unittest.TestCase):
         finally:
             story.MAX_TOPIC_RETRY = orig
 
+    def test_story_editor_tunable_roundtrip_bool_and_persistence(self):
+        from config import story
+        orig = story.STORY_EDITOR_ENABLE
+        try:
+            with mock.patch("config._save_webui_state") as save_state:
+                r = self.client.post("/api/config", json={
+                    "key": "STORY_EDITOR_ENABLE", "value": 1})
+            self.assertEqual(r.status_code, 200)
+            self.assertIs(r.json()["value"], True)
+            self.assertIs(story.STORY_EDITOR_ENABLE, True)
+            save_state.assert_called_once()
+            self.assertIn("story_tunables", save_state.call_args.kwargs)
+            self.assertIs(save_state.call_args.kwargs["story_tunables"]["STORY_EDITOR_ENABLE"], True)
+            self.assertIs(self.client.get("/api/config").json()["STORY_EDITOR_ENABLE"], True)
+
+            with mock.patch("config._save_webui_state"):
+                r = self.client.post("/api/config", json={
+                    "key": "STORY_EDITOR_ENABLE", "value": 0})
+            self.assertEqual(r.status_code, 200)
+            self.assertIs(r.json()["value"], False)
+            self.assertIs(story.STORY_EDITOR_ENABLE, False)
+            self.assertIs(self.client.get("/api/config").json()["STORY_EDITOR_ENABLE"], False)
+        finally:
+            story.STORY_EDITOR_ENABLE = orig
+
     def test_config_tunable_clamped(self):
         # 超范围值被限幅（MAX_TOPIC_RETRY 上限 10）
         from config import story

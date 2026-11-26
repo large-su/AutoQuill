@@ -86,7 +86,7 @@ window.AutoQuillEvolution = (() => {
     const warnings = [...(data.warnings || [])];
     if (quality.time_ambiguous) warnings.push("版本边界未归属 " + num(quality.time_ambiguous) + " 篇");
     if (quality.time_unassigned) warnings.push("未能按时间窗归属 " + num(quality.time_unassigned) + " 篇");
-    if (quality.unavailable?.followers) warnings.push("账号关注数不可用：" + quality.unavailable.followers);
+    if (quality.unavailable?.followers) warnings.push("关注归属：" + quality.unavailable.followers);
     if (quality.unavailable?.per_run_hour) warnings.push("每小时回报不可用：" + quality.unavailable.per_run_hour);
     el("evoWarnings").hidden = !warnings.length; el("evoWarnings").textContent = warnings.join("；");
     el("evoWindowNote").textContent = "阶段成绩使用发布后第 " + data.horizon + "～" + (data.horizon + 3) + " 天内最接近目标日的一次实际观测。没有窗口内观测时保持缺失，不反推历史成绩。";
@@ -103,6 +103,18 @@ window.AutoQuillEvolution = (() => {
     }
     const q = data.quality || {};
     el("evoFeedbackStatus").textContent += " 最新观测：" + (q.latest_observed_at || "暂无") + "；距今 " + num(q.stale_days) + " 天。";
+    const followers = data.account_followers || {}, accounts = followers.accounts || [];
+    if (accounts.length === 1) {
+      const account = accounts[0];
+      el("evoFeedbackStatus").textContent += " 账号关注：" + num(account.latest_count)
+        + "（" + account.latest_date + "）；"
+        + (account.change === "observed"
+          ? account.earliest_date + " 至 " + account.latest_date + " 净变化 " + (account.net_change > 0 ? "+" : "") + num(account.net_change) + "。"
+          : "已留存首次观测，净变化待后续观测。")
+        + " 账号观测独立于作品日期筛选，不归因到单篇。";
+    } else if (accounts.length > 1) {
+      el("evoFeedbackStatus").textContent += " 已分别记录 " + accounts.length + " 个账号的关注观测，未合并统计。";
+    }
     el("evoRefreshNodes").innerHTML = (refreshes.history || []).map((x) => "<p>" + h(String(x.observed_at || x.finished_at || x.started_at || "").replace("T", " ").slice(0,19)) + " · " + (x.source === "automation" ? "每日自动采集" : "手动采集") + " · " + h(names[x.status] || x.status) + " · " + (x.status === "done" ? num(x.count) + " 篇" : h(x.message || "")) + "</p>").join("") || "暂无采集记录。";
   }
 

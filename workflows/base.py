@@ -215,7 +215,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                 log.warning("on_story 回调失败", exc_info=True)
 
         if not _pass:
-            log.warning("多次尝试均未通过格式校验（最高分版已存盘），"
+            log.warning("正文或编辑检查未通过（候选稿已存盘），"
                         "标记废稿，本轮未发布")
             return False
 
@@ -454,16 +454,17 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
 
         start_all = time.time()
 
-        from config.story import BATCH_QUALITY_FIRST
+        from config.story import BATCH_QUALITY_FIRST, STORY_EDITOR_ENABLE
+        quality_first = BATCH_QUALITY_FIRST or STORY_EDITOR_ENABLE
         if LLM_MODE == "api":
-            if BATCH_QUALITY_FIRST:
+            if quality_first:
                 self._batch_generate_api_quality(materials, print_progress,
                                                  reset_progress)
             else:
                 self._batch_generate_api(materials, print_progress,
                                          reset_progress)
         else:
-            if BATCH_QUALITY_FIRST:
+            if quality_first:
                 self._batch_generate_web_quality(materials)
             else:
                 self._batch_generate_web(materials)
@@ -501,7 +502,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         for m in generated:
             fmt_score, is_valid, _ = validate_story_format(m['story'])
             m['format_score'] = fmt_score
-            if is_valid:
+            if is_valid and m.get('ok', True):
                 compliant.append(m)
             else:
                 non_compliant.append(m)
@@ -512,7 +513,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         retried_ok = 0
         if non_compliant:
             from config.story import ENABLE_FORMAT_RETRY, BATCH_QUALITY_FIRST
-            if BATCH_QUALITY_FIRST:
+            if quality_first:
                 log.warning(f"  质量优先：{len(non_compliant)} 篇经带反馈重试仍不合格，标记废稿（不发布）")
                 for m in non_compliant:
                     m["story"] = None

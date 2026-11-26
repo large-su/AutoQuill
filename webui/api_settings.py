@@ -34,7 +34,7 @@ def api_config():
         for k in ("QUESTION_SELECT_MODE", "QUESTION_SOURCE",
                   "ENABLE_STORY_FILTER", "STORY_MATERIAL_MODE",
                   "AUTHOR_PROFILE",
-                  "ENABLE_FORMAT_RETRY", "MIN_ANSWER_LENGTH",
+                  "ENABLE_FORMAT_RETRY", "STORY_EDITOR_ENABLE", "MIN_ANSWER_LENGTH",
                   "ENABLE_MATERIAL_LIKES_GATE", "MATERIAL_MIN_LIKES",
                   "MAX_TOPIC_RETRY", "STORY_GENERATE_MAX_ATTEMPTS",
                   ):
@@ -60,6 +60,7 @@ _TUNABLE_KEYS = {
     "MIN_ANSWER_LENGTH": (int, 100, 5000),
     "MATERIAL_MIN_LIKES": (int, 0, 100000),
     "STORY_GENERATE_MAX_ATTEMPTS": (int, 1, 10),
+    "STORY_EDITOR_ENABLE": (bool, 0, 1),
 }
 
 
@@ -77,8 +78,7 @@ def api_set_tunable(spec: _TunableSpec):
     if spec.key not in _TUNABLE_KEYS:
         raise HTTPException(400, f"不可修改的参数：{spec.key}")
     typ, lo, hi = _TUNABLE_KEYS[spec.key]
-    val = typ(spec.value)
-    val = max(lo, min(hi, val))
+    val = typ(max(lo, min(hi, spec.value)))
     setattr(story, spec.key, val)
     from config import _save_webui_state
     _save_webui_state(story_tunables={

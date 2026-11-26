@@ -82,7 +82,8 @@ class ReferenceSamplingIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             Path(root, 'story_prompt.py').write_text('old prompt', encoding='utf-8')
             expected = hashlib.sha256()
-            for name in sorted(set(evolution._FILES) - {'core/reference_sample.py'}):
+            from core.writing_sources import OPTIONAL_WRITING_FILES
+            for name in sorted(set(evolution._FILES) - OPTIONAL_WRITING_FILES):
                 content = b'old prompt' if name == 'story_prompt.py' else b'<missing>'
                 expected.update(name.encode() + b'\0' + content + b'\0')
             with patch('core.paths.program', lambda *parts: str(Path(root, *parts))):

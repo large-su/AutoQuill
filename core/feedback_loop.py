@@ -405,7 +405,7 @@ def topic_genre_multiplier(title, weight=None, min_boost=None,
         overall = (s.get("overall") or {}).get("score") or 0.0
         if not info or not overall:
             return 1.0
-        boost = 1.0 + w * (info["score"] / overall - 1.0)
+        boost = 1.0 + w * (info["effective_score"] / overall - 1.0)
         return max(lo, min(hi, boost))
     except Exception:
         log.debug("题材先验加权不可用（回退 1.0）", exc_info=True)

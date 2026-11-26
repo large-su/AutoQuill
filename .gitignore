@@ -53,6 +53,7 @@ data/state/story_performance.jsonl
 data/state/evolution.json
 data/state/evolution.tmp
 data/state/story_models.jsonl
+data/state/account_metrics.jsonl
 
 # Python
 __pycache__/

@@ -9,11 +9,8 @@ from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE_FILES = WRITING_FILES = {
-    "story_prompt.py", "story_generation.py", "story_scoring.py", "config/story.py",
-    "core/reference_sample.py",
-    "applications/zhihu_story/prompts.py", "workflows/workflow_generation.py",
-}
+from core.writing_sources import WRITING_FILES, OPTIONAL_WRITING_FILES
+SOURCE_FILES = WRITING_FILES
 TAG_RE = re.compile(r"^v(\d+(?:\.\d+){1,3})$")
 
 
@@ -86,7 +83,7 @@ def _fingerprint(root, tag):
                                   capture_output=True, check=True).stdout
             h.update(path.encode()); h.update(b"\0"); h.update(data.replace(b"\r\n", b"\n")); h.update(b"\0")
         except subprocess.CalledProcessError:
-            if path == "core/reference_sample.py":
+            if path in OPTIONAL_WRITING_FILES:
                 continue  # Preserve fingerprints of releases predating v5.6.
             h.update(path.encode()); h.update(b"\0<missing>\0")
     return h.hexdigest()
@@ -97,7 +94,7 @@ def current_writing_code_id(root=ROOT):
     h = hashlib.sha256()
     for path in sorted(SOURCE_FILES):
         fp = Path(root) / path
-        if path == "core/reference_sample.py" and not fp.is_file():
+        if path in OPTIONAL_WRITING_FILES and not fp.is_file():
             continue
         data = fp.read_bytes() if fp.is_file() else b"<missing>"
         h.update(path.encode()); h.update(b"\0"); h.update(data.replace(b"\r\n", b"\n")); h.update(b"\0")

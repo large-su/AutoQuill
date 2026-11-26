@@ -14,6 +14,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.paths import DATA_ROOT
+from core import account_metrics
 
 METRICS = ("reads", "likes", "comments", "collects", "favors")
 LABELS = {"阅读": "reads", "赞同": "likes", "评论": "comments", "收藏": "collects", "喜欢": "favors"}
@@ -160,7 +161,8 @@ def load_observations(root, *, include_snapshot_dates=False):
             if ident:
                 metrics, ambiguous = _parsed_metrics(row)
                 ambiguous_legacy_zero_fields += ambiguous
-                dedup[ident] = {"key": ident, "obs_date": od, "publish_date": _pub_date(row), "metrics": metrics,
+                dedup[ident] = {"key": ident, "obs_date": od, "publish_date": _pub_date(row),
+                                "title": str(row.get("title") or ""), "metrics": metrics,
                                 "source": "legacy_snapshot", "observed_at": od.isoformat()}
         observations.extend(dedup.values())
     state_path = _state_path(root)
@@ -196,6 +198,7 @@ def load_observations(root, *, include_snapshot_dates=False):
                     metrics, ambiguous = _parsed_metrics(item, source=source)
                     ambiguous_legacy_zero_fields += ambiguous
                     observations.append({"key": ident, "obs_date": od, "publish_date": publish_date,
+                                         "title": str(article.get("title") or ""),
                                          "metrics": metrics, "source": source,
                                          "observed_at": item.get("observed_at")})
     result = (observations, sorted(set(source_files)), source_errors,
@@ -203,6 +206,128 @@ def load_observations(root, *, include_snapshot_dates=False):
     if include_snapshot_dates:
         return result + (snapshot_dates,)
     return result
+
+
+def _attribution_context(root):
+    """Read recorded attribution metadata without changing evolution state."""
+    state_path = _state_path(root)
+    if not state_path.exists():
+        return {}
+    try:
+        with state_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        return {}
+    # Older/fixture state files may omit optional evolution collections.
+    data = dict(data)
+    for key in ("generations", "drafts", "publication_receipts"):
+        if not isinstance(data.get(key), list):
+            data[key] = []
+    if not isinstance(data.get("articles"), dict):
+        return {}
+    try:
+        from core import evolution
+        generations = {g.get("id"): g for g in data.get("generations", []) if isinstance(g, dict) and g.get("id")}
+        nodes = {n.get("id"): n for n in evolution._nodes(data) if isinstance(n, dict) and n.get("id")}
+    except (AttributeError, TypeError, ValueError):
+        return {}
+    out = {}
+    for aid, article in (data.get("articles") or {}).items():
+        if not isinstance(article, dict):
+            continue
+        key = _identity(article) or str(aid).strip()
+        if not key:
+            continue
+        generation = generations.get(article.get("generation_id"), {})
+        try:
+            node, attribution, source, reason, version_confirmed = evolution._resolve_attribution(
+                article, data, generations, nodes, bool(article.get("observations")))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            node, attribution, source, reason, version_confirmed = (None, "unassigned", None, "unavailable", False)
+        settings = generation.get("settings") if isinstance(generation.get("settings"), dict) else {}
+        workflow = settings.get("WORKFLOW_MODE") or settings.get("workflow_mode")
+        chain = generation.get("model_chain") if isinstance(generation.get("model_chain"), dict) else {}
+
+        def chain_value(name):
+            # Only scalar provenance fields are reportable; never expose options or
+            # other provider configuration objects.
+            value = chain.get(name)
+            return str(value) if isinstance(value, (str, int, float, bool)) and str(value) else None
+
+        confirmed = attribution == "confirmed"
+        verified = source == "verified_chain"
+        options = chain.get("options") if isinstance(chain.get("options"), dict) else {}
+        model_mode = options.get("mode") if isinstance(options.get("mode"), str) else None
+        out[key] = {
+            "title": str(article.get("title") or ""),
+            "confirmed": confirmed,
+            "verified_chain": verified,
+            "version": str(generation.get("version") or "").lstrip("vV") or None if verified and version_confirmed else None,
+            "workflow": str(workflow) if workflow and verified else None,
+            "episode": str(generation.get("episode") or "") or None if verified else None,
+            "node": str(node) if node and confirmed else None,
+            "channel": chain_value("channel") if verified else None,
+            "provider": chain_value("provider") if verified else None,
+            "model": chain_value("model") if verified else None,
+            "model_mode": model_mode if verified else None,
+            "reason": reason,
+        }
+    return out
+
+
+def _group_stats(rows):
+    return {"n": len(rows), "stats": _sample_stats(rows)}
+
+
+def _grouped_reports(rows):
+    """Aggregate fixed samples by inferred genre and recorded attribution."""
+    try:
+        from core.detectors import classify_genre
+    except ImportError:
+        classify_genre = lambda text: "其他"
+    genre = {}
+    attribution = {}
+    dimensions = {"version": {}, "workflow": {}, "episode": {}, "scheme": {},
+                  "channel": {}, "provider": {}, "model": {}, "model_mode": {}}
+    cohorts = {}
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        genre_key = classify_genre(title) if title else "unknown"
+        genre.setdefault(genre_key, []).append(row)
+        info = row.get("attribution") or {}
+        state = "confirmed" if info.get("confirmed") else "unknown"
+        attribution.setdefault(state, []).append(row)
+        for dimension in dimensions:
+            source_dimension = "node" if dimension == "scheme" else dimension
+            value = info.get(source_dimension) if info.get("confirmed") else None
+            dimensions[dimension].setdefault(value or "unknown", []).append(row)
+        labels = {
+            "genre": genre_key,
+            "attribution": state,
+            "workflow": info.get("workflow") or "unknown",
+            "scheme": info.get("node") or "unknown",
+            "channel": info.get("channel") or "unknown",
+            "provider": info.get("provider") or "unknown",
+            "model": info.get("model") or "unknown",
+            "model_mode": info.get("model_mode") or "unknown",
+        }
+        cohort_key = json.dumps(labels, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        cohorts.setdefault(cohort_key, []).append(row)
+    return {
+        "genre": {key: dict(_group_stats(items), label_basis="title_rule_inferred" if key != "unknown" else "unknown")
+                  for key, items in sorted(genre.items())},
+        "attribution": {
+            **{key: _group_stats(items) for key, items in sorted(attribution.items())},
+            "by_dimension": {
+                dimension: {str(key): _group_stats(items) for key, items in sorted(groups.items(), key=lambda item: str(item[0]))}
+                for dimension, groups in dimensions.items()
+            },
+        },
+        "cohorts": {key: dict(labels=json.loads(key), **_group_stats(items))
+                    for key, items in sorted(cohorts.items())},
+    }
 
 
 def _summary(values):
@@ -218,18 +343,24 @@ def _summary(values):
 
 def _sample_stats(rows):
     result = {metric: _summary([r["metrics"][metric] for r in rows if r["metrics"].get(metric) is not None]) for metric in METRICS}
-    eligible = [(r["metrics"]["reads"], r["metrics"]["likes"]) for r in rows if r["metrics"].get("reads") is not None and r["metrics"].get("likes") is not None and r["metrics"]["reads"] > 0]
-    result["likes_per_1000_reads"] = _rate_summary(eligible)
-    eligible = [(r["metrics"]["reads"], r["metrics"]["comments"]) for r in rows if r["metrics"].get("reads") is not None and r["metrics"].get("comments") is not None and r["metrics"]["reads"] > 0]
-    result["comments_per_1000_reads"] = _rate_summary(eligible)
+    for metric in ("likes", "comments", "collects", "favors"):
+        eligible = [(r["metrics"]["reads"], r["metrics"][metric]) for r in rows
+                    if r["metrics"].get("reads") is not None
+                    and r["metrics"].get(metric) is not None
+                    and r["metrics"]["reads"] > 0]
+        result[f"{metric}_per_1000_reads"] = _rate_summary(eligible)
     return result
 
 
 def _rate_summary(eligible):
     rates = [value * 1000 / reads for reads, value in eligible]
+    effective_reads = sum(r for r, _ in eligible) if eligible else None
     return {"eligible_n": len(eligible), "mean": statistics.mean(rates) if rates else None,
             "median": statistics.median(rates) if rates else None,
-            "pooled": 1000 * sum(v for _, v in eligible) / sum(r for r, _ in eligible) if eligible else None,
+            "p25": sorted(rates)[max(0, math.ceil(len(rates) * .25) - 1)] if rates else None,
+            "pooled": 1000 * sum(v for _, v in eligible) / effective_reads if eligible else None,
+            "effective_reads": effective_reads,
+            "reads_sum": effective_reads,
             "mean_definition": "篇均转化率；pooled为有效样本总互动/总阅读"}
 
 
@@ -302,6 +433,7 @@ def build_report(data_root=DATA_ROOT, since=None, horizon=7,
         raise ValueError("compare_from must not be later than compare_to")
     (observations, source_files, source_errors, ambiguous_legacy_zero_fields,
      snapshot_dates) = load_observations(data_root, include_snapshot_dates=True)
+    attribution_context = _attribution_context(data_root)
     if compare_from_date and compare_from_date not in snapshot_dates:
         raise ValueError(f"no published snapshot for compare_from: {compare_from_date.isoformat()}")
     if compare_to_date and compare_to_date not in snapshot_dates:
@@ -331,6 +463,10 @@ def build_report(data_root=DATA_ROOT, since=None, horizon=7,
         elif not existing_fresh and not is_fresh:
             unique[slot] = row
     for row in unique.values():
+        context = attribution_context.get(row["key"], {})
+        if context.get("title") and not row.get("title"):
+            row["title"] = context["title"]
+        row["attribution"] = context
         by_key.setdefault(row["key"], []).append(row)
     latest, fixed = [], []
     unknown = immature = missing = 0
@@ -359,11 +495,14 @@ def build_report(data_root=DATA_ROOT, since=None, horizon=7,
             },
             "observation_cutoff_date": cutoff.isoformat() if cutoff else None,
             "observation_count": len(unique), "total_articles": len(by_key), "since": since,
-            "horizon": horizon, "latest": {"n": len(latest), "stats": _sample_stats(latest)},
-            "fixed_horizon": {"n": len(fixed), "stats": _sample_stats(fixed)},
+            "horizon": horizon, "latest": {"n": len(latest), "stats": _sample_stats(latest),
+                                             "groups": _grouped_reports(latest)},
+            "fixed_horizon": {"n": len(fixed), "stats": _sample_stats(fixed),
+                               "groups": _grouped_reports(fixed)},
             "unknown_publish_date": unknown, "immature": immature, "missing": missing,
             "all_public_context": "描述性全量公开快照上下文，不能将历史账号全部作品归因于 AutoQuill 或本版本。",
-            "follower_growth": "unavailable", "per_run_hour": "unavailable"}
+            "follower_growth": account_metrics.report(data_root, since=since),
+            "per_run_hour": "unavailable"}
     if compare_from_date:
         report["corpus_comparison"] = _corpus_comparison(
             observations, compare_from_date, compare_to_date)

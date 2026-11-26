@@ -55,6 +55,9 @@ class TestGenerateStoryWithRetry(unittest.TestCase):
     """generate_story_with_retry 的反馈重试行为。"""
 
     def setUp(self):
+        editor = mock.patch.object(story_config, 'STORY_EDITOR_ENABLE', False)
+        editor.start()
+        self.addCleanup(editor.stop)
         # 强制 API 模式，跳过 Web 通道的清洗/修复（避免污染手工构造的文本）
         self._orig_mode = story_config  # config.story 无 LLM_MODE；改 config 顶层
         import config

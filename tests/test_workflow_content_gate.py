@@ -6,6 +6,11 @@ from workflows.base import WorkflowBase
 
 
 class CleanWorkflowContentGateTests(unittest.TestCase):
+    def setUp(self):
+        editor = patch.object(story_config, 'STORY_EDITOR_ENABLE', False)
+        editor.start()
+        self.addCleanup(editor.stop)
+
     def test_batch_valid_rewrite_can_replace_content_rejected_draft(self):
         from core.story_text import validate_story_format
         good = ('我推开门时，他正把我的箱子搬到门外。\n\n'

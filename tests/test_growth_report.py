@@ -127,6 +127,59 @@ class GrowthReportTests(unittest.TestCase):
         self.assertEqual(report["latest"]["stats"]["likes_per_1000_reads"]["eligible_n"], 1)
         self.assertEqual(report["latest"]["stats"]["likes_per_1000_reads"]["mean"], 25)
 
+    def test_all_interaction_rates_report_quantiles_and_effective_reads(self):
+        self.write("published_answers_2026-01-08.json", [
+            self.raw_row("a", reads=100, likes=10, comments=2, collects=1, favors=0),
+            self.raw_row("b", reads=1000, likes=50, comments=10, collects=5, favors=2),
+        ])
+        stats = build_report(self.tmp.name)["latest"]["stats"]
+        for metric in ("likes", "comments", "collects", "favors"):
+            rate = stats[f"{metric}_per_1000_reads"]
+            self.assertEqual(rate["eligible_n"], 2)
+            self.assertEqual(rate["effective_reads"], 1100)
+            self.assertEqual(rate["reads_sum"], 1100)
+            self.assertIsNotNone(rate["median"])
+            self.assertIsNotNone(rate["p25"])
+
+    def test_fixed_groups_keep_genre_inference_and_verified_attribution_separate(self):
+        digest = "text-v1:" + ("a" * 64)
+        self.write_state({"schema_version": 1, "generations": [
+            {"id": "g1", "episode": "ep1", "version": "5.13.0", "settings": {"WORKFLOW_MODE": "classic", "LLM_PROVIDER": "stale-settings-provider"},
+             "model_chain": {"channel": "api", "provider": "actual-provider", "model": "actual-model", "options": {"mode": "fast", "secret": "must-not-appear"}}},
+        ], "drafts": [{"id": "d1", "generation_id": "g1", "content_fingerprint": digest}],
+            "publication_receipts": [{"id": "r1", "aid": "verified", "draft_content_fingerprint": digest},
+                                      {"id": "r2", "aid": "sameqid", "draft_content_fingerprint": "text-v1:" + ("b" * 64)}],
+            "articles": {
+                "verified": {"aid": "verified", "title": "悬疑灵异故事", "publish_date": "2026-01-01",
+                              "generation_id": "g1", "publication_evidence": {"draft_id": "d1", "receipt_id": "r1", "generation_id": "g1", "content_fingerprint": digest},
+                              "observations": [{"observed_at": "2026-01-08T00:00:00+08:00", "source": "fresh", "reads": 100, "likes": 10, "comments": 2, "collects": 1, "favors": 0}]},
+                "unverified": {"aid": "unverified", "title": "悬疑灵异未核验", "publish_date": "2026-01-01",
+                                "generation_id": "g1", "observations": [{"observed_at": "2026-01-08T00:00:00+08:00", "source": "fresh", "reads": 100, "likes": 5, "comments": 1, "collects": 0, "favors": 0}]},
+                "sameqid": {"aid": "sameqid", "title": "悬疑灵异指纹不符", "publish_date": "2026-01-01", "generation_id": "g1",
+                             "publication_evidence": {"draft_id": "d1", "receipt_id": "r2", "generation_id": "g1", "content_fingerprint": "text-v1:" + ("b" * 64)},
+                             "observations": [{"observed_at": "2026-01-08T00:00:00+08:00", "source": "fresh", "reads": 100, "likes": 4, "comments": 1, "collects": 0, "favors": 0}]},
+                "manual": {"aid": "manual", "title": "悬疑灵异手工方案", "publish_date": "2026-01-01", "generation_id": "g1",
+                            "node_id": "ep1", "assignment_source": "manual", "observations": [{"observed_at": "2026-01-08T00:00:00+08:00", "source": "fresh", "reads": 100, "likes": 3, "comments": 1, "collects": 0, "favors": 0}]},
+            }})
+        groups = build_report(self.tmp.name)["fixed_horizon"]["groups"]
+        self.assertEqual(groups["genre"]["悬疑/灵异"]["n"], 4)
+        self.assertEqual(groups["attribution"]["confirmed"]["n"], 2)
+        self.assertEqual(groups["attribution"]["unknown"]["n"], 2)
+        self.assertEqual(groups["attribution"]["by_dimension"]["version"]["5.13.0"]["n"], 1)
+        self.assertEqual(groups["attribution"]["by_dimension"]["workflow"]["classic"]["n"], 1)
+        self.assertEqual(groups["attribution"]["by_dimension"]["episode"]["ep1"]["n"], 1)
+        self.assertEqual(groups["attribution"]["by_dimension"]["channel"]["api"]["n"], 1)
+        self.assertEqual(groups["attribution"]["by_dimension"]["provider"]["actual-provider"]["n"], 1)
+        self.assertEqual(groups["attribution"]["by_dimension"]["model"]["actual-model"]["n"], 1)
+        self.assertEqual(groups["attribution"]["by_dimension"]["model_mode"]["fast"]["n"], 1)
+        self.assertEqual(groups["attribution"]["by_dimension"]["version"]["unknown"]["n"], 3)
+        cohorts = list(groups["cohorts"].values())
+        self.assertTrue(any(c["labels"]["model_mode"] == "fast" and c["n"] == 1 for c in cohorts))
+        self.assertTrue(any(c["labels"]["attribution"] == "confirmed" and c["labels"]["model_mode"] == "unknown" for c in cohorts))
+        encoded = json.dumps(groups, ensure_ascii=False)
+        self.assertNotIn("stale-settings-provider", encoded)
+        self.assertNotIn("secret", encoded)
+
     def test_since_and_json_output_contains_no_identifiers_or_content(self):
         self.write("published_answers_2026-01-08.json", [self.row("a"), self.row("b", publish_date="2025-12-01")])
         output = Path(self.tmp.name) / "report.json"

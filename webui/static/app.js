@@ -16,6 +16,7 @@ const CFG_LABELS = {
   QUESTION_SOURCE: "选题来源",
   STORY_MATERIAL_MODE: "素材模式", AUTHOR_PROFILE: "作者风格",
   ENABLE_FORMAT_RETRY: "格式重试", MIN_ANSWER_LENGTH: "最短回答",
+  STORY_EDITOR_ENABLE: "全文编辑复核",
   MAX_TOPIC_RETRY: "选题重试",
   ENABLE_STORY_FILTER: "故事过滤", ENABLE_MATERIAL_LIKES_GATE: "点赞门槛",
   MATERIAL_MIN_LIKES: "最低点赞",
@@ -322,12 +323,13 @@ async function openStory(name) {
 
 /* ---------- 配置速览 ---------- */
 
-/* 选题参数：前端可修改（POST /api/config，持久化到 webui_model.json），在设置弹窗中编辑 */
-const TUNABLE_KEYS = new Set(["MAX_TOPIC_RETRY", "MIN_ANSWER_LENGTH", "MATERIAL_MIN_LIKES"]);
+/* 创作参数：前端可修改（POST /api/config，持久化到 webui_model.json），在设置弹窗中编辑 */
+const TUNABLE_KEYS = new Set(["MAX_TOPIC_RETRY", "MIN_ANSWER_LENGTH", "MATERIAL_MIN_LIKES", "STORY_EDITOR_ENABLE"]);
 const TUNABLE_HINTS = {
   MAX_TOPIC_RETRY: "首答不合格时最多重试次数（默认 5）",
   MIN_ANSWER_LENGTH: "首答最短字数，低于则重试（默认 500）",
   MATERIAL_MIN_LIKES: "素材最低点赞门槛（默认 200；纯净模式同样生效）",
+  STORY_EDITOR_ENABLE: "每稿增加一次全文复核；复核失败会留稿并停止发布",
 };
 
 /* 设置操作状态条（顶栏下方）：设置项修改即自动提交，成败在此反馈 */
@@ -346,21 +348,28 @@ function initTunables() {
   TUNABLE_KEYS.forEach((k) => {
     const row = document.createElement("div");
     row.className = "tun-row";
+    const control = k === "STORY_EDITOR_ENABLE"
+      ? `<select id="tun_${k}" title="修改后自动保存，下次启动保留"><option value="1">开启</option><option value="0">关闭</option></select>`
+      : `<input type="number" id="tun_${k}" min="0" title="修改后自动保存，下次启动保留">`;
     row.innerHTML =
-      `<span class="tun-k">${esc(CFG_LABELS[k] || k)}</span>` +
-      `<input type="number" id="tun_${k}" min="0" title="修改后自动保存，下次启动保留">` +
+      `<span class="tun-k">${esc(CFG_LABELS[k] || k)}</span>` + control +
       `<span class="tun-hint">${esc(TUNABLE_HINTS[k] || "")}</span>`;
     const input = row.querySelector("input");
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { saveTunable(k, input, null); input.blur(); }
-    });
-    input.addEventListener("blur", () => saveTunable(k, input, null));
+    if (k === "STORY_EDITOR_ENABLE") {
+      const select = row.querySelector("select");
+      select.addEventListener("change", () => saveTunable(k, select));
+    } else {
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { saveTunable(k, input, null); input.blur(); }
+      });
+      input.addEventListener("blur", () => saveTunable(k, input, null));
+    }
     box.appendChild(row);
   });
 }
 
 async function saveTunable(key, input) {
-  const val = parseInt(input.value, 10);
+  const val = key === "STORY_EDITOR_ENABLE" ? (input.value === "1" ? 1 : 0) : parseInt(input.value, 10);
   if (!Number.isInteger(val)) { showStStatus("请输入整数", "err"); return; }
   const prev = input.value;
   input.disabled = true;
@@ -372,7 +381,7 @@ async function saveTunable(key, input) {
     });
     if (!r.ok) throw new Error((await r.json()).detail || "保存失败");
     const d = await r.json();
-    addLog(`选题参数 ${CFG_LABELS[key] || key} → ${d.value}`, "result");
+    addLog(`创作参数 ${CFG_LABELS[key] || key} → ${d.value}`, "result");
     showStStatus(`${CFG_LABELS[key] || key} → ${d.value}`, "ok");
     loadConfig();
   } catch (e) {
@@ -404,7 +413,7 @@ async function loadConfig() {
     TUNABLE_KEYS.forEach((k) => {
       if (!(k in cfg)) return;
       const input = $("tun_" + k);
-      if (input) input.value = cfg[k];
+      if (input) input.value = k === "STORY_EDITOR_ENABLE" ? (cfg[k] ? "1" : "0") : cfg[k];
     });
   } catch (e) {
     $("cfgGrid").innerHTML = '<div class="empty-note">配置加载失败</div>';

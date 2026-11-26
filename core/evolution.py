@@ -13,19 +13,12 @@ from pathlib import Path
 from core import paths
 from core.version import VERSION
 from core import release_windows, feedback_archive
+from core.writing_sources import WRITING_FILES, OPTIONAL_WRITING_FILES
 
 
 _LOCK = threading.RLock()
 _RUN_ID = uuid.uuid4().hex
-_FILES = (
-    'story_prompt.py',
-    'story_generation.py',
-    'story_scoring.py',
-    'core/reference_sample.py',
-    'config/story.py',
-    'applications/zhihu_story/prompts.py',
-    'workflows/workflow_generation.py',
-)
+_FILES = WRITING_FILES
 _KEYS = (
     'LLM_MODE',
     'LLM_PROVIDER',
@@ -35,6 +28,7 @@ _KEYS = (
     'STORY_MATERIAL_MODE',
     'READER_EXPERIENCE_ENABLE',
     'CRAFT_LEARNING_ENABLE',
+    'STORY_EDITOR_ENABLE',
     'STORY_ENDING_CLOSURE_ENABLE',
     'READER_CONTRACT_ENABLE',
     'REFERENCE_NARRATIVE_SAMPLE_ENABLE',
@@ -180,7 +174,7 @@ def _code_id():
         p = Path(paths.program(*rel.split('/')))
         # This module did not exist before v5.6; do not change old code IDs
         # merely by adding a new file to the provenance schema.
-        if rel == 'core/reference_sample.py' and not p.is_file():
+        if rel in OPTIONAL_WRITING_FILES and not p.is_file():
             continue
         data = p.read_bytes().replace(b'\r\n', b'\n') if p.is_file() else b'<missing>'
         h.update(rel.encode() + b'\x00' + data + b'\x00')
@@ -972,10 +966,12 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
                    'latest_metrics': {key: {'valid_n': sum(a['latest'].get(key) is not None for a in public),
                                             'missing': sum(a['latest'].get(key) is None for a in public)}
                                       for key in _METRICS},
-                   'unavailable': {'followers': '尚无可核验的账号新增关注观测，问题关注数不是账号关注数',
+                   'unavailable': {'followers': '单篇带来的新增关注不可核验，账号级关注观测单独统计',
                                    'per_run_hour': '尚无完整的版本运行暴露时间，不能计算每小时回报'}}
         warnings.append('评价最小间隔为北京时间自然日：同日最后版本汇总当天所有版本动作和作品，持续至下一个发布日。此约定不代表实际安装时段，原生成证据独立保留。')
+        from core import account_metrics
         return {'schema_version': 1, 'current_version': VERSION,
+                'account_followers': account_metrics.report(data_root=paths.data()),
                 'objective': '比较逐作品发布年龄窗口的真实反馈；保留缺失和归属证据，不作因果判断。',
                 'horizon': horizon, 'horizons': [7, 14, 30, 90],
                 'metric': metric, 'metrics_available': dict(_METRICS),

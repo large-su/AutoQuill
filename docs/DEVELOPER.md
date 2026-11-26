@@ -169,7 +169,13 @@ v5.13.0 起新增 `DATA_ROOT/data/state/story_models.jsonl`：按已发布作品
 
 ### 3.1 正文检查与发布边界
 
-v5.13.0 起，`core/story_text.py` 的 `story_content_issues()` 统一检查明确的模型元内容，`ensure_story_content()` 在发现问题时抛出 `StoryContentError`。规则覆盖全文，保留正常对白和题材用词；文学质量由原有编辑流程负责。
+v5.13.0 起，`core/story_text.py` 的 `story_content_issues()` 统一检查明确的模型元内容，`ensure_story_content()` 在发现问题时抛出 `StoryContentError`。规则覆盖全文，保留正常对白和题材用词。
+
+后续本地候选增加 `core/story_editor.py`：默认开启 `STORY_EDITOR_ENABLE`，以当前通道接收完整稿件进行终稿编辑。可在设置→创作参数中关闭，状态保存在 `story_tunables`。正常稿增加一次请求；问题证据不能在本稿核对、超过 24,000 字符、通道不可用时保留本地稿并停止本篇发布。确实需要修正时沿用已有生成次数，不叠加无限改写。批量路径同时检查格式与编辑结果。
+
+`core/story_length.py` 统一解析题目中的阿拉伯数字字数区间（如 `4000到5000字`），在参考材料插入前协调模板默认篇幅，并按去空白正文字符检查，不含 Markdown 数字章节标题。其他写法尚不由该解析器保证；原有格式要求仍适用。
+
+`core/writing_sources.py` 是运行时与发布历史的写作指纹清单；新模块不存在的历史 tag 跳过对应可选路径，避免重写旧方案归属。`core/account_metrics.py` 在 `data/state/account_metrics.jsonl` 追加最小的账号关注观测，使用站点时区排序、分账号统计，不保存原始用户资料。现有反馈刷新读取官方登录账号的 `follower_count`，采集失败不将关注补零，也不丢弃有效的作品快照。演进页与 `tools/growth_report.py` 展示账号级观测；单篇新增关注仍不可核验。
 
 - 经典与批量生成的格式检查将非故事内容视为硬否决并计零分，合格重写稿可以正常替换；纯净模式在原创审核之前独立检查并反馈原因，关闭原创审核不关闭正文检查。
 - `browser_write.publish_story()` 在接触编辑器、清除旧草稿之前检查传入正文。

@@ -645,6 +645,19 @@ def scrape(progress=None, stop_flag=None, result_meta=None):
         if ingest_error:
             _meta(error=ingest_error + "，未替换上次快照", count=0)
             return []
+
+        # Account-level growth is observed directly, independently of article votes.
+        # A missing count must not become zero or invalidate a good article snapshot.
+        try:
+            response = b.context.request.get(
+                'https://www.zhihu.com/api/v4/me?include=follower_count', timeout=8000)
+            if response.ok:
+                profile = response.json()
+                from core.account_metrics import record_observation
+                record_observation(profile.get('id'), profile.get('follower_count'),
+                                   stamp, data_root=_DATA_DIR.parent)
+        except Exception as exc:
+            log.warning('账号关注观测未保存（作品观测保留）：%s', type(exc).__name__)
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         try:

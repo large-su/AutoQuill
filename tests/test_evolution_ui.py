@@ -21,6 +21,7 @@ class EvolutionUITest(unittest.TestCase):
         from fastapi.testclient import TestClient
         from playwright.sync_api import sync_playwright
         from webui.server import app
+        from config import story as story_settings
 
         today = date.today()
         first_release = (today - timedelta(days=40)).isoformat()
@@ -54,6 +55,9 @@ class EvolutionUITest(unittest.TestCase):
             evolution.finish_refresh(refresh['id'], status='done', count=6,
                                      observed_at=datetime.now().astimezone().isoformat(),
                                      source_file='published_answers_ui.json')
+            from core.account_metrics import record_observation
+            record_observation('ui-account', 100, (today - timedelta(days=1)).isoformat() + 'T12:00:00+08:00', temporary)
+            record_observation('ui-account', 105, today.isoformat() + 'T12:00:00+08:00', temporary)
             client = TestClient(app)
             scheme_id = client.get("/api/evolution").json()["nodes"][0]["id"]
             for aid in ("2", "3", "4", "5", "6"):
@@ -78,7 +82,7 @@ class EvolutionUITest(unittest.TestCase):
                     route.fulfill(status=200, content_type="application/json",
                                   body=json.dumps({"status": "error" if fail['feedback'] else "done", "error": "采集失败测试"}))
                     return
-                if parsed.path.startswith("/api/evolution") or not parsed.path.startswith("/api/"):
+                if parsed.path == '/api/config' or parsed.path.startswith("/api/evolution") or not parsed.path.startswith("/api/"):
                     response = client.request(route.request.method, target, content=route.request.post_data,
                                               headers={"Content-Type": "application/json"})
                     route.fulfill(status=response.status_code, content_type=response.headers.get("content-type", "text/plain"),
@@ -144,7 +148,9 @@ class EvolutionUITest(unittest.TestCase):
                     self.assertIn("42.5", page.inner_text("#evoDetail"))
                     self.assertGreater(page.locator("#evoDistribution canvas").count(), 0)
                     self.assertIn("6 篇", page.inner_text("#evoFeedbackStatus"))
-                    self.assertIn("账号关注数不可用", page.inner_text("#evoWarnings"))
+                    self.assertIn("关注归属", page.inner_text("#evoWarnings"))
+                    self.assertIn("账号关注：105", page.inner_text("#evoFeedbackStatus"))
+                    self.assertIn("净变化 +5", page.inner_text("#evoFeedbackStatus"))
                     self.assertIn("人工确认", page.inner_text("#evoArticles"))
                     page.select_option("#evoMetric", "collects")
                     page.wait_for_function("document.getElementById('evoDetail').textContent.includes('收藏中位数')")
@@ -177,6 +183,14 @@ class EvolutionUITest(unittest.TestCase):
                     self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth - window.innerWidth'), 1)
                     if screenshot:
                         page.screenshot(path=str(Path(screenshot).with_name(Path(screenshot).stem + "-narrow.png")), full_page=True)
+                    with patch('config._save_webui_state') as save_state, patch.object(story_settings, 'STORY_EDITOR_ENABLE', True):
+                        page.click('#btnSetup')
+                        page.wait_for_selector('#tun_STORY_EDITOR_ENABLE')
+                        page.wait_for_function("document.getElementById('tun_STORY_EDITOR_ENABLE').value === '1'")
+                        with page.expect_response(lambda r: r.url.endswith('/api/config') and r.request.method == 'POST') as response:
+                            page.select_option('#tun_STORY_EDITOR_ENABLE', '0')
+                        self.assertIs(response.value.json()['value'], False)
+                        self.assertIs(save_state.call_args.kwargs['story_tunables']['STORY_EDITOR_ENABLE'], False)
                     self.assertEqual(errors, [])
                 finally:
                     browser.close()

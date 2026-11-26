@@ -186,9 +186,13 @@ class FeedbackLoopTest(unittest.TestCase):
              "publish_date": "2026-08-29", "observed": "2026-08-30",
              "reads": 60, "likes": 0, "comments": 0, "collects": 0,
              "favors": 0},
+            {"url": "a4", "title": "虐文2", "genre": "虐文/火葬场",
+             "publish_date": "2026-08-29", "observed": "2026-08-30",
+             "reads": 60, "likes": 0, "comments": 0, "collects": 0,
+             "favors": 0},
         ])
         s = fb.summarize(auto_seed=False)
-        self.assertEqual(s["n_articles"], 3)
+        self.assertEqual(s["n_articles"], 4)
         self.assertIn("甜文", s["genres"])
         self.assertIn("虐文/火葬场", s["genres"])
         self.assertGreater(
@@ -225,6 +229,19 @@ class FeedbackLoopTest(unittest.TestCase):
         self.assertEqual(g["effective_score"], s["overall"]["score"])
 
     # ---------------- 题材分类 ----------------
+
+    def test_one_observation_cannot_penalize_or_boost_a_genre(self):
+        for score in (0, 1000):
+            self._write_perf([
+                {'url': 'rare', 'title': '古言故事', 'genre': '古言', 'publish_date': '2026-01-01',
+                 'observed': '2026-01-15', 'likes': score},
+                {'url': 'usual-1', 'title': '甜文', 'genre': '甜文', 'publish_date': '2026-01-01',
+                 'observed': '2026-01-15', 'likes': 10},
+                {'url': 'usual-2', 'title': '甜文', 'genre': '甜文', 'publish_date': '2026-01-01',
+                 'observed': '2026-01-15', 'likes': 10},
+            ])
+            _reset_cache()
+            self.assertEqual(fb.topic_genre_multiplier('好看的古言故事'), 1.0)
 
     def test_dom_score_unchanged_without_prior_data(self):
         # 无任何表现观测时，**题材先验**恒 1.0（不动原打分）。
