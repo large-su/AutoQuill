@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from core.story_text import (
@@ -17,6 +18,37 @@ class StoryContentGuardTests(unittest.TestCase):
         for payload in ('{"story":"她回来了。"}', '["她回来了。"]'):
             with self.subTest(payload=payload):
                 self.assertEqual(story_content_issues(payload)[0]['code'], 'structured_payload')
+
+    def test_embedded_editor_json_is_rejected_at_any_position(self):
+        payload = json.dumps({'facts': {'people': ['小满']}, 'verdict': 'pass', 'issues': []},
+                             ensure_ascii=False, indent=2)
+        for prefix, suffix in (('', '\n她走了。'), ('她进门。\n', '\n她走了。'),
+                               ('她进门。', '她走了。'), ('她进门。\n', '')):
+            with self.subTest(prefix=prefix, suffix=suffix):
+                text = prefix + payload + suffix
+                issue = next(i for i in story_content_issues(text) if i['code'] == 'editor_payload')
+                self.assertEqual(issue['offset'], len(prefix))
+                with self.assertRaises(StoryContentError):
+                    ensure_story_content(text)
+
+    def test_in_world_json_and_quoted_editor_example_are_allowed(self):
+        examples = (
+            '她打开终端。\n{"name":"小满","count":3}\n门开了。',
+            '她看着屏幕。\n{"verdict":"已回家","issues":[]}\n他松了口气。',
+            '她举起纸条：\n「{"facts":{},"verdict":"pass","issues":[]}」\n他把纸条收好。',
+        )
+        for text in examples:
+            with self.subTest(text=text):
+                self.assertEqual(story_content_issues(text), [])
+
+    def test_malformed_editor_shape_is_not_a_keyword_veto(self):
+        for value in ('{"verdict":[],"issues":[]}', '{"verdict":"pass","issues":{}}'):
+            self.assertEqual(story_content_issues('屏幕亮了。\n' + value + '\n她关上门。'), [])
+
+    def test_editor_schema_is_detected_independently_of_first_key(self):
+        for verdict in ('pass', 'PASS', ' revise '):
+            text = '她进门。\n' + json.dumps({'trace': 'x', 'verdict': verdict, 'issues': []}) + '\n他走来。'
+            self.assertIn('editor_payload', {i['code'] for i in story_content_issues(text)})
 
     def test_markdown_meta_headings_and_closing_control_tags(self):
         for line in ('### **写作计划**', '</analysis>', '<|im_start|>assistant'):

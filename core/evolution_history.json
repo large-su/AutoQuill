@@ -1677,22 +1677,23 @@
       ],
       "writing_code_id": "89531971e8abaf46598a4124c013cb38772076b15c7c757e68bdeaec9af25fa2",
       "provenance": "git-tag",
-      "interval_end": "2026-11-26T15:46:40+00:00"
+      "interval_end": "2026-11-26T23:49:56+08:00"
     },
     {
       "version": "5.14.0",
       "tag": "v5.14.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "afd12e96c9b64f2f5ac82f61b7636ce9b40fce1a",
+      "source_commit": "afd12e96c9b64f2f5ac82f61b7636ce9b40fce1a",
       "parent": "8d0f1fde2694a2b7c329c4d2eeb69143346032d8",
       "date": "2026-11-26",
-      "released_at": "2026-11-26T15:46:40+00:00",
-      "release_time_source": "build-time-estimate",
-      "summary": "v5.14.0: 升级故事定向修订、独立全文编辑与真实增长评估",
+      "released_at": "2026-11-26T23:49:56+08:00",
+      "release_time_source": "git-commit",
+      "summary": "v5.14.0: 升级故事定向修订、独立全文编辑与真实增长评估；feat: 增加全文故事编辑与真实增长评估",
       "summaries": [
-        "v5.14.0: 升级故事定向修订、独立全文编辑与真实增长评估"
+        "v5.14.0: 升级故事定向修订、独立全文编辑与真实增长评估",
+        "feat: 增加全文故事编辑与真实增长评估"
       ],
-      "changed_file_count": 43,
+      "changed_file_count": 44,
       "changed_files": [
         ".gitignore",
         "CHANGELOG.md",
@@ -1701,6 +1702,7 @@
         "config/story.py",
         "core/account_metrics.py",
         "core/evolution.py",
+        "core/evolution_history.json",
         "core/feedback_loop.py",
         "core/story_editor.py",
         "core/story_length.py",
@@ -1732,8 +1734,7 @@
         "tools/growth_report.py",
         "webui/api_settings.py",
         "webui/published.py",
-        "webui/static/app.js",
-        "webui/static/evolution.js"
+        "webui/static/app.js"
       ],
       "change_kind": "mixed",
       "writing_files_changed": [
@@ -1747,6 +1748,36 @@
         "story_scoring.py",
         "workflows/workflow_generation.py"
       ],
+      "writing_code_id": "c4c592eefc6b60d21ddf95ff21d14bcf6674fa85b9a4fb723d87febb92de2286",
+      "provenance": "git-tag",
+      "interval_end": "2026-11-26T15:57:52+00:00"
+    },
+    {
+      "version": "5.14.1",
+      "tag": "v5.14.1",
+      "commit": null,
+      "source_commit": null,
+      "parent": "afd12e96c9b64f2f5ac82f61b7636ce9b40fce1a",
+      "date": "2026-11-26",
+      "released_at": "2026-11-26T15:57:52+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.14.1: 修复正文中段终稿审核JSON漏拦截",
+      "summaries": [
+        "v5.14.1: 修复正文中段终稿审核JSON漏拦截"
+      ],
+      "changed_file_count": 8,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "core/story_text.py",
+        "core/version.py",
+        "docs/research/STORY-GROWTH-UPGRADE-2026-11.md",
+        "installer/AutoQuill.iss",
+        "tests/test_story_content.py",
+        "tests/test_workflow_content_gate.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
       "writing_code_id": "c4c592eefc6b60d21ddf95ff21d14bcf6674fa85b9a4fb723d87febb92de2286",
       "provenance": "working-tree",
       "pending": true,

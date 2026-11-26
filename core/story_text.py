@@ -138,6 +138,26 @@ def story_content_issues(text):
                            'message': '返回的是模型结构化数据，请只输出故事正文', 'offset': 0})
     lines = text.splitlines(keepends=True)
     quoted_mask = _quoted_mask(text)
+    # Editorial replies have a distinct schema. They must not survive when
+    # embedded between narrative paragraphs; ordinary in-world JSON and quoted
+    # dialogue remain valid. Only recognize the actual editor response schema.
+    if not issues:
+        decoder = json.JSONDecoder()
+        for candidate in re.finditer(r'\{', text):
+            start = candidate.start()
+            if quoted_mask[start]:
+                continue
+            try:
+                payload, _ = decoder.raw_decode(text, start)
+            except ValueError:
+                continue
+            if (isinstance(payload, dict)
+                    and isinstance(payload.get('verdict'), str)
+                    and payload['verdict'].strip().lower() in ('pass', 'revise')
+                    and isinstance(payload.get('issues'), list)):
+                issues.append({'code': 'editor_payload',
+                               'message': '正文混入终稿审核JSON，请只保留故事正文',
+                               'offset': start})
     offset = 0
     for raw in lines:
         line = raw.rstrip("\r\n")

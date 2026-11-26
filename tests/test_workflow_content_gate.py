@@ -55,3 +55,17 @@ class CleanWorkflowContentGateTests(unittest.TestCase):
         self.assertFalse(audit['passed'])
         self.assertEqual(audit['verdict'], '非故事内容')
         audit_llm.assert_not_called()
+
+    def test_editor_json_in_middle_never_reaches_originality_or_publishing(self):
+        workflow = WorkflowBase()
+        bad = '她推开门。\n{"facts":{},"verdict":"pass","issues":[]}\n他走来。'
+        with patch.object(story_config, 'CLEAN_AUDIT_ENABLE', True), \
+             patch.object(workflow, 'generate_clean_story', return_value=bad), \
+             patch('core.originality.audit_originality') as audit_llm, \
+             patch('core.story_editor.review_story') as editor:
+            text, audit = workflow.generate_clean_with_retry('题目', '参考', max_attempts=1)
+        self.assertFalse(audit['passed'])
+        self.assertEqual(text, bad)
+        self.assertEqual(audit['verdict'], '非故事内容')
+        audit_llm.assert_not_called()
+        editor.assert_not_called()
