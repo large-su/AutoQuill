@@ -17,6 +17,7 @@
 #   new_chat → setup → input → send → 轮询（非阻塞原语）→ read_result
 # ============================================================
 
+import copy
 import logging
 import time
 
@@ -360,7 +361,9 @@ class WebLLMDriver:
     def apply_preferences(self):
         """Apply and confirm this provider's explicitly saved model/options."""
         from web_drivers.capabilities import apply_selection
-        return apply_selection(self)
+        actual = apply_selection(self)
+        self.observed_model_selection = copy.deepcopy(actual)
+        return actual
 
     def poll_generation(self, max_wait=None):
         """Sample the current reply without blocking.

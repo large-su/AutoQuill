@@ -238,7 +238,9 @@ class BatchGenerationMixin:
                         if story and len(story) >= 500:
                             mat['story'] = story
                             mat['md_path'] = self.save_story_file(
-                                story, mat['index']
+                                story, mat['index'],
+                                model_chain=(progress.get(mat['index']) or {}).get('model_chain') or
+                                            {'channel': 'unknown'},
                             )
                             ok = True
                         else:
@@ -337,7 +339,10 @@ class BatchGenerationMixin:
             if story and len(story) >= 500:
                 story = fix_story_format(clean_story_output(story))
                 mat['story'] = story
-                mat['md_path'] = self.save_story_file(story, mat['index'])
+                chains = getattr(runner, 'model_chains', [])
+                mat['md_path'] = self.save_story_file(
+                    story, mat['index'],
+                    model_chain=(chains[i] if i < len(chains) else None) or {'channel': 'unknown'})
                 log.info(f"  ✓ 任务 {mat['index']} 并行生成成功"
                          f"（{len(story)} 字符）")
             else:
@@ -450,7 +455,9 @@ class BatchGenerationMixin:
                             mat['story'] = retry_story
                             mat['format_score'] = retry_fmt
                             mat['md_path'] = self.save_story_file(
-                                retry_story, f"{mat['index']}_retry"
+                                retry_story, f"{mat['index']}_retry",
+                                model_chain=(retry_progress.get(mat['index']) or {}).get('model_chain') or
+                                            {'channel': 'unknown'},
                             )
                             compliant.append(mat)
                             retried_ok += 1
@@ -537,8 +544,10 @@ class BatchGenerationMixin:
                 if retry_valid and retry_fmt > mat['format_score']:
                     mat['story'] = retry_story
                     mat['format_score'] = retry_fmt
+                    chains = getattr(runner, 'model_chains', [])
                     mat['md_path'] = self.save_story_file(
-                        retry_story, f"{mat['index']}_retry"
+                        retry_story, f"{mat['index']}_retry",
+                        model_chain=(chains[i] if i < len(chains) else None) or {'channel': 'unknown'}
                     )
                     compliant.append(mat)
                     retried_ok += 1

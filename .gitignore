@@ -52,6 +52,7 @@ data/state/published_topics.jsonl
 data/state/story_performance.jsonl
 data/state/evolution.json
 data/state/evolution.tmp
+data/state/story_models.jsonl
 
 # Python
 __pycache__/

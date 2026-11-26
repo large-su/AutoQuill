@@ -207,7 +207,7 @@ def _settings(settings):
         src = {k: getattr(settings, k, None) for k in _KEYS}
     return {k: src[k] for k in _KEYS if k in src and isinstance(src[k], (str, int, float, bool, type(None)))}
 
-def record_generation(story_file, story_text, settings=None, workflow_mode=None):
+def record_generation(story_file, story_text, settings=None, workflow_mode=None, model_chain=None):
     safe = _settings(settings)
     if workflow_mode in ('classic', 'clean'):
         safe['WORKFLOW_MODE'] = workflow_mode
@@ -242,6 +242,8 @@ def record_generation(story_file, story_text, settings=None, workflow_mode=None)
             'observed_at': _now(),
             'event': 'file_save',
         }
+        if model_chain is not None:
+            g['model_chain'] = model_chain
         d['generations'].append(g)
         _save(d)
         return {'id': g['id'], 'event': 'file_save', 'fingerprint': fingerprint}
@@ -319,6 +321,14 @@ def record_publication(result):
                                          'generation_id': draft['generation_id'],
                                          'content_fingerprint': digest, 'verified_at': _now()}
         _save(d)
+        from core import story_model_index
+        generation = next((g for g in d['generations']
+                           if draft and g['id'] == draft['generation_id']), None)
+        chain = {'channel': 'unknown'}
+        if generation and len(generations) == 1 and not a.get('provenance_conflict'):
+            chain = generation.get('model_chain') or chain
+        story_model_index.append_publication(
+            a.get('title') or (draft or {}).get('title'), a['url'], chain)
         return dict(a)
 
 def _number(v):

@@ -142,6 +142,7 @@ class ParallelWebRunner:
 
         queue = list(enumerate(tasks))
         results = [None] * len(tasks)
+        self.model_chains = [None] * len(tasks)
 
         while queue or any(s.status not in (SlotState.IDLE, SlotState.DEAD)
                            for s in self.slots):
@@ -169,6 +170,8 @@ class ParallelWebRunner:
                         story = self._collect(slot)
                         if story and len(story) >= 500:
                             results[slot.task_idx] = story
+                            from core.story_model_index import web_chain
+                            self.model_chains[slot.task_idx] = web_chain(slot.driver)
                             slot.consecutive_fails = 0
                             self._release(slot)
                         else:

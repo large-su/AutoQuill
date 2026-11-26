@@ -248,12 +248,17 @@ class TestRunScheduling(unittest.TestCase):
             0: ([600, 600, 600], []),   # d1 的第 0 次派发（全局任务 1）
             1: ([600, 600, 600], []),   # d1 的第 1 次派发（全局任务 3）
         })
+        d0.provider_name = d1.provider_name = 'Yuanbao'
+        d0.observed_model_selection = {'model': 'model-A'}
+        d1.observed_model_selection = {'model': 'model-B'}
         runner = self._runner(num_slots=2)
         runner.slots = [self._mk_slot(runner, 0, d0),
                         self._mk_slot(runner, 1, d1)]
         results = runner.run([(f"任务{i}", None) for i in range(4)])
         self.assertEqual(len(results), 4)
         self.assertTrue(all(r and len(r) >= 500 for r in results))
+        self.assertEqual([chain['model'] for chain in runner.model_chains],
+                         ['model-A', 'model-B', 'model-A', 'model-B'])
         # 每个任务派发前调用序列：new_chat → setup → input → send
         for d in (d0, d1):
             for call in ("new_chat", "setup", "send"):

@@ -191,6 +191,8 @@ def generate_story_parallel(question_title, reference_answer, task_id, progress,
     )
 
     local_start = time.time()
+    from core.story_model_index import api_chain
+    progress[task_id]['model_chain'] = api_chain()
     accumulated = {"text": ""}
     first_token_logged = False
     progress[task_id].update({

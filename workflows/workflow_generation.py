@@ -43,8 +43,10 @@ class GenerationMixin:
                       feedback=None):
         """API 模式：流式 HTTP 请求"""
         from story_generation import generate_story
+        from core.story_model_index import api_chain
 
         author = getattr(self, "author", None)
+        model_chain = api_chain()
         story = generate_story(question_title, top_answer, recipe=recipe,
                                author=author, feedback=feedback)
         if not story:
@@ -57,6 +59,7 @@ class GenerationMixin:
                     question_title, top_answer, recipe, feedback=feedback
                 )
             return None
+        self._last_story_model_chain = model_chain
         return story
 
     def _generate_web(self, question_title, top_answer, recipe=None,
@@ -125,7 +128,10 @@ class GenerationMixin:
         log.info(f"  Prompt 模式：{mode_str}")
 
         driver = get_driver()
-        return driver.generate(full_prompt)
+        story = driver.generate(full_prompt)
+        from core.story_model_index import web_chain
+        self._last_story_model_chain = web_chain(driver)
+        return story
 
     @staticmethod
     def _format_format_failure(details):
@@ -164,6 +170,7 @@ class GenerationMixin:
 
         max_attempts = max_attempts or STORY_GENERATE_MAX_ATTEMPTS
         best = None            # 兜底：多次失败时返回更高分版本
+        best_chain = None
         best_score = -1
         last_reason = None     # 上一轮失败原因（重试反馈）
         self._web_fail_consecutive = 0  # 每轮任务重置 Web 断路器计数
@@ -182,6 +189,7 @@ class GenerationMixin:
             if len(story) < min_length:
                 if best is None or len(story) > len(best):
                     best = story
+                    best_chain = getattr(self, '_last_story_model_chain', None)
                 last_reason = f"字数过短（仅 {len(story)} 字，要求至少 " \
                               f"{min_length} 字）"
                 log.warning("故事过短（%d字），第 %d/%d 次重试…",
@@ -195,6 +203,7 @@ class GenerationMixin:
             if risk["risky"]:
                 if best is None or len(story) > len(best):
                     best = story
+                    best_chain = getattr(self, '_last_story_model_chain', None)
                 last_reason = (
                     f"开篇与参考回答有 {risk['run']} 字连续重合"
                     f"（「{risk['snippet']}」）——只允许学参考的起手手法，"
@@ -208,11 +217,13 @@ class GenerationMixin:
                 return story, True
             if fmt_score > best_score:
                 best_score, best = fmt_score, story
+                best_chain = getattr(self, '_last_story_model_chain', None)
             last_reason = (self._format_format_failure(details)
                            or f"格式不合规（{fmt_score}/10）")
             log.warning("故事格式不合规（%d/10），第 %d/%d 次重试…",
                         fmt_score, attempt + 1, max_attempts)
 
+        self._last_story_model_chain = best_chain
         return best, False
 
     # ============================================================
@@ -237,8 +248,12 @@ class GenerationMixin:
 
         if LLM_MODE == "api":
             from story_generation import generate_story_clean
-            return generate_story_clean(question_title, reference_answer,
-                                        feedback=feedback)
+            from core.story_model_index import api_chain
+            model_chain = api_chain()
+            story = generate_story_clean(question_title, reference_answer,
+                                         feedback=feedback)
+            self._last_story_model_chain = model_chain
+            return story
 
         # Web 模式：网页版大模型（无 API Key 依赖）
         try:
@@ -248,6 +263,8 @@ class GenerationMixin:
             log.info(f"  Prompt 模式：{mode_str}")
             driver = get_driver()
             story = driver.generate(full_prompt)
+            from core.story_model_index import web_chain
+            self._last_story_model_chain = web_chain(driver)
             if story and story.strip():
                 from core.story_text import clean_story_output
                 story = clean_story_output(story)
@@ -272,6 +289,7 @@ class GenerationMixin:
         max_attempts = max_attempts or CLEAN_MAX_GEN_ATTEMPTS
         last_audit = None
         best = None
+        best_chain = None
 
         wash_streak = 0
         for attempt in range(max_attempts):
@@ -298,6 +316,7 @@ class GenerationMixin:
                                   "llm_detail": None, "originality": None}
                 continue
             best = story
+            best_chain = getattr(self, '_last_story_model_chain', None)
 
             if not CLEAN_AUDIT_ENABLE:
                 last_audit = {"passed": True, "verdict": "原创（审核已关闭）",
@@ -325,6 +344,7 @@ class GenerationMixin:
         else:
             log.warning("纯净模式：%d 次尝试后仍未通过原创审核，最高分版已存盘供人工核对",
                         max_attempts)
+        self._last_story_model_chain = best_chain
         return best, last_audit
     # ============================================================
     # 保存故事文件（通用）

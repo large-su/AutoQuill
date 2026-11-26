@@ -92,10 +92,11 @@ class TestPathsInstallMode(unittest.TestCase):
         # 模拟旧版解压目录（PROGRAM_ROOT 旁挂 data/output/config 数据）
         fake_old = tempfile.mkdtemp(prefix="aq_old_")
         try:
-            for d in ("data", "output", "config"):
+            for d in ("data", "data/state", "output", "config"):
                 os.makedirs(os.path.join(fake_old, d))
             for rel, body in (
                     ("data/collected_stories.jsonl", "{}"),
+                    ("data/state/story_models.jsonl", '{"title":"kept","url":"https://www.zhihu.com/answer/1"}'),
                     ("output/story_x.md", "# x"),
                     ("config/llm_providers.json", "[]"),
                     ("config/browser_state.json", "{}"),
@@ -110,6 +111,7 @@ class TestPathsInstallMode(unittest.TestCase):
             self.assertIsNone(result["error"])
             self.assertTrue(result["migrated"])
             for rel in ("data/collected_stories.jsonl",
+                        "data/state/story_models.jsonl",
                         "output/story_x.md",
                         "config/llm_providers.json",
                         "config/browser_state.json",
