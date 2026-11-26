@@ -59,7 +59,7 @@ def _path():
     return Path(paths.data('data', 'state', 'evolution.json'))
 
 def _now():
-    return datetime.now().astimezone().isoformat(timespec='seconds')
+    return datetime.now(release_windows.ZH_TZ).isoformat(timespec='seconds')
 
 def _blank():
     return {'schema_version': 1, 'generations': [], 'drafts': [], 'articles': {}, 'refreshes': []}
@@ -341,13 +341,13 @@ def _number(v):
     return int(n) if n.is_integer() else n
 
 def _date(v):
+    stamp = release_windows.timestamp(v)
+    if stamp is not None:
+        return stamp.date()
     try:
-        return datetime.fromisoformat(str(v).replace('Z', '+00:00')).date()
+        return date.fromisoformat(str(v)[:10])
     except ValueError:
-        try:
-            return date.fromisoformat(str(v)[:10])
-        except ValueError:
-            return None
+        return None
 
 def _publish(v, observed):
     s = str(v or '').strip()
@@ -814,7 +814,7 @@ def contract(horizon=30, metric='likes', since='', until='', aid='', node_id='',
         horizon = 30
     horizon = horizon if horizon in (7, 14, 30, 90) else 30
     metric = metric if metric in _METRICS else 'likes'
-    today = _date(as_of) if as_of is not None else date.today()
+    today = _date(as_of) if as_of is not None else datetime.now(release_windows.ZH_TZ).date()
     if today is None:
         raise ValueError('无效的查询截止日期')
     start, end = _date(since) if since else None, _date(until) if until else None

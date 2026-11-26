@@ -4,6 +4,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -44,6 +45,18 @@ class _FakeBrowser:
         if "CreationCardTitle-wrapper" in js:
             return list(self.payload)
         return True
+
+
+class _UtcCrossDay(datetime):
+    """Represent the UTC CI instant after midnight in the China business day."""
+
+    @classmethod
+    def now(cls, tz=None):
+        instant = cls(2026, 11, 26, 16, 30, tzinfo=timezone.utc)
+        return instant.astimezone(tz) if tz else instant
+
+    def astimezone(self, tz=None):
+        return super().astimezone(timezone.utc if tz is None else tz)
 
 
 class FeedbackRefreshIntegrationTest(unittest.TestCase):
@@ -133,6 +146,19 @@ class FeedbackRefreshIntegrationTest(unittest.TestCase):
             second = published.refresh_feedback(source="automation", refresh_key="it-2026-10-14")
         self.assertTrue(second["ok"])
         self.assertEqual(second["node_id"], first["node_id"])
+
+    def test_automation_idempotency_uses_china_calendar_day_at_utc_crossday(self):
+        from core import release_windows
+        self.assertEqual(_UtcCrossDay.now().astimezone().date(), datetime(2026, 11, 26).date())
+        self.assertEqual(_UtcCrossDay.now(release_windows.ZH_TZ).date(), datetime(2026, 11, 27).date())
+        payload = [{"aid": "a1", "metrics": {"阅读": "1", "赞同": "1"}}]
+        with mock.patch.object(published, 'datetime', _UtcCrossDay):
+            first = self._refresh(payload)
+            self.assertTrue(first['ok'])
+            with mock.patch.object(published, 'scrape', side_effect=AssertionError('must reuse')):
+                second = published.refresh_feedback(source='automation', refresh_key='it-2026-10-14')
+        self.assertTrue(second['ok'])
+        self.assertEqual(second['node_id'], first['node_id'])
 
     def test_failed_ingest_is_visible_and_does_not_claim_committed_observation(self):
         _FakeBrowser.payload = [{"aid": "new", "metrics": {"阅读": "2", "赞同": "1"}}]

@@ -731,9 +731,11 @@ def refresh_feedback(progress=None, stop_flag=None, source="manual", refresh_key
         if source == "automation" and refresh_key:
             existing = evolution.find_refresh(refresh_key, source="automation")
             if existing:
-                observed = str(existing.get("observed_at") or "")
-                today = datetime.now().astimezone().date().isoformat()
-                if observed[:10] == today and int(existing.get("count") or 0) > 0 and existing.get("source_file"):
+                from core import release_windows
+                observed = release_windows.timestamp(existing.get("observed_at"))
+                today = datetime.now(release_windows.ZH_TZ).date()
+                if (observed and observed.date() == today
+                        and int(existing.get("count") or 0) > 0 and existing.get("source_file")):
                     _dash({"status": "done", "count": existing["count"], "pct": 100,
                            "progress": "今日反馈已采集，恢复完成记录", "error": "", "need_login": False})
                     return {"ok": True, "status": "done",

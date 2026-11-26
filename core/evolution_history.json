@@ -1750,31 +1750,64 @@
       ],
       "writing_code_id": "c4c592eefc6b60d21ddf95ff21d14bcf6674fa85b9a4fb723d87febb92de2286",
       "provenance": "git-tag",
-      "interval_end": "2026-11-26T15:57:52+00:00"
+      "interval_end": "2026-11-27T00:00:57+08:00"
     },
     {
       "version": "5.14.1",
       "tag": "v5.14.1",
-      "commit": null,
-      "source_commit": null,
+      "commit": "00709a038c678580912fdc2226217eba599387c0",
+      "source_commit": "00709a038c678580912fdc2226217eba599387c0",
       "parent": "afd12e96c9b64f2f5ac82f61b7636ce9b40fce1a",
-      "date": "2026-11-26",
-      "released_at": "2026-11-26T15:57:52+00:00",
-      "release_time_source": "build-time-estimate",
+      "date": "2026-11-27",
+      "released_at": "2026-11-27T00:00:57+08:00",
+      "release_time_source": "git-commit",
       "summary": "v5.14.1: 修复正文中段终稿审核JSON漏拦截",
       "summaries": [
         "v5.14.1: 修复正文中段终稿审核JSON漏拦截"
       ],
-      "changed_file_count": 8,
+      "changed_file_count": 9,
       "changed_files": [
         "CHANGELOG.md",
         "README.md",
+        "core/evolution_history.json",
         "core/story_text.py",
         "core/version.py",
         "docs/research/STORY-GROWTH-UPGRADE-2026-11.md",
         "installer/AutoQuill.iss",
         "tests/test_story_content.py",
         "tests/test_workflow_content_gate.py"
+      ],
+      "change_kind": "engineering",
+      "writing_files_changed": [],
+      "writing_code_id": "c4c592eefc6b60d21ddf95ff21d14bcf6674fa85b9a4fb723d87febb92de2286",
+      "provenance": "git-tag",
+      "interval_end": "2026-11-26T16:12:46+00:00"
+    },
+    {
+      "version": "5.14.2",
+      "tag": "v5.14.2",
+      "commit": null,
+      "source_commit": null,
+      "parent": "00709a038c678580912fdc2226217eba599387c0",
+      "date": "2026-11-27",
+      "released_at": "2026-11-26T16:12:46+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.14.2: 统一反馈业务日期并修复跨时区观测缺失",
+      "summaries": [
+        "v5.14.2: 统一反馈业务日期并修复跨时区观测缺失"
+      ],
+      "changed_file_count": 10,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "core/evolution.py",
+        "core/version.py",
+        "docs/DEVELOPER.md",
+        "docs/research/STORY-GROWTH-UPGRADE-2026-11.md",
+        "installer/AutoQuill.iss",
+        "tests/test_evolution_timezone.py",
+        "tests/test_feedback_refresh_integration.py",
+        "webui/published.py"
       ],
       "change_kind": "engineering",
       "writing_files_changed": [],
