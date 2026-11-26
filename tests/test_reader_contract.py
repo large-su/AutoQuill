@@ -83,6 +83,22 @@ class ReaderContractTest(unittest.TestCase):
                                opening_auto=False)
             build_clean_prompt(self.TITLE, self.REFERENCE)
 
+    def test_explicit_length_and_evidence_are_not_overridden_by_late_rules(self):
+        title = '第三人称悬疑，4000到5000字，靠20分钟的门禁差与800元账款查清真相，完整结局'
+        for material in ('sample', 'reference', 'recipe', 'recipe_and_reference'):
+            with self.subTest(material=material), \
+                 patch('config.story.STORY_MATERIAL_MODE', material), \
+                 patch('config.story.READER_CONTRACT_ENABLE', True):
+                message, _ = build_story_prompt(
+                    title, self.REFERENCE, recipe=self.RECIPE,
+                    opening_auto=False, feedback='上一稿超过题目篇幅')
+                self.assertIn(title, message)
+                self.assertIn('题目有字数上限就不能超过', message)
+                for conflict in ('一句话超过40字必须拆', '超过 40 字的句子需要再拆短',
+                                 '禁止精确数字', '字数只有下限、没有上限',
+                                 '格式违规的代价远大于内容瑕疵'):
+                    self.assertNotIn(conflict, message)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -180,6 +180,80 @@ class GrowthReportTests(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0, bad.stdout.decode("utf-8", errors="replace"))
         self.assertIn("--since must be YYYY-MM-DD", bad.stderr.decode("utf-8", errors="replace"))
 
+    def test_corpus_comparison_reports_retained_absent_new_without_ids(self):
+        self.write("published_answers_2026-01-08.json", [
+            self.raw_row("keep", reads=100, likes=10),
+            self.raw_row("gone", reads=200, likes=20),
+            self.raw_row("zero", reads=0, likes=0),
+        ])
+        self.write("published_answers_2026-01-10.json", [
+            self.raw_row("keep", reads=150, likes=15),
+            self.raw_row("new", reads=50, likes=5),
+            self.raw_row("zero", reads=None, likes=None),
+        ])
+        report = build_report(self.tmp.name, compare_from="2026-01-08",
+                              compare_to="2026-01-10")
+        comparison = report["corpus_comparison"]
+        self.assertEqual((comparison["before_n"], comparison["after_n"]), (3, 3))
+        self.assertEqual((comparison["retained_n"], comparison["absent_from_snapshot_n"], comparison["new_in_snapshot_n"]), (2, 1, 1))
+        likes = comparison["metrics"]["likes"]
+        self.assertEqual(likes["matched_n"], 1)
+        self.assertEqual(likes["retained_before"]["sum"], 10)
+        self.assertEqual(likes["retained_after"]["sum"], 15)
+        self.assertEqual(likes["delta"], 5)
+        self.assertEqual(likes["missing_before_total"], {"valid_n": 1, "sum": 20})
+        self.assertEqual(likes["new_after_total"], {"valid_n": 1, "sum": 5})
+        self.assertEqual(likes["retained_before_missing_n"], 0)
+        self.assertEqual(likes["retained_after_missing_n"], 1)
+        encoded = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("keep", encoded)
+        self.assertNotIn("private body", encoded)
+
+    def test_corpus_comparison_requires_exact_snapshot_dates_and_both_bounds(self):
+        self.write("published_answers_2026-01-08.json", [self.raw_row("a", reads=1, likes=1)])
+        with self.assertRaisesRegex(ValueError, "provided together"):
+            build_report(self.tmp.name, compare_from="2026-01-08")
+        with self.assertRaisesRegex(ValueError, "no published snapshot"):
+            build_report(self.tmp.name, compare_from="2026-01-07", compare_to="2026-01-08")
+        with self.assertRaisesRegex(ValueError, "not be later"):
+            build_report(self.tmp.name, compare_from="2026-01-09", compare_to="2026-01-08")
+        with self.assertRaises(ValueError):
+            build_report(self.tmp.name, compare_from="", compare_to="2026-01-08")
+
+    def test_empty_snapshot_is_a_valid_comparison_endpoint(self):
+        self.write("published_answers_2026-01-08.json", [], generated_at="2026-01-08T01:00:00")
+        self.write("published_answers_2026-01-10.json", [self.raw_row("a", reads=2, likes=1)])
+        report = build_report(self.tmp.name, since="2026-01-10",
+                              compare_from="2026-01-08", compare_to="2026-01-10")
+        comparison = report["corpus_comparison"]
+        self.assertEqual((comparison["before_n"], comparison["after_n"]), (0, 1))
+        self.assertEqual(comparison["new_in_snapshot_n"], 1)
+        self.assertEqual(comparison["comparison_scope"], "full_snapshots_unfiltered_by_since")
+
+    def test_malformed_snapshot_schema_is_not_an_empty_endpoint(self):
+        self.write("published_answers_2026-01-08.json", [self.raw_row("a", reads=2, likes=1)])
+        (self.data / "published_answers_2026-01-10.json").write_text(
+            json.dumps({"rows": "error"}), encoding="utf-8")
+        report = build_report(self.tmp.name)
+        self.assertIn({"file": "published_answers_2026-01-10.json",
+                       "error": "invalid_schema"}, report["source_errors"])
+        with self.assertRaisesRegex(ValueError, "no published snapshot"):
+            build_report(self.tmp.name, compare_from="2026-01-08",
+                         compare_to="2026-01-10")
+
+    def test_nonempty_to_legal_empty_snapshot_reports_absent_set(self):
+        self.write("published_answers_2026-01-08.json", [
+            self.raw_row("a", reads=2, likes=1),
+            self.raw_row("b", reads=3, likes=2),
+        ])
+        self.write("published_answers_2026-01-10.json", [])
+        comparison = build_report(
+            self.tmp.name, compare_from="2026-01-08", compare_to="2026-01-10"
+        )["corpus_comparison"]
+        self.assertEqual((comparison["before_n"], comparison["after_n"]), (2, 0))
+        self.assertEqual(comparison["absent_from_snapshot_n"], 2)
+        self.assertEqual(comparison["new_in_snapshot_n"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

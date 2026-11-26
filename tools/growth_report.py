@@ -127,12 +127,13 @@ def _state_observation_date(value):
         return None
 
 
-def load_observations(root):
+def load_observations(root, *, include_snapshot_dates=False):
     root = Path(root)
     dirs = [root / "data"] if (root / "data").is_dir() else [root]
     files = sorted({p for d in dirs for p in d.glob("published_answers_*.json") if p.is_file()})
     observations, source_files, source_errors = [], [], []
     ambiguous_legacy_zero_fields = 0
+    snapshot_dates = set()
     for path in files:
         try:
             with path.open("r", encoding="utf-8") as fh:
@@ -140,11 +141,16 @@ def load_observations(root):
         except (OSError, ValueError) as exc:
             source_errors.append({"file": path.name, "error": "invalid_json" if isinstance(exc, ValueError) else "read_error"})
             continue
+        if not (isinstance(obj, list) or
+                (isinstance(obj, dict) and isinstance(obj.get("rows"), list))):
+            source_errors.append({"file": path.name, "error": "invalid_schema"})
+            continue
         od = _observation_date(obj, path)
         if not od:
             source_errors.append({"file": path.name, "error": "missing_observation_date"})
             continue
         source_files.append(path.name)
+        snapshot_dates.add(od)
         # Last row wins for an id on a given observation date.
         dedup = {}
         for row in _rows(obj):
@@ -192,7 +198,11 @@ def load_observations(root):
                     observations.append({"key": ident, "obs_date": od, "publish_date": publish_date,
                                          "metrics": metrics, "source": source,
                                          "observed_at": item.get("observed_at")})
-    return observations, sorted(set(source_files)), source_errors, ambiguous_legacy_zero_fields
+    result = (observations, sorted(set(source_files)), source_errors,
+              ambiguous_legacy_zero_fields)
+    if include_snapshot_dates:
+        return result + (snapshot_dates,)
+    return result
 
 
 def _summary(values):
@@ -223,10 +233,79 @@ def _rate_summary(eligible):
             "mean_definition": "篇均转化率；pooled为有效样本总互动/总阅读"}
 
 
-def build_report(data_root=DATA_ROOT, since=None, horizon=7):
+def _comparison_snapshot(observations, target):
+    """Return the one published snapshot on *target*, without state history."""
+    rows = {}
+    for row in observations:
+        if row.get("source") == "legacy_snapshot" and row.get("obs_date") == target:
+            rows[row["key"]] = row
+    return rows
+
+
+def _comparison_metric(before, after, metric):
+    before_values = {key: row["metrics"].get(metric) for key, row in before.items()}
+    after_values = {key: row["metrics"].get(metric) for key, row in after.items()}
+    retained_keys = before.keys() & after.keys()
+    matched = [key for key in retained_keys
+               if before_values[key] is not None and after_values[key] is not None]
+    absent_after = before.keys() - after.keys()
+    new_after = after.keys() - before.keys()
+
+    def total(values):
+        return {"valid_n": len(values), "sum": sum(values) if values else None}
+
+    retained_before = [before_values[key] for key in matched]
+    retained_after = [after_values[key] for key in matched]
+    return {
+        "before_total": total([v for v in before_values.values() if v is not None]),
+        "after_total": total([v for v in after_values.values() if v is not None]),
+        "retained_before": total(retained_before),
+        "retained_after": total(retained_after),
+        "delta": (sum(retained_after) - sum(retained_before) if matched else None),
+        "matched_n": len(matched),
+        "retained_before_missing_n": len(retained_keys) - sum(
+            before_values[key] is not None for key in retained_keys),
+        "retained_after_missing_n": len(retained_keys) - sum(
+            after_values[key] is not None for key in retained_keys),
+        "missing_before_total": total([before_values[key] for key in absent_after
+                                        if before_values[key] is not None]),
+        "new_after_total": total([after_values[key] for key in new_after
+                                   if after_values[key] is not None]),
+    }
+
+
+def _corpus_comparison(observations, from_date, to_date):
+    before = _comparison_snapshot(observations, from_date)
+    after = _comparison_snapshot(observations, to_date)
+    return {
+        "from": from_date.isoformat(), "to": to_date.isoformat(),
+        "before_n": len(before), "after_n": len(after),
+        "retained_n": len(before.keys() & after.keys()),
+        "absent_from_snapshot_n": len(before.keys() - after.keys()),
+        "new_in_snapshot_n": len(after.keys() - before.keys()),
+        "metrics": {metric: _comparison_metric(before, after, metric)
+                    for metric in METRICS},
+        "comparison_scope": "full_snapshots_unfiltered_by_since",
+        "interpretation": "absent_from_snapshot 表示该作品不在后一份快照中，不等同于删除、下架或风控。",
+    }
+
+
+def build_report(data_root=DATA_ROOT, since=None, horizon=7,
+                 compare_from=None, compare_to=None):
     if horizon not in (7, 14, 30, 90):
         raise ValueError("horizon must be one of 7, 14, 30, 90")
-    observations, source_files, source_errors, ambiguous_legacy_zero_fields = load_observations(data_root)
+    if (compare_from is None) != (compare_to is None):
+        raise ValueError("compare_from and compare_to must be provided together")
+    compare_from_date = date.fromisoformat(compare_from) if compare_from is not None else None
+    compare_to_date = date.fromisoformat(compare_to) if compare_to is not None else None
+    if compare_from_date and compare_to_date and compare_from_date > compare_to_date:
+        raise ValueError("compare_from must not be later than compare_to")
+    (observations, source_files, source_errors, ambiguous_legacy_zero_fields,
+     snapshot_dates) = load_observations(data_root, include_snapshot_dates=True)
+    if compare_from_date and compare_from_date not in snapshot_dates:
+        raise ValueError(f"no published snapshot for compare_from: {compare_from_date.isoformat()}")
+    if compare_to_date and compare_to_date not in snapshot_dates:
+        raise ValueError(f"no published snapshot for compare_to: {compare_to_date.isoformat()}")
     cutoff = max((r["obs_date"] for r in observations), default=None)
     since_date = date.fromisoformat(since) if since else None
     by_key = {}
@@ -272,7 +351,7 @@ def build_report(data_root=DATA_ROOT, since=None, horizon=7):
             fixed.append(min(candidates, key=lambda r: (r["obs_date"] - target, r["obs_date"])))
         elif newest["obs_date"] >= target:
             missing += 1
-    return {"source_files": source_files, "source_errors": source_errors,
+    report = {"source_files": source_files, "source_errors": source_errors,
             "source_quality": {
                 "legacy_snapshot": "flat normalized snapshot zeroes are treated as missing because they cannot distinguish missing or invalid source values from measured zeroes",
                 "fresh_state": "fresh evolution observations preserve raw zeroes; missing raw values remain missing",
@@ -285,6 +364,10 @@ def build_report(data_root=DATA_ROOT, since=None, horizon=7):
             "unknown_publish_date": unknown, "immature": immature, "missing": missing,
             "all_public_context": "描述性全量公开快照上下文，不能将历史账号全部作品归因于 AutoQuill 或本版本。",
             "follower_growth": "unavailable", "per_run_hour": "unavailable"}
+    if compare_from_date:
+        report["corpus_comparison"] = _corpus_comparison(
+            observations, compare_from_date, compare_to_date)
+    return report
 
 
 def main(argv=None):
@@ -292,6 +375,8 @@ def main(argv=None):
     parser.add_argument("--data-root", default=DATA_ROOT)
     parser.add_argument("--since")
     parser.add_argument("--horizon", type=int, choices=(7, 14, 30, 90), default=7)
+    parser.add_argument("--compare-from", dest="compare_from")
+    parser.add_argument("--compare-to", dest="compare_to")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
     if args.since:
@@ -299,7 +384,18 @@ def main(argv=None):
             date.fromisoformat(args.since)
         except ValueError:
             parser.error("--since must be YYYY-MM-DD")
-    report = build_report(args.data_root, args.since, args.horizon)
+    for name in ("compare_from", "compare_to"):
+        value = getattr(args, name)
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                parser.error(f"--{name.replace('_', '-')} must be YYYY-MM-DD")
+    try:
+        report = build_report(args.data_root, args.since, args.horizon,
+                              args.compare_from, args.compare_to)
+    except ValueError as exc:
+        parser.error(str(exc))
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")

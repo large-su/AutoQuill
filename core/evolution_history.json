@@ -1489,20 +1489,21 @@
       "writing_files_changed": [],
       "writing_code_id": "b4a2b0c0af44eaccfde81246c5cd4013485aab468d001acee1e8eb666dce93ff",
       "provenance": "git-tag",
-      "interval_end": "2026-11-05T08:00:55+00:00"
+      "interval_end": "2026-11-05T16:04:32+08:00"
     },
     {
       "version": "5.11.0",
       "tag": "v5.11.0",
-      "commit": null,
-      "source_commit": null,
+      "commit": "0a0597b6cde92deda3525d35b3ea8b29a3c83e1d",
+      "source_commit": "0a0597b6cde92deda3525d35b3ea8b29a3c83e1d",
       "parent": "f08d253fb13980c27c22dc6316cb03852ffac08a",
       "date": "2026-11-05",
-      "released_at": "2026-11-05T08:00:55+00:00",
-      "release_time_source": "build-time-estimate",
-      "summary": "v5.11.0: 统一网页模型交互、站内模型参数与Aizex接入，完成工作流验收",
+      "released_at": "2026-11-05T16:04:32+08:00",
+      "release_time_source": "git-commit",
+      "summary": "v5.11.0: 统一网页模型交互、站内模型参数与Aizex接入，完成工作流验收；v5.10.0: 修正网页登录路由测试的 Edge 环境模拟",
       "summaries": [
-        "v5.11.0: 统一网页模型交互、站内模型参数与Aizex接入，完成工作流验收"
+        "v5.11.0: 统一网页模型交互、站内模型参数与Aizex接入，完成工作流验收",
+        "v5.10.0: 修正网页登录路由测试的 Edge 环境模拟"
       ],
       "changed_file_count": 57,
       "changed_files": [
@@ -1553,6 +1554,43 @@
         "workflows/workflow_generation.py"
       ],
       "writing_code_id": "1b6c20a6fbe27566c05e67d0470a383465441305bd1c618a839dbfca5b709f45",
+      "provenance": "git-tag",
+      "interval_end": "2026-11-26T00:25:55+00:00"
+    },
+    {
+      "version": "5.12.0",
+      "tag": "v5.12.0",
+      "commit": null,
+      "source_commit": null,
+      "parent": "0a0597b6cde92deda3525d35b3ea8b29a3c83e1d",
+      "date": "2026-11-26",
+      "released_at": "2026-11-26T00:25:55+00:00",
+      "release_time_source": "build-time-estimate",
+      "summary": "v5.12.0: 修复元宝正文提取并收敛故事提示规则",
+      "summaries": [
+        "v5.12.0: 修复元宝正文提取并收敛故事提示规则"
+      ],
+      "changed_file_count": 12,
+      "changed_files": [
+        "CHANGELOG.md",
+        "README.md",
+        "applications/zhihu_story/prompts.py",
+        "core/version.py",
+        "docs/research/YUANBAO-UPGRADE-2026-11.md",
+        "installer/AutoQuill.iss",
+        "story_prompt.py",
+        "tests/test_growth_report.py",
+        "tests/test_reader_contract.py",
+        "tests/test_web_provider_drivers.py",
+        "tools/growth_report.py",
+        "web_drivers/yuanbao.py"
+      ],
+      "change_kind": "mixed",
+      "writing_files_changed": [
+        "applications/zhihu_story/prompts.py",
+        "story_prompt.py"
+      ],
+      "writing_code_id": "893d008b486d8b424b0925c6a16da3f4ad064f55a36926bdefc016a31fafba49",
       "provenance": "working-tree",
       "pending": true,
       "interval_end": null

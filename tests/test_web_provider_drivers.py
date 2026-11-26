@@ -206,6 +206,53 @@ class ProviderDOMTests(unittest.TestCase):
         self.assertTrue(driver.wait_complete(max_wait=1))
         self.assertEqual(driver.read_result(), '{"ok":true}')
 
+    def test_yuanbao_deep_thinking_is_excluded_from_new_reply(self):
+        driver = YuanbaoDriver({**WEB_DRIVERS["Yuanbao"], "poll_interval": 0.02,
+                                "stable_count": 2})
+        driver._page = self.page
+        driver._browser = self.driver._browser
+        self.page.set_content('''
+          <div data-conv-id="old">
+            <div class="agent-chat__conv--ai__speech_show"><p>旧回答锚点</p></div>
+          </div>
+          <div id="yuanbao-send-btn" aria-label="发送">发送</div>''')
+        driver._mark_reply_anchor()
+        self.page.evaluate("""() => document.body.insertAdjacentHTML('beforeend', `
+          <div data-conv-id="new">
+            <div class="agent-chat__conv--ai__speech_show">
+              <div class="hyc-component-deepsearch-cot__think">
+                <div class="header">已深度思考(用时 1 秒)</div>
+                <div class="content"><div class="hyc-content-md">虚构思考内容</div></div>
+              </div>
+              <div class="hyc-content-md"><div class="hyc-common-markdown">
+                <h2>新章节</h2><p>本轮正文</p>
+              </div></div>
+            </div>
+          </div>` )""")
+        self.assertNotIn("虚构思考内容", driver._new_reply_text())
+        self.assertIn("本轮正文", driver._new_reply_text())
+        self.assertTrue(driver.wait_complete(max_wait=1))
+        self.assertEqual(driver.read_result(), "## **新章节**\n\n本轮正文")
+
+    def test_yuanbao_thinking_only_reply_cannot_complete(self):
+        driver = YuanbaoDriver({**WEB_DRIVERS["Yuanbao"], "poll_interval": 0.02,
+                                "stable_count": 2})
+        driver._page = self.page
+        driver._browser = self.driver._browser
+        self.page.set_content('<div id="yuanbao-send-btn" aria-label="发送">发送</div>')
+        driver._mark_reply_anchor()
+        self.page.evaluate("""() => document.body.insertAdjacentHTML('beforeend', `
+          <div data-conv-id="new">
+            <div class="agent-chat__conv--ai__speech_show">
+              <div class="hyc-component-deepsearch-cot__think">
+                <div class="header">已深度思考(用时 1 秒)</div>
+                <div class="content"><div class="hyc-content-md">仅思考无正文</div></div>
+              </div>
+            </div>
+          </div>` )""")
+        self.assertEqual(driver._new_reply_text(), "")
+        self.assertFalse(driver.wait_complete(max_wait=0.12))
+
     def test_cannot_read_history_without_send_anchor(self):
         self.page.set_content('<div class="assistant"><p>旧回答</p></div>')
         self.assertEqual(self.driver._new_reply_text(), "")

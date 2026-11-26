@@ -10,6 +10,7 @@ class YuanbaoDriver(ConfiguredTextChatDriver):
     # Loaded official chunks query AI speech by data-conv-id and this exact
     # class; /chat/naQivTmsDa remains an agent ID, not a conversation ID.
     reply_selectors = ("div[data-conv-id] .agent-chat__conv--ai__speech_show",)
+    thinking_selectors = (".hyc-component-deepsearch-cot__think",)
     # Official chat bundle creates this div with aria-label "停止回答" while
     # streaming (and "发送" at rest); it is not a generic text guess.
     stop_selectors = ("#yuanbao-send-btn[aria-label='停止回答']",)
