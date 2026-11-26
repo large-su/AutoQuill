@@ -291,7 +291,8 @@ class BatchGenerationMixin:
         轮询派发/收集（web_drivers/parallel.py），与 API 并行
         ThreadPoolExecutor 不同：页面操作必须单线程。
         """
-        from llm_api import build_story_prompt, _load_author_profile_or_none
+        from story_prompt import build_story_prompt
+        from story_generation import _load_author_profile_or_none
         from core.story_text import clean_story_output, fix_story_format
         from web_drivers.parallel import ParallelWebRunner
         from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
@@ -489,7 +490,8 @@ class BatchGenerationMixin:
 
     def _batch_retry_web_parallel(self, non_compliant, compliant, drv_cfg):
         """Web 并行重试不合规文章（复用并行调度器，保留 fmt_score 严格大于语义）。"""
-        from llm_api import build_story_prompt, _load_author_profile_or_none
+        from story_prompt import build_story_prompt
+        from story_generation import _load_author_profile_or_none
         from core.story_text import (
             clean_story_output, fix_story_format, validate_story_format
         )

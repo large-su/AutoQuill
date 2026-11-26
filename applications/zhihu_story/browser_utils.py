@@ -10,10 +10,36 @@ import logging
 import os
 import re
 import time
+from html.parser import HTMLParser
 
 log = logging.getLogger(__name__)
 
 from core.paths import data as _data_path
+
+
+def story_html_to_text(html):
+    """保留段落与转义文字，供服务端草稿全文检查使用。"""
+    class Text(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ('p', 'div', 'br', 'li', 'h1', 'h2', 'h3', 'blockquote'):
+                self.parts.append('\n')
+
+        def handle_endtag(self, tag):
+            if tag in ('p', 'div', 'li', 'h1', 'h2', 'h3', 'blockquote'):
+                self.parts.append('\n')
+
+        def handle_data(self, value):
+            self.parts.append(value)
+
+    parser = Text()
+    parser.feed(html or '')
+    return re.sub(r'[\u200b-\u200d\ufeff]', '', ''.join(parser.parts)).strip()
+
+
 def _find_edge():
     """定位系统 Edge 可执行文件：AQ_EDGE_PATH 环境变量 → x86 → x64 →
     注册表 App Paths（用户级/便携安装兜底）。找不到返回 None。"""

@@ -22,6 +22,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,42 @@ log = logging.getLogger(__name__)
 TRACKED = ('follow', 'vote', 'comment')
 
 KIND_LABELS = {'follow': '关注知友', 'vote': '送出赞同', 'comment': '发布评论'}
+
+# 关注 / 赞同按钮文案解析（纯状态，不依赖浏览器 DOM）。
+_FOLLOWED_TEXTS = ('已关注', '互相关注')
+_NOT_FOLLOWED_TEXTS = ('关注', '+ 关注')
+_VOTED_PREFIX = '已赞同'
+_NOT_VOTED_PREFIX = '赞同'
+_ZW_CHARS = ('\u200b', '\u200c', '\u200d', '\ufeff')
+_ZW_RE = re.compile('[' + ''.join(_ZW_CHARS) + ']')
+
+
+def _normalize_button_text(text):
+    return _ZW_RE.sub('', str(text or '')).strip()
+
+
+def follow_state(text):
+    '''按钮文案 → followed / none / unknown。'''
+    t = _normalize_button_text(text)
+    if not t:
+        return 'unknown'
+    if t in _FOLLOWED_TEXTS:
+        return 'followed'
+    if t in _NOT_FOLLOWED_TEXTS:
+        return 'none'
+    return 'unknown'
+
+
+def vote_state(text):
+    '''赞同按钮文案 → voted / none / unknown（已赞同 747 / 赞同 746）。'''
+    t = _normalize_button_text(text)
+    if not t:
+        return 'unknown'
+    if t.startswith(_VOTED_PREFIX):
+        return 'voted'
+    if t.startswith(_NOT_VOTED_PREFIX):
+        return 'none'
+    return 'unknown'
 
 # 哪些项可以从本地台账追溯「其实已经做成了」（见 heal_from_ledger）。
 # 只放**有台账可查、且不可重复做**的项：评论发出去了就不可能再发一次，
@@ -251,8 +288,6 @@ def target_action(kind, item, is_last=False):
       toggle  取关再关注 / 取消赞同再赞同（仅最后一个草稿）
       skip    换下一个候选（已关注且不是最后一班 / 按钮不可用 / 状态读不出来）
     '''
-    from applications.zhihu_story.browser_interact import (
-        follow_state, vote_state)
     it = item or {}
     if kind == 'follow':
         if not it.get('has_follow'):

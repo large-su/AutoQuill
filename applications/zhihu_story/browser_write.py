@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 from core.paths import data as _data_path
 from core.evolution import content_fingerprint
+from core.story_text import StoryContentError, ensure_story_content
 
 from .browser_utils import (
     _NAV_TIMEOUT,
@@ -22,6 +23,7 @@ from .browser_utils import (
     clean_story_markdown,
     page_needs_login,
     story_markdown_to_html,
+    story_html_to_text,
 )
 
 
@@ -663,17 +665,29 @@ class WriteActionsMixin:
                            "演练通过：草稿箱 %d 篇，将发最旧的一篇《%s》，未点击发布"
                            % (len(cards), target.get("title") or target.get("qid")),
                            reason="dry_run", rehearsed=True)
-        # Best-effort provenance capture: read the server draft exactly once before
-        # the first real publish click. Never let evidence collection block publish.
+        # 检查服务端当前全文；排队或手工修改后的草稿不能依赖生成时检查结果。
         from web_drivers.browser_pool import WorkflowCancelled
         try:
-            draft_content_digest = content_fingerprint(
-                self.get_draft_content(target.get("qid")))
+            draft_html = self.get_draft_content(target.get("qid"))
+            plain = story_html_to_text(draft_html)
+            if not plain:
+                return _finish(False, self.page.url or "",
+                               "未能读取完整草稿正文，已停止发布；请检查草稿后重试",
+                               reason="content_unavailable", certain=True)
+            ensure_story_content(plain)
+            draft_content_digest = content_fingerprint(draft_html)
+        except StoryContentError as exc:
+            _say(str(exc))
+            return _finish(False, self.page.url or "", str(exc),
+                           reason="content_rejected", certain=True)
         except WorkflowCancelled:
             self._disarm_publish_watch(watch)
             raise
         except Exception as exc:                # noqa: BLE001
-            log.debug("browser_adapter: 草稿内容指纹采集失败：%s", exc)
+            log.warning("browser_adapter: 发布前全文检查不可用：%s", exc)
+            return _finish(False, self.page.url or "",
+                           "发布前无法核验完整草稿正文，已停止发布；请检查后重试",
+                           reason="content_unavailable", certain=True)
         # ★ 这里**不再**用 _PUBLISH_BTN_JS 做「预检点击」：
         #   它在非演练时是真的会点按钮的，等于把发布提前到点击函数之外——
         #   2026-09-28 线上事故就是它发出的发布，随后真实点击因按钮已变灰而超时，
@@ -841,6 +855,7 @@ class WriteActionsMixin:
 
         返回 True 表示服务端草稿已确认包含故事全文，False 表示超时。
         """
+        ensure_story_content(story)
         if not self._find_write_button(timeout=20):
             # 生成长耗时后重新导航，页面可能渲染慢/空壳：
             # 先 dump 现场再兜底。★ reload 只重载「当前 URL」——若

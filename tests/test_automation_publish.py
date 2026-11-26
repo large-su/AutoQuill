@@ -23,6 +23,7 @@ from automation import planner
 from automation.executor import BrowserBusy, NeedHuman, execute
 from automation.model import normalize_plan
 from applications.zhihu_story.browser_write import WriteActionsMixin, _publish_verdict
+from core.story_text import StoryContentError
 
 ANSWER_URL = "https://www.zhihu.com/question/100/answer/999"
 SIGNIN_URL = "https://www.zhihu.com/signin?next=%2Fcreator%2Fmanage%2Fcreation%2Fdraft"
@@ -63,7 +64,7 @@ class _FakeWriteBrowser(WriteActionsMixin):
     """
 
     def __init__(self, cards, has_button=True, redirect="",
-                 draft_content="x" * 999, published_after_click=True):
+                 draft_content="这是一段干净的草稿正文。", published_after_click=True):
         self.page = _FakePage(redirect)
         self.cards = cards
         self.has_button = has_button
@@ -136,6 +137,22 @@ class _FakeWriteBrowser(WriteActionsMixin):
         if self._published:
             return ""
         return self.draft_content
+
+
+class _StoryInputBrowser(_FakeWriteBrowser):
+    """仅用于确认 publish_story 先做正文门禁，再触碰页面。"""
+
+    def __init__(self):
+        super().__init__([])
+        self.write_actions = []
+
+    def _find_write_button(self, *args, **kwargs):
+        self.write_actions.append("find_write_button")
+        return True
+
+    def _safe_evaluate(self, *args, **kwargs):
+        self.write_actions.append("safe_evaluate")
+        return True
 
 
 def _card(i, qid):
@@ -229,6 +246,15 @@ class DraftPublishTest(unittest.TestCase):
         self.assertIn("登录", r["detail"])
         self.assertEqual(b.clicked, 0)            # 绝不点发布
         self.assertNotEqual(r.get("reason"), "empty")
+
+    def test_publish_story_rejects_bad_body_before_finding_button_or_clearing(self):
+        browser = _StoryInputBrowser()
+        bad_story = "推理过程：\n这里是模型内部思考，不是故事正文。"
+
+        with self.assertRaises(StoryContentError):
+            browser.publish_story(bad_story)
+
+        self.assertEqual(browser.write_actions, [])
 
 
 class PublishReceiptTest(unittest.TestCase):

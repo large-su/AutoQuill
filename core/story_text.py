@@ -60,6 +60,149 @@ _META_WORDS = ("风格", "文风", "口吻", "要求", "规范", "格式", "章�
                "人称", "钩子", "反转", "节奏")
 
 
+class StoryContentError(ValueError):
+    """故事正文包含明确的模型元内容，不能进入发布流程。"""
+
+    def __init__(self, message, issues=None):
+        super().__init__(message)
+        self.issues = list(issues or [])
+
+
+# 只拦截独立的、明确带有元语义的标签；普通正文提到 AI/写作不在此列。
+_META_HEADING_RE = re.compile(
+    r"^(?:[#>*`_\s]*)(?:推理(?:过程|标签)?|思考(?:过程|链)?|写作计划|创作说明|"
+    r"格式自检|输出要求|写作要求|模型(?:回复|输出)?)"
+    r"(?:\*\*|__)?(?:\s*[：:]\s*|\s*$)", re.IGNORECASE)
+_MODEL_CONTROL_TAG_RE = re.compile(
+    r"</?(?:think|analysis|reasoning)\b[^>]*>|<\|(?:im_start|im_end|assistant|system|user|analysis)\|>",
+    re.IGNORECASE)
+_EXPLICIT_PLAN_RE = re.compile(
+    r"(?:用户要求我(?:写|创作|撰写)(?:一(?:个|篇))?故事|"
+    r"让我(?:先)?分析(?:字数|篇幅|格式|要求)|"
+    r"(?:根据用户|按(?:照)?(?:用户|你的))(?:要求|提示)(?=.{0,60}(?:写|创作|撰写|输出|分析|安排))"
+    r"(?=.{0,60}(?:故事|小说|字数|篇幅|格式|章节))|"
+    r"按(?:照)?(?:用户|你的)要求(?:写|创作|输出)(?:一(?:个|篇))?(?:故事|小说))")
+_TRAILING_SPEECH_RE = re.compile(
+    r"^(?:我|她|他|它|你|您|母亲|父亲|妈妈|爸爸|老板|医生|老师|女人|男人)"
+    r"(?:回|说|道|问|答|喊|叫|低声说|轻声说|喃喃道)\s*[：:]\s*$")
+
+
+def _quoted_mask(text):
+    """返回引号内字符的 mask，供元内容检测避免误伤对白。"""
+    mask = [False] * len(text)
+    pairs = {"「": "」", "“": "”", "『": "』", '"': '"', "'": "'"}
+    stack = []
+    escaped = False
+    for i, ch in enumerate(text):
+        if ch == "\\" and not escaped:
+            escaped = True
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if stack:
+            if ch == stack[-1][0]:
+                _, start = stack.pop()
+                for j in range(start, i + 1):
+                    mask[j] = True
+            elif ch in pairs and ch != pairs[ch] and pairs[ch] == stack[-1][0]:
+                stack.append((pairs[ch], i))
+            continue
+        if (ch == "'" and i > 0 and i + 1 < len(text)
+                and text[i - 1].isascii() and text[i - 1].isalnum()
+                and text[i + 1].isascii() and text[i + 1].isalnum()):
+            continue  # don't / I'm 等缩写中的撇号不表示引文开始。
+        if ch in pairs:
+            stack.append((pairs[ch], i))
+    return mask
+
+
+def story_content_issues(text):
+    """扫描明确的模型元内容，返回 ``[{code, message, offset}, ...]``。
+
+    这是发布前的保守门禁，不试图理解全部语义；引号内对白和正常叙事用词会放行。
+    """
+    if text is None or not str(text).strip():
+        return [{"code": "empty_body",
+                 "message": "故事正文为空，不能进入发布流程",
+                 "offset": 0}]
+    text = str(text)
+    issues = []
+    if text.lstrip().startswith(('{', '[')):
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            payload = None
+        if isinstance(payload, (dict, list)):
+            issues.append({'code': 'structured_payload',
+                           'message': '返回的是模型结构化数据，请只输出故事正文', 'offset': 0})
+    lines = text.splitlines(keepends=True)
+    quoted_mask = _quoted_mask(text)
+    offset = 0
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        stripped = line.strip()
+        unquoted = "".join(
+            " " if inside else ch
+            for ch, inside in zip(line, quoted_mask[offset:offset + len(line)])
+        )
+        unquoted_stripped = unquoted.strip()
+        unquoted_leading = len(unquoted) - len(unquoted.lstrip())
+        if stripped:
+            heading = _META_HEADING_RE.match(unquoted_stripped)
+            control_tag = _MODEL_CONTROL_TAG_RE.search(unquoted_stripped)
+            if (heading or control_tag):
+                issues.append({"code": "meta_heading",
+                               "message": "检测到模型元标题/角色分隔符：请仅保留故事正文",
+                               "offset": offset + unquoted_leading})
+            elif (_is_meta_plan_line(unquoted_stripped)
+                  or _EXPLICIT_PLAN_RE.search(unquoted_stripped)):
+                issues.append({"code": "meta_plan",
+                               "message": "检测到未置于人物对白中的写作计划或用户要求复述",
+                               "offset": offset + unquoted_leading})
+        offset += len(raw)
+
+    # 只有全文最后一个非空行仍是说话提示才算未完成；中间的提示可由下一行对白补全。
+    last_nonempty = next((i for i in range(len(lines) - 1, -1, -1)
+                          if lines[i].strip()), None)
+    if last_nonempty is not None:
+        last_offset = sum(len(raw) for raw in lines[:last_nonempty])
+        last_line = lines[last_nonempty].rstrip("\r\n")
+        last_unquoted = "".join(
+            " " if inside else ch
+            for ch, inside in zip(
+                last_line, quoted_mask[last_offset:last_offset + len(last_line)]
+            )
+        )
+        last_stripped = last_unquoted.strip()
+        last_mask = quoted_mask[last_offset:last_offset + len(last_line)]
+        if (_TRAILING_SPEECH_RE.fullmatch(last_stripped)
+                and not any(last_mask)):
+            issues.append({"code": "unfinished_dialogue",
+                           "message": "故事疑似停在人物说话提示后，缺少对白内容",
+                           "offset": last_offset + len(last_unquoted) - len(last_unquoted.lstrip())})
+
+    # 交付尾部必须对原始文本检查；清洗器只负责兼容既有已确认包装。
+    tail_index = _assistant_tail_start([line.rstrip("\r\n") for line in lines])
+    if tail_index < len(lines):
+        tail_offset = sum(len(line) for line in lines[:tail_index])
+        issues.append({"code": "assistant_tail",
+                       "message": "检测到故事后的交付提问或续写菜单，请删除后重试",
+                       "offset": tail_offset})
+    return issues
+
+
+def ensure_story_content(text):
+    """无问题原样返回；存在明确元内容时抛出可重试的门禁错误。"""
+    issues = story_content_issues(text)
+    if issues:
+        summary = "；".join(issue["message"] for issue in issues[:3])
+        if len(issues) > 3:
+            summary += f"（另有 {len(issues) - 3} 处）"
+        raise StoryContentError("故事正文未通过内容门禁：" + summary, issues=issues)
+    return text
+
+
 def _is_meta_plan_line(line):
     """该行是否是「写作计划/自我汇报」式元说明（不是故事正文）。
 
@@ -509,6 +652,11 @@ def validate_story_format(text):
 
     score = 10
     details = {}
+    content_issues = story_content_issues(text)
+    if content_issues:
+        details["内容"] = "；".join(issue["message"] for issue in content_issues[:3])
+        if len(content_issues) > 3:
+            details["内容"] += f"（另有 {len(content_issues) - 3} 处）"
 
     # --- 0. 引言存在性（先于章节检测：第一节之前必须有独立引言段）---
     # 判定极简（用户要求）：只看第一个非空行。它是正文故事文字 → 有引言；
@@ -618,10 +766,15 @@ def validate_story_format(text):
         details["开篇"] = f"{so.get('reason', '')}(-2)"
 
     score = max(score, 0)
+    if content_issues:
+        # 批量重试按分数择优；非法正文归零，保证合格重写稿能替换它。
+        score = 0
     # 一票否决三项：① 引言缺失（上来就是章节标题）；② 开篇是总结体（引言写成
     # 了故事简介/情绪自述）；③ 首行是写作计划（模型把"我严格遵循…要求"
     # 当正文）。其余项满分也不能放行。
-    is_valid = score >= 6 and intro_ok and not opening_bad and not plan_intro
+    # 保持三元组契约；内容门禁独立于普通格式项，直接否决。
+    is_valid = (score >= 6 and intro_ok and not opening_bad and not plan_intro
+                and not content_issues)
 
     log.info(f"  格式检测：{score}/10 {'✓合规' if is_valid else '✗不合规'}"
              f"{' (' + ', '.join(f'{k}:{v}' for k, v in details.items()) + ')' if details else ''}")

@@ -163,9 +163,17 @@ V4 起程序文件与用户数据分离：
 
 原则：**只读文件走 PROGRAM_ROOT，可写文件走 DATA_ROOT**。
 
-开发版新增 `DATA_ROOT/data/state/story_models.jsonl`：按已发布作品追加最小模型索引，保存名称、链接、时间及生成时的渠道/型号/参数/工作模式，不保存正文、提示词或凭据。网页型号只采用站内已确认的选择；未识别时写 `null`，不采用闲置 API 配置。草稿延后发布时沿用原稿模型快照，重复回执去重。
+v5.13.0 起新增 `DATA_ROOT/data/state/story_models.jsonl`：按已发布作品追加最小模型索引，保存名称、链接、时间及生成时的渠道/型号/参数/工作模式，不保存正文、提示词或凭据。网页型号只采用站内已确认的选择；未识别时写 `null`，不采用闲置 API 配置。草稿延后发布时沿用原稿模型快照，重复回执去重。
 
 该文件是长期业务索引，**不轮转、不按年龄或数量清理**。清理 `logs/`、`output/`、草稿/作品看板及升级迁移均保留；删除线上文章也保留原关联，供后续核验。
+
+### 3.1 正文检查与发布边界
+
+v5.13.0 起，`core/story_text.py` 的 `story_content_issues()` 统一检查明确的模型元内容，`ensure_story_content()` 在发现问题时抛出 `StoryContentError`。规则覆盖全文，保留正常对白和题材用词；文学质量由原有编辑流程负责。
+
+- 经典与批量生成的格式检查将非故事内容视为硬否决并计零分，合格重写稿可以正常替换；纯净模式在原创审核之前独立检查并反馈原因，关闭原创审核不关闭正文检查。
+- `browser_write.publish_story()` 在接触编辑器、清除旧草稿之前检查传入正文。
+- `browser_write.publish_draft()` 在首次公开发布动作之前读取服务端当前完整 HTML，由 `browser_utils.story_html_to_text()` 按段落还原文本后检查。读取失败、空正文或内容被拒时返回确定的未发布结果，保留草稿并摘除回执监听；不进入“可能已经发布”的核对分支。演练仍不点击发布。
 
 ---
 
@@ -356,7 +364,7 @@ class NewSiteDriver(WebLLMDriver):
 
 ## 10. 设计债务（已记录，暂不修复）
 
-- **prompts.py 反向引用**：`applications/zhihu_story/prompts.py` 被 llm_client / story_generation 等 Layer 3 模块引用，违反「上层不能反向依赖下层」约定。当前以「生成 prompt 是业务语义、先集中存放」为理由保留；若 prompts 持续增多，应下沉 core/ 或随应用实例移动。
+- **业务 prompt 耦合**：`applications/zhihu_story/prompts.py` 被通用生成模块及 `core/originality.py` 的延迟审核入口引用，属于通用层对应用层的依赖。当前保留单一知乎业务的既有审核规则；扩展第二个业务实例时，应由应用层构建或注入 prompt，避免核心主动选择业务规则。本轮不改变原创审核口径。
 - **workflows → applications 残留**：`workflows/zhihu.py` 的 `normalize_question_url` 从 browser_adapter 导入（纯 URL 函数，属 Layer 4 引用 Layer 5）。可后续下沉 web_drivers 或 core。
 - **tools/ 探测脚本**：probe_*/debug_* 多为一次性诊断脚本，保留在仓库作为选择器改版时的回归参考。
 

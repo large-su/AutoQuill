@@ -117,7 +117,8 @@ class GenerationMixin:
                                  feedback=None):
         """Web 短文模式：单轮 prompt 直接出正文"""
         from web_drivers import get_driver
-        from llm_api import build_story_prompt, _load_author_profile_or_none
+        from story_prompt import build_story_prompt
+        from story_generation import _load_author_profile_or_none
 
         author = getattr(self, "author", None)
         full_prompt, mode_str = build_story_prompt(
@@ -295,8 +296,12 @@ class GenerationMixin:
         for attempt in range(max_attempts):
             feedback = None
             if attempt > 0 and last_audit and not last_audit.get("passed"):
-                from core.originality import audit_feedback_text
-                feedback = audit_feedback_text(last_audit)
+                if last_audit.get('verdict') == '非故事内容':
+                    feedback = ('上一稿混入非故事内容：' + '；'.join(last_audit.get('reasons') or [])
+                                + '。请重新输出完整故事正文，不附思考过程、写作说明或续写选项。')
+                else:
+                    from core.originality import audit_feedback_text
+                    feedback = audit_feedback_text(last_audit)
                 if "洗稿" in str(last_audit.get("verdict") or ""):
                     wash_streak += 1
                     if wash_streak >= 2:
@@ -317,6 +322,17 @@ class GenerationMixin:
                 continue
             best = story
             best_chain = getattr(self, '_last_story_model_chain', None)
+
+            from core.story_text import story_content_issues
+            content_issues = story_content_issues(story)
+            if content_issues:
+                last_audit = {
+                    'passed': False, 'verdict': '非故事内容',
+                    'reasons': [issue['message'] for issue in content_issues[:3]],
+                    'signals': {}, 'llm_detail': None, 'originality': None,
+                }
+                log.warning("纯净模式正文未通过内容检查：%s", '；'.join(last_audit['reasons']))
+                continue
 
             if not CLEAN_AUDIT_ENABLE:
                 last_audit = {"passed": True, "verdict": "原创（审核已关闭）",

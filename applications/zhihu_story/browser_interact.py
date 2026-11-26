@@ -24,17 +24,13 @@ import re
 import time
 from datetime import datetime, timedelta
 
+from core.checkin import follow_state, vote_state
+
 log = logging.getLogger(__name__)
 
 CREATOR_HOME_URL = 'https://www.zhihu.com/creator'
 COMMENT_MANAGE_URL = 'https://www.zhihu.com/creator/manage/comment/answer'
 # 当期打卡页 URL 的缓存位置：data/state/checkin.json（由 core/checkin.py 读写）
-
-# 关注按钮三态 → 语义（探针实测：关注 / 已关注 / 互相关注）
-FOLLOWED_TEXTS = ('已关注', '互相关注')
-NOT_FOLLOWED_TEXTS = ('关注', '+ 关注')
-VOTED_PREFIX = '已赞同'
-NOT_VOTED_PREFIX = '赞同'
 
 _ZW_CHARS = ('\u200b', '\u200c', '\u200d', '\ufeff')
 _ZW_RE = re.compile('[' + ''.join(_ZW_CHARS) + ']')
@@ -54,30 +50,6 @@ def flat_text(text):
     评论卡片正文里换行/空格数量两边常常不一致（DOM 重排后更明显），
     用「去空白后包含」比「原样包含」稳得多。'''
     return _WS_RE.sub('', _ZW_RE.sub('', str(text or '')))
-
-
-def follow_state(text):
-    '''按钮文案 → followed / none / unknown。'''
-    t = normalize_button_text(text)
-    if not t:
-        return 'unknown'
-    if t in FOLLOWED_TEXTS:
-        return 'followed'
-    if t in NOT_FOLLOWED_TEXTS:
-        return 'none'
-    return 'unknown'
-
-
-def vote_state(text):
-    '''赞同按钮文案 → voted / none / unknown（已赞同 747 / 赞同 746）。'''
-    t = normalize_button_text(text)
-    if not t:
-        return 'unknown'
-    if t.startswith(VOTED_PREFIX):
-        return 'voted'
-    if t.startswith(NOT_VOTED_PREFIX):
-        return 'none'
-    return 'unknown'
 
 
 # 打卡任务标题 → 稳定 key（标题里的数字会变，用关键词匹配）
