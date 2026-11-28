@@ -52,43 +52,73 @@ class ReviewChannelTests(unittest.TestCase):
 
     def test_entire_middle_and_ending_reach_one_request(self):
         story = '门开了。' + '她走上前去。' * 500 + '她把钥匙还给他，两人约好明天再见。'
-        with patch('story_scoring._web_llm_generate', return_value='{"verdict":"pass","issues":[]}') as request:
+        with patch('web_drivers.generate_isolated', return_value='{"verdict":"pass","issues":[]}') as request:
             result = editor.review_story('温暖的完整故事', story)
         self.assertTrue(result['passed'])
         request.assert_called_once()
         self.assertIn(story, request.call_args.args[0])
-        self.assertEqual(request.call_args.kwargs, {'reuse_session': False})
 
     def test_web_review_separates_writer_context_without_changing_other_requests(self):
         from story_scoring import _web_llm_generate
         from unittest.mock import Mock
-        driver = Mock()
-        driver.generate.return_value = 'reply'
-        with patch('web_drivers.get_driver', return_value=driver):
-            self.assertEqual(_web_llm_generate('全文', reuse_session=False), 'reply')
-            driver.generate.assert_called_once_with('全文', reuse_session=False)
-            driver.generate.reset_mock()
+        writer = Mock()
+        writer.generate.return_value = 'reply'
+        with patch('web_drivers.generate_isolated', return_value='{"verdict":"pass","issues":[]}') as isolated, \
+             patch('web_drivers.get_driver', return_value=writer):
+            self.assertTrue(editor.review_story('题', '她开门收下了花。')['passed'])
+            isolated.assert_called_once()
+            writer.generate.assert_not_called()
             self.assertEqual(_web_llm_generate('普通评分'), 'reply')
-            driver.generate.assert_called_once_with('普通评分')
+            writer.generate.assert_called_once_with('普通评分')
 
     def test_over_budget_is_not_silently_truncated(self):
-        with patch('story_scoring._web_llm_generate') as request:
+        with patch('web_drivers.generate_isolated') as request:
             result = editor.review_story('题', '门开了。' * 7000)
         self.assertEqual(result['status'], 'unavailable')
         request.assert_not_called()
 
     def test_content_gate_runs_before_editor_request(self):
-        with patch('story_scoring._web_llm_generate') as request:
+        with patch('web_drivers.generate_isolated') as request:
             result = editor.review_story('题', '门开了。\n写作计划：按用户要求安排故事章节。')
         self.assertFalse(result['passed']); request.assert_not_called()
 
     def test_missing_result_stops_instead_of_claiming_pass(self):
-        with patch('story_scoring._web_llm_generate', return_value=None):
+        with patch('web_drivers.generate_isolated', return_value=None) as request:
             result = editor.review_story('题', '她开门收下了花。')
         self.assertEqual(result['status'], 'unavailable')
+        request.assert_called_once()
+
+    def test_unconfirmed_web_send_keeps_its_reason_without_resending(self):
+        from web_drivers.browser_pool import WebPromptNotConfirmed
+        with patch('web_drivers.generate_isolated') as generate:
+            generate.side_effect = WebPromptNotConfirmed('Yuanbao 发送按钮点击未确认')
+            result = editor.review_story('题', '她开门收下了花。')
+        self.assertFalse(result['passed'])
+        self.assertIn('发送按钮点击未确认', result['reason'])
+        generate.assert_called_once()
+
+    def test_web_rechecks_full_draft_with_validation_feedback(self):
+        example = ReviewEvidenceTests()
+        invalid = example.result(['星期三，钥匙被她扔进了河里。', example.story.splitlines()[0]])
+        replies = [json.dumps(invalid), json.dumps(example.result())]
+        with patch('web_drivers.generate_isolated', side_effect=replies) as request:
+            result = editor.review_story('题', example.story)
+        self.assertEqual(result['status'], 'revise')
+        self.assertEqual(request.call_count, 2)
+        second = request.call_args
+        self.assertIn(example.story, second.args[0])
+        self.assertIn('原文证据无法核对', second.args[0])
+        self.assertNotIn('钥匙被她扔进了河里', second.args[0])
+
+    def test_two_invalid_web_reviews_still_block_draft(self):
+        with patch('web_drivers.generate_isolated', return_value='结果不符合约定') as request:
+            result = editor.review_story('题', '她开门收下了花。')
+        self.assertFalse(result['passed'])
+        self.assertIn('编辑复核结果无法解析', result['reason'])
+        self.assertEqual(request.call_count, 2)
 
     def test_explicit_range_uses_local_count_before_model_call(self):
-        with patch('story_scoring._web_llm_generate') as request:
+        with patch('web_drivers.generate_isolated') as request:
             review = editor.review_story('请写1000到1200字的故事', '她开门收下了花。' * 200)
         self.assertEqual(review['status'], 'revise')
         self.assertIn('1000～1200', review['issues'][0]['fix'])
@@ -107,7 +137,7 @@ class ReviewChannelTests(unittest.TestCase):
 
     def test_disabled_review_preserves_previous_no_request_behavior(self):
         with patch.object(story_config, 'STORY_EDITOR_ENABLE', False), \
-             patch('story_scoring._web_llm_generate') as request:
+             patch('web_drivers.generate_isolated') as request:
             result = editor.review_story('题', '她开门收下了花。')
         self.assertTrue(result['passed']); request.assert_not_called()
 
@@ -125,7 +155,7 @@ class ReviewChannelTests(unittest.TestCase):
 
     def test_cancel_propagates(self):
         from web_drivers.browser_pool import WorkflowCancelled
-        with patch('story_scoring._web_llm_generate', side_effect=WorkflowCancelled('停止')):
+        with patch('web_drivers.generate_isolated', side_effect=WorkflowCancelled('停止')):
             with self.assertRaises(WorkflowCancelled): editor.review_story('题', '她开门收下了花。')
 
 

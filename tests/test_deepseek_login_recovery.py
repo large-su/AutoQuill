@@ -6,14 +6,14 @@ from web_drivers import browser_pool, deepseek
 
 
 class DeepSeekLoginRecoveryTest(unittest.TestCase):
-    def check(self, state=None, navigation_error=None, launch_error=None):
+    def check(self, state=None, navigation_error=None, launch_error=None, cookies=()):
         page = mock.MagicMock()
         page.url = "https://chat.deepseek.com/"
         page.evaluate.return_value = state
         if navigation_error:
             page.goto.side_effect = navigation_error
         browser = mock.MagicMock()
-        browser.context.cookies.return_value = []
+        browser.context.cookies.return_value = list(cookies)
         browser.context.new_page.return_value = page
         browser.__enter__.return_value = browser
         if launch_error:
@@ -28,7 +28,8 @@ class DeepSeekLoginRecoveryTest(unittest.TestCase):
         self.assertTrue(self.check({"ready": True, "signed_out": False}))
 
     def test_explicit_signin_page_is_signed_out(self):
-        self.assertFalse(self.check({"ready": False, "signed_out": True}))
+        cookies = [{"domain": "chat.deepseek.com", "name": "tracking", "value": "fixture"}]
+        self.assertFalse(self.check({"ready": False, "signed_out": True}, cookies=cookies))
 
     def test_preflight_auth_rejection_is_signed_out_not_network_error(self):
         with mock.patch("web_drivers.deepseek_auth.DeepSeekAuthObserver") as observer:
@@ -47,6 +48,10 @@ class DeepSeekLoginRecoveryTest(unittest.TestCase):
     def test_browser_start_failure_is_not_a_logout(self):
         with self.assertRaises(browser_pool.WebLoginCheckError):
             self.check(launch_error=RuntimeError("profile startup failed"))
+
+    def test_browser_navigation_failure_is_not_a_logout(self):
+        with self.assertRaises(browser_pool.WebLoginCheckError):
+            self.check(navigation_error=RuntimeError("navigation failed"))
 
     def test_cancellation_is_not_a_logout(self):
         with self.assertRaises(browser_pool.WorkflowCancelled):

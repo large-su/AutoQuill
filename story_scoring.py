@@ -106,8 +106,7 @@ def _web_llm_generate(prompt, what="请求", *, reuse_session=True):
     API Key。明确登录失效向上传递，暂停任务并引导登录；其他页面异常
     返回 None，调用方按「回退原顺序 / 原候选」处理。
 
-    全文编辑传 reuse_session=False，隔离创作上下文；驱动沿用既有
-    自有会话清理契约。其他调用保持默认复用。
+    非复用请求由驱动新建会话并遵守自有会话的清理契约。
     """
     from web_drivers.browser_pool import WebInteractionError, WorkflowCancelled
     try:

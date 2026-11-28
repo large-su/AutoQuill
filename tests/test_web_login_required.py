@@ -127,9 +127,9 @@ class TestWebLoginRequiredPropagation(unittest.TestCase):
         materials = [{"index": 1, "title": "题目", "answer": "参考"}]
         with mock.patch("web_drivers.parallel.ParallelWebRunner",
                         return_value=runner), \
-                mock.patch("llm_api.build_story_prompt",
+                mock.patch("story_prompt.build_story_prompt",
                            return_value=("prompt", "mode")), \
-                mock.patch("llm_api._load_author_profile_or_none",
+                mock.patch("story_generation._load_author_profile_or_none",
                            return_value=None), \
                 mock.patch("web_drivers.reset_driver"):
             with self.assertRaises(WebLoginRequired):

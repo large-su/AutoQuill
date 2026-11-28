@@ -513,20 +513,20 @@ class TestCleanMultiRound(unittest.TestCase):
             'body.rounds = parseInt($("classicRounds").value, 10) || 1;', js)
 
     def test_dispatch_loops_over_rounds(self):
-        # 后端 clean/single 分支都按 spec.rounds 循环执行完整链路
-        import inspect
-        from webui.run_manager import TaskRunner
-        src = inspect.getsource(TaskRunner._dispatch)
-        clean_src = src[src.index('if mode == "clean"'):
-                         src.index('if mode == "single"')]
-        self.assertIn('rounds = max(1, int(spec.rounds or 1))', clean_src)
-        self.assertIn("wf.run_clean(", clean_src)
-        self.assertIn("成功 {success}/{rounds}", clean_src)
-        single_src = src[src.index('if mode == "single"'):
-                          src.index('if mode == "batch"')]
-        self.assertIn('rounds = max(1, int(spec.rounds or 1))', single_src)
-        self.assertIn("wf.run_single(", single_src)
-        self.assertIn("成功 {success}/{rounds}", single_src)
+        from unittest.mock import Mock, patch
+        from webui.run_manager import TaskRunner, _RunSpec
+
+        for mode, other in (("single", "clean"), ("clean", "single")):
+            with self.subTest(mode=mode):
+                workflow = Mock()
+                run_round = getattr(workflow, f"run_{mode}")
+                run_round.return_value = True
+                with patch("workflows.zhihu.ZhihuWorkflow", return_value=workflow), \
+                        patch("webui.run_manager.time.sleep") as wait:
+                    self.assertTrue(TaskRunner()._dispatch(_RunSpec(mode=mode, rounds=3)))
+                self.assertEqual(run_round.call_count, 3)
+                self.assertEqual(wait.call_count, 2)
+                getattr(workflow, f"run_{other}").assert_not_called()
 
     def test_extract_clean_uses_min_answer_length(self):
         # 纯净提取必须遵守最短回答底线（跟随设置 MIN_ANSWER_LENGTH）

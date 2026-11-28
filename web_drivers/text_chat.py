@@ -149,6 +149,8 @@ class ConfiguredTextChatDriver(WebLLMDriver):
             raise RuntimeError(f"{self.provider_name} 无法记录本轮回复起点")
 
     def send(self):
+        from web_drivers.browser_pool import WebPromptNotConfirmed
+
         self._raise_if_logged_out()
         self._mark_reply_anchor()
         page = self._page_instance()
@@ -156,8 +158,9 @@ class ConfiguredTextChatDriver(WebLLMDriver):
         if selector:
             try:
                 page.locator(selector).first.click(timeout=5000)
-            except Exception:
-                raise RuntimeError(f"{self.provider_name} 发送按钮点击未确认，已停止重复发送")
+            except Exception as exc:
+                raise WebPromptNotConfirmed(
+                    f"{self.provider_name} 发送按钮点击未确认，已停止重复发送") from exc
             self._confirm_sent()
             return
         input_selector = self._visible_selector(self.input_selectors)
@@ -171,7 +174,7 @@ class ConfiguredTextChatDriver(WebLLMDriver):
 
     def _confirm_sent(self):
         """Do not wait for a response when the website kept an unsent draft."""
-        from web_drivers.browser_pool import _check_cancel
+        from web_drivers.browser_pool import WebPromptNotConfirmed, _check_cancel
         until = time.monotonic() + 8
         while time.monotonic() < until:
             _check_cancel()
@@ -185,7 +188,7 @@ class ConfiguredTextChatDriver(WebLLMDriver):
             if self._stop_visible() or self._new_reply_text():
                 return
             self._page_instance().wait_for_timeout(250)
-        raise RuntimeError(f"{self.provider_name} 未确认网页接收提示词，请检查输入及发送入口")
+        raise WebPromptNotConfirmed(f"{self.provider_name} 未确认网页接收提示词，请检查输入及发送入口")
 
     def _reply_count(self):
         if not self.reply_selectors:

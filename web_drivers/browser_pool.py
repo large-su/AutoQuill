@@ -192,6 +192,10 @@ class WebResponseInterrupted(WebInteractionError):
     """The website ended this response early; partial text is not a result."""
 
 
+class WebPromptNotConfirmed(RuntimeError):
+    """The driver could not verify that the website accepted the prompt."""
+
+
 def acquire_profile(timeout=0.0, purpose=""):
     """申请 profile 独占租约；timeout 秒内拿不到返回 False（不阻塞调用方）。"""
     try:

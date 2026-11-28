@@ -93,6 +93,26 @@ def create_driver():
     return driver_cls(WEB_DRIVERS[WEB_DRIVER_NAME])
 
 
+def generate_isolated(prompt):
+    """在共享浏览器中新开审稿页面，不替换串行写作器的当前会话。
+
+    这只适用于不能继承写作上下文的一次性请求（全文编辑复核）。审稿
+    driver 的页面和会话均归本调用；清理失败时把未完成的清理责任交给
+    仍存活的串行 driver，由任务末尾的既有清理路径继续处理。
+    """
+    writer = get_driver()
+    reviewer = create_driver()
+    try:
+        return reviewer.generate(prompt, reuse_session=False)
+    finally:
+        # close_session 会先按既有会话契约尽力删除，再只关闭审稿页面；
+        # 不会关闭共享浏览器或写作器页面。
+        try:
+            reviewer.close_session()
+        finally:
+            writer._adopt_pending_sessions(reviewer)
+
+
 def reset_driver(delete_session=True):
     """关闭当前驱动会话并重置单例。
 

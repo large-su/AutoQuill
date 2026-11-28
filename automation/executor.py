@@ -96,41 +96,27 @@ def _full_chain(job, should_stop=None, progress=None):
     # 打卡互动上下文：写草稿时顺带关注/赞同（打卡任务没启用 → 空上下文，
     # 工作流那侧零行为变化）。翻转兜底只在当天最后一班（is_last_of_day）。
     checkin_ctx = _checkin_context(job)
-    _set_checkin_context(checkin_ctx)
-    # ★ 上下文必须只活在「自动化派出的这一班」里：整段用 try/finally 包死，
-    #   任何异常路径（启动失败/超时/人工介入）都清理干净。手动跑完整链路
-    #   从不写这个上下文，所以永远不会触发关注/赞同（用户 2026-09-27 要求）。
     try:
-        try:
-            runner.start(_RunSpec(mode=mode, rounds=rounds))
-        except Exception as exc:  # noqa: BLE001  （HTTPException 409 = 已有任务在跑）
-            raise BrowserBusy("启动失败（可能已有任务在运行）：%s" % exc)
-        st = {}
-        while True:
-            st = runner.status()
-            state = st.get("state")
-            if progress:
-                try:
-                    progress(st)
-                except Exception:  # noqa: BLE001
-                    pass
-            if (state in ("done", "error", "stopped", "timeout", "idle")
-                    and not st.get("worker_alive")):
-                break
-            if should_stop and should_stop():
-                runner.stop()      # 用户停止：通知工作流在检查点中断
-                log.info("自动化：收到停止请求，已请求中断当前撰写任务")
-            time.sleep(2)
-        if st.get("guide_needed"):
-            guide = st["guide_needed"]
-            message = (st.get("message") or "网页版模型账号受限，请查看官网说明或在设置中切换模型"
-                       if guide == "web_account_restricted" else
-                       "网页版模型需要重新登录：%s" % guide
-                       if guide == "deepseek_login" else
-                       "运行前检测未通过：%s" % guide)
-            raise NeedHuman(message)
-    finally:
-        _set_checkin_context(None)     # 作业结束（含异常路径）立即清理
+        run = runner.start(_RunSpec(mode=mode, rounds=rounds), checkin_context=checkin_ctx)
+    except Exception as exc:  # HTTP 409 表示有任务先占用了运行器
+        raise BrowserBusy("启动失败（可能已有任务在运行）：%s" % exc) from exc
+    while True:
+        st = runner.status(run=run)
+        state = st.get("state")
+        if progress:
+            try:
+                progress(st)
+            except Exception:  # noqa: BLE001
+                pass
+        if (state in ("done", "error", "stopped", "timeout", "idle")
+                and not st.get("worker_alive")):
+            break
+        if should_stop and should_stop():
+            runner.stop(run=run)
+            log.info("自动化：收到停止请求，已请求中断当前撰写任务")
+        time.sleep(2)
+    if st.get("guide_needed"):
+        raise NeedHuman(st.get("message") or "请处理工作台提示后重试")
     ok = state == "done"
     story = st.get("story") or {}
     message = st.get("message") or ("完成" if ok else "失败")
@@ -249,18 +235,6 @@ def _publish_drafts(job, should_stop=None, progress=None):
                        else (r.get("detail") or "发布未确认"),
             "artifacts": [r.get("url")] if r.get("url") else [],
         }
-
-
-def _set_checkin_context(ctx):
-    """写/清打卡互动上下文（core.checkin 的进程内单例）。"""
-    try:
-        from core import checkin as _ck
-        if ctx:
-            _ck.set_context(ctx)
-        else:
-            _ck.clear_context()
-    except Exception:              # noqa: BLE001
-        pass
 
 
 def _checkin_context(job):

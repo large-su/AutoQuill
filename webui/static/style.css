@@ -712,6 +712,7 @@
   .auto-hist-row .st.needs_human { color: #fcd34d; border-color: #5b4a1f; }
   .auto-hist-row .tm { color: var(--muted); font-variant-numeric: tabular-nums; }
   .auto-hist-row .ms { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .auto-hist-row .st.failed ~ .ms { white-space: normal; overflow-wrap: anywhere; }
 
   /* ---------- 草稿箱素材管理模式 ---------- */
   .draft-card { display: none; }

@@ -211,6 +211,9 @@ class GenerationMixin:
         best_score = -1
         last_reason = None     # 上一轮失败原因（重试反馈）
         revision_source = None
+        # 给调用方的最终失败原因与重试提示分开保存。重试提示可能含有
+        # 原文引用，不适合直接放进自动化台账或界面。
+        self.last_failure_reason = ""
         self._web_fail_consecutive = 0  # 每轮任务重置 Web 断路器计数
 
         for attempt in range(max_attempts):
@@ -224,6 +227,7 @@ class GenerationMixin:
 
             if not story:
                 last_reason = "生成失败（模型无输出）"
+                self.last_failure_reason = last_reason
                 log.warning("故事生成失败（无输出），第 %d/%d 次重试…",
                             attempt + 1, max_attempts)
                 continue
@@ -234,6 +238,7 @@ class GenerationMixin:
                     best_chain = getattr(self, '_last_story_model_chain', None)
                 last_reason = f"字数过短（仅 {len(story)} 字，要求至少 " \
                               f"{min_length} 字）"
+                self.last_failure_reason = last_reason
                 log.warning("故事过短（%d字），第 %d/%d 次重试…",
                             len(story), attempt + 1, max_attempts)
                 continue
@@ -250,6 +255,7 @@ class GenerationMixin:
                     f"开篇与参考回答有 {risk['run']} 字连续重合"
                     f"（「{risk['snippet']}」）——只允许学参考的起手手法，"
                     f"句子、人物、道具、情节必须全部换新")
+                self.last_failure_reason = "开篇与参考回答存在连续文本重合"
                 log.warning("开篇疑似抄参考（连续 %d 字重合），第 %d/%d 次重试…",
                             risk["run"], attempt + 1, max_attempts)
                 continue
@@ -259,6 +265,7 @@ class GenerationMixin:
             if content_issues:
                 last_reason = "正文内容检查未通过：" + "；".join(
                     i["message"] for i in content_issues[:3])
+                self.last_failure_reason = last_reason
                 log.warning("故事正文未通过内容检查，第 %d/%d 次重试…",
                             attempt + 1, max_attempts)
                 continue
@@ -268,13 +275,19 @@ class GenerationMixin:
                 from core.story_editor import review_story, revision_feedback
                 review = review_story(title, story)
                 if review['passed']:
+                    self.last_failure_reason = ""
                     return story, True
                 best, best_chain = story, getattr(self, '_last_story_model_chain', None)
                 best_score = fmt_score
                 if review['status'] == 'unavailable':
+                    self.last_failure_reason = (
+                        "全文编辑复核未完成：" + (review['reason'] or "未返回可用结果"))
                     log.warning("全文编辑复核未完成，留存本地稿并停止本篇发布：%s", review['reason'])
                     break
                 last_reason = revision_feedback(review)
+                problems = [issue.get('problem', '') for issue in review.get('issues') or []]
+                self.last_failure_reason = (
+                    "全文编辑复核未通过：" + "；".join(p for p in problems if p))
                 revision_source = story
                 log.info("全文编辑复核需修正（%d项），沿用生成重试预算", len(review['issues']))
                 continue
@@ -283,6 +296,7 @@ class GenerationMixin:
                 best_chain = getattr(self, '_last_story_model_chain', None)
             last_reason = (self._format_format_failure(details)
                            or f"格式不合规（{fmt_score}/10）")
+            self.last_failure_reason = "故事格式不合规：" + last_reason
             # Only the opt-in editorial workflow can reuse a full draft. When
             # disabled, preserve the legacy fresh-generation retry behavior.
             if STORY_EDITOR_ENABLE:

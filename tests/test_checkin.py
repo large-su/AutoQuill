@@ -284,36 +284,42 @@ class TestContextIsolation(unittest.TestCase):
         self.assertEqual(ck.get_context(), {})
 
 
-class TestContextWriterIsOnlyAutomation(unittest.TestCase):
-    """源码级守护：能写打卡上下文的**只有自动化执行器**。
+class TestTaskCheckinContext(unittest.TestCase):
+    def test_other_threads_cannot_see_checkin_context(self):
+        from threading import Thread
 
-    用户 2026-09-27 明确要求「手动写作时绝不能被牵着去点关注/赞同」。
-    这条测试把「谁能写上下文」钉死在源码上——将来若有人从 webui /
-    workflows / applications 里写上下文，这里立刻变红。
-    """
+        observed = []
+        ck.set_context({'follow': 'do'})
+        try:
+            thread = Thread(target=lambda: observed.append(ck.get_context()))
+            thread.start()
+            thread.join(timeout=2)
+            self.assertEqual(observed, [{}])
+            self.assertEqual(ck.get_context(), {'follow': 'do'})
+        finally:
+            ck.clear_context()
 
-    ALLOWED = {'automation/executor.py', 'core/checkin.py'}
+    def test_runner_scopes_checkin_context_to_the_accepted_run(self):
+        from webui.run_manager import TaskRunner, _RunSpec
 
-    def test_only_automation_writes_context(self):
-        import os
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        hits = set()
-        for pkg in ('applications', 'automation', 'core', 'webui', 'workflows'):
-            for dirpath, dirnames, filenames in os.walk(os.path.join(root, pkg)):
-                dirnames[:] = [d for d in dirnames if d != '__pycache__']
-                for fn in filenames:
-                    if not fn.endswith('.py'):
-                        continue
-                    path = os.path.join(dirpath, fn)
-                    with open(path, encoding='utf-8', errors='ignore') as f:
-                        text = f.read()
-                    if ('_set_checkin_context(' in text
-                            or 'checkin.set_context(' in text):
-                        hits.add(os.path.relpath(path, root).replace(os.sep, '/'))
-        self.assertTrue(hits <= self.ALLOWED,
-                        '打卡上下文的写入点只能有 %s，实际 %s' % (self.ALLOWED, hits))
-        self.assertIn('automation/executor.py', hits,
-                      '自动化执行器仍应是上下文的唯一写入方')
+        runner = TaskRunner()
+        observed = []
+
+        def dispatch(_spec):
+            observed.append(ck.get_context())
+            return True
+
+        with patch.object(runner, '_dispatch', side_effect=dispatch), \
+                patch('web_drivers.reset_driver'), \
+                patch('web_drivers.browser_pool.close_shared_browser'):
+            runner.start(_RunSpec(mode='select'), checkin_context={'follow': 'do'})
+            runner._thread.join(timeout=5)
+            self.assertEqual(runner.status()['state'], 'done')
+            runner.start(_RunSpec(mode='select'))
+            runner._thread.join(timeout=5)
+            self.assertEqual(runner.status()['state'], 'done')
+
+        self.assertEqual(observed, [{'follow': 'do'}, {}])
 
 
 class _FakeCommentBrowser:
@@ -352,7 +358,7 @@ class _FakeCommentBrowser:
         return {'comments': list(self.manage_comments)}
 
     def read_checkin_tasks(self, _url):
-        return {'tasks': dict(self.tasks), 'title': '测试打卡'}
+        return {'tasks': dict(self.tasks), 'title': '创作打卡挑战赛测试期'}
 
     def list_interact_targets(self):
         return {'items': list(self.targets)}
@@ -392,7 +398,7 @@ class _ExpiredCampaignBrowser(_FakeCommentBrowser):
                 'follow': {'title': '关注', 'done': True},
                 'vote': {'title': '赞同', 'done': True},
                 'comment': {'title': '评论', 'done': True},
-            }, 'title': '新一期', 'raw_tasks': [{}]}
+            }, 'title': '创作打卡挑战赛新一期', 'raw_tasks': [{}]}
         raise AssertionError('unexpected URL: %s' % url)
 
     def discover_campaign_url(self):
@@ -717,6 +723,47 @@ class CommentFallbackTest(unittest.TestCase):
         self.assertIn('新一期仍未解析到任务', detail)
         self.assertEqual(st['campaign_url'], browser.old_url)
         self.assertEqual(browser.read_urls, [browser.old_url, browser.new_url])
+
+    def test_image_only_campaign_links_find_checkin_after_unrelated_activity(self):
+        browser = Mock()
+        old = 'https://www.zhihu.com/parker/campaign/1?zh_hide_nav_bar=true'
+        unrelated = 'https://www.zhihu.com/parker/campaign/2'
+        current = 'https://www.zhihu.com/parker/campaign/3'
+        browser.discover_campaign_url.return_value = {
+            'ok': True, 'url': unrelated, 'text': '',
+            'candidates': [None, {'href': unrelated, 'text': ''},
+                           {'href': old.split('?')[0], 'text': ''},
+                           {'href': current, 'text': ''}],
+        }
+        active = {'title': '创作打卡挑战赛第五十五期', 'tasks': {'follow': {'done': True}}}
+        browser.read_checkin_tasks.side_effect = {
+            old: {'body_head': '活动未开始', 'tasks': {}},
+            unrelated: {'title': '资料升级计划', 'tasks': {'vote': {'done': False}}},
+            current: active,
+        }.__getitem__
+        st = ck.fresh_state(campaign_url=old)
+
+        info, detail = task.read_current_checkin_tasks(browser, st)
+
+        self.assertEqual((info, detail), (active, ''))
+        self.assertEqual([c.args[0] for c in browser.read_checkin_tasks.call_args_list],
+                         [old, unrelated, current])
+        self.assertEqual(st['campaign_url'], current)
+        self.assertEqual(st['campaign_title'], active['title'])
+
+    def test_campaign_with_generic_browser_title_uses_page_heading_and_tasks(self):
+        browser = Mock()
+        current = 'https://www.zhihu.com/parker/campaign/3'
+        active = {'title': '知乎活动平台', 'body_head': '打卡挑战\n今日任务',
+                  'tasks': {key: {'done': True} for key in ('follow', 'vote', 'comment')}}
+        browser.discover_campaign_url.return_value = {'ok': True, 'url': current}
+        browser.read_checkin_tasks.return_value = active
+        st = ck.fresh_state()
+
+        self.assertEqual(task.read_current_checkin_tasks(browser, st), (active, ''))
+        self.assertEqual(st['campaign_url'], current)
+        self.assertEqual(task.read_current_checkin_tasks(browser, st), (active, ''))
+        browser.discover_campaign_url.assert_called_once()
 
     def test_same_discovered_url_is_not_read_twice(self):
         browser = _SameCampaignBrowser()

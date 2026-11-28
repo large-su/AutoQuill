@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core import paths
+from core.atomic_file import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -61,23 +62,12 @@ def _write_json_atomic(path: Path, payload, attempts=3) -> bool:
       同时写时会撞锁（PermissionError），状态就丢了——真实场景里
       「主程序校核」与「子进程换装」确实会并发（2026-09-29 真机踩到）。
     """
-    for attempt in range(max(1, int(attempts))):
-        tmp = path.with_suffix("%s.%d.%d.tmp" % (path.suffix, os.getpid(), attempt))
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-            return True
-        except Exception as exc:            # noqa: BLE001
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            if attempt + 1 >= max(1, int(attempts)):
-                log.warning("进度快照写入失败 %s：%s", path.name, exc)
-                return False
-            time.sleep(0.2 * (2 ** attempt))
-    return False
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        return bool(atomic_write_text(path, text, attempts=attempts))
+    except OSError as exc:                 # noqa: BLE001
+        log.warning("进度快照写入失败 %s：%s", path.name, exc)
+        return False
 
 
 # ------------------------------------------------------------

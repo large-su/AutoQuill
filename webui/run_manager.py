@@ -117,8 +117,11 @@ class TaskRunner:
 
     # ---------------- 状态 ----------------
 
-    def status(self):
+    def status(self, *, run=None):
         with self._lock:
+            if run is not None and run is not self._active_control:
+                # A new task can start only after the previous worker exited.
+                return dict(run["terminal"], worker_alive=False)
             return {
                 "state": self.state,
                 "message": self.message,
@@ -136,7 +139,8 @@ class TaskRunner:
 
     # ---------------- 启动 ----------------
 
-    def start(self, spec: _RunSpec):
+    def start(self, spec: _RunSpec, *, checkin_context=None):
+        """Accept one run and return its handle for internal callers."""
         with self._lock:
             if self._thread and self._thread.is_alive():
                 raise HTTPException(409, "已有任务在运行")
@@ -147,6 +151,7 @@ class TaskRunner:
                 "finished": threading.Event(),
                 "watchdog_stop": threading.Event(),
                 "timeout": None,
+                "checkin_context": dict(checkin_context or {}),
             }
             self._active_control = control
             # Keep the attribute for existing integrations/tests, but every
@@ -160,10 +165,11 @@ class TaskRunner:
             self.progress = None
             self._set_state("running", f"任务启动：{spec.mode}")
             self._thread.start()
+            return control
 
     # ---------------- 中断 ----------------
 
-    def stop(self):
+    def stop(self, *, run=None):
         """请求中断：置标志，browser_adapter 的取消钩子在检查点抛异常。
 
         不直接关浏览器（Playwright sync API 线程亲和，跨线程 close
@@ -173,17 +179,20 @@ class TaskRunner:
         """
         with self._lock:
             control = self._active_control
-            worker_alive = bool(self._thread and self._thread.is_alive())
-        if not worker_alive:
-            return {"ok": True, "message": "当前没有运行中的任务"}
-        (control or {"stop": self._stop_flag})["stop"].set()
-        self._set_state("stopping", "正在停止…")
+            if (run is not None and run is not control) or (control and "terminal" in control):
+                return {"ok": True, "message": "本次任务已结束"}
+            if not self._thread or not self._thread.is_alive():
+                return {"ok": True, "message": "当前没有运行中的任务"}
+            (control or {"stop": self._stop_flag})["stop"].set()
+            self._set_state("stopping", "正在停止…")
         return {"ok": True, "message": "停止请求已发出（浏览器操作完成后中断）"}
 
     # ---------------- 任务体 ----------------
 
     def _run_task(self, spec: _RunSpec, control=None):
         """Run one task and expose its terminal state only after cleanup."""
+        from core import checkin
+
         if control is None:  # direct unit-test / legacy caller compatibility
             control = {"id": None, "stop": self._stop_flag,
                        "finished": threading.Event(),
@@ -196,6 +205,7 @@ class TaskRunner:
         _orig_input = builtins.input
         watchdog = None
         try:
+            checkin.set_context(control.get("checkin_context"))
             # The scoped checker covers preflight as well as dispatch.  It is
             # thread-local, so scheduler/CLI browser work is never cancelled
             # by a completed web-console task.
@@ -299,6 +309,7 @@ class TaskRunner:
                 log.error("Web 任务异常：%s", exc, exc_info=True)
                 terminal = ("error", str(exc), None)
         finally:
+            checkin.clear_context()
             control["watchdog_stop"].set()
             builtins.input = _orig_input
             # 任务拥有的浏览器只能由任务线程清理；状态留在 running/stopping
@@ -313,14 +324,15 @@ class TaskRunner:
                 close_shared_browser()
             except Exception:
                 log.exception("任务浏览器清理失败")
-            control["finished"].set()
             if terminal is None:
                 terminal = ("error", "任务未产生终态", None)
-            self._finish(*terminal)
+            self._finish(*terminal, control=control)
 
     def _dispatch(self, spec: _RunSpec):
         from workflows.zhihu import ZhihuWorkflow
-        from web_drivers.browser_pool import WebLoginRequired, WebVerificationRequired
+        from web_drivers.browser_pool import (
+            WebInteractionError, WorkflowCancelled, _check_cancel,
+        )
 
         wf = ZhihuWorkflow()
         mode = spec.mode
@@ -361,105 +373,58 @@ class TaskRunner:
             }
             return True
 
-        if mode == "clean":
-            # 纯净模式：流量选题 → 赞门槛提取 → 极简生成（风格学习+原创）
-            # → 洗稿/抄袭审核 → 发布草稿。rounds=轮数（默认 1），
-            # >1 时把完整链路循环执行多轮，每轮独立选题/生成/审核/发布。
-            def _on_clean_extracted(title, answer, footer, url):
+        if mode in ("single", "clean"):
+            clean = mode == "clean"
+            label = "纯净模式" if clean else "经典模式"
+            run_round = wf.run_clean if clean else wf.run_single
+
+            def on_extracted(title, answer, footer, url):
+                from core.story_text import sample_reference_sections
                 self.last_context = {
                     "title": title, "answer": answer,
                     "footer": footer or {}, "url": url or "",
+                    "sample_preview": sample_reference_sections(answer) if answer else "",
                 }
-                from core.story_text import sample_reference_sections
-                self.last_context["sample_preview"] = \
-                    sample_reference_sections(answer) if answer else ""
 
-            def _on_clean_story(story, md_path, audit=None):
+            def on_story(story, md_path, audit=None):
                 self.last_story = {
-                    "text": story,
-                    "md_path": str(md_path),
-                    "chars": len(story),
-                    "audit": audit or {},
+                    "text": story, "md_path": str(md_path), "chars": len(story),
                 }
-                for line in _audit_log_lines(audit):
-                    log.info("  " + line)
+                if clean:
+                    self.last_story["audit"] = audit or {}
+                    for line in _audit_log_lines(audit):
+                        log.info("  " + line)
+                else:
+                    try:
+                        from tools.ai_flavor_check import check_text
+                        score = check_text(story)
+                        self.last_story["ai_flavor"] = score[1] if score else None
+                    except Exception:
+                        self.last_story["ai_flavor"] = None
 
-            import time as _time
             rounds = max(1, int(spec.rounds or 1))
             success = 0
             last_error = None
             for rnd in range(1, rounds + 1):
+                _check_cancel()
                 if rounds > 1:
-                    log.info("\n" + "=" * 50 + "\n纯净模式 · 第 " + str(rnd)
-                             + "/" + str(rounds) + " 轮\n" + "=" * 50)
+                    log.info("\n%s\n%s · 第 %d/%d 轮\n%s",
+                             "=" * 50, label, rnd, rounds, "=" * 50)
                 try:
-                    if wf.run_clean(on_extracted=_on_clean_extracted,
-                                    on_story=_on_clean_story):
+                    if run_round(on_extracted=on_extracted, on_story=on_story):
                         success += 1
-                except (WebLoginRequired, WebVerificationRequired):
+                    elif wf.last_failure_reason:
+                        last_error = RuntimeError(wf.last_failure_reason)
+                except (WorkflowCancelled, WebInteractionError):
                     raise
                 except Exception as exc:
                     last_error = exc
-                    log.warning("纯净模式第 %d/%d 轮失败：%s",
-                                rnd, rounds, exc)
+                    log.warning("%s第 %d/%d 轮失败：%s", label, rnd, rounds, exc)
                 if rnd < rounds:
-                    _time.sleep(2)   # 轮间小憩，避免连续刷新推荐页
-            log.info(f"纯净模式 {rounds} 轮完成：成功 {success}/{rounds}")
+                    time.sleep(2)
+            log.info("%s %d 轮完成：成功 %d/%d", label, rounds, success, rounds)
             if not success and last_error is not None:
-                raise RuntimeError(f"纯净模式未完成：{last_error}") from last_error
-            return success > 0
-
-        if mode == "single":
-            # 经典模式完整链路（原「单轮」）：run_single 内部完成提取与发布，
-            # 通过回调把结果回填到上下文。rounds=轮数（默认 1），>1 时
-            # 循环执行完整链路多轮，每轮独立选题/生成/发布草稿。
-            def _on_extracted(title, answer, footer, url):
-                self.last_context = {
-                    "title": title, "answer": answer,
-                    "footer": footer or {}, "url": url or "",
-                }
-                from core.story_text import sample_reference_sections
-                self.last_context["sample_preview"] = \
-                    sample_reference_sections(answer) if answer else ""
-
-            def _on_story(story, md_path):
-                flavor = None
-                try:
-                    from tools.ai_flavor_check import check_text
-                    got = check_text(story)
-                    flavor = got[1] if got else None
-                except Exception:
-                    flavor = None
-                self.last_story = {
-                    "text": story,
-                    "md_path": str(md_path),
-                    "chars": len(story),
-                    "ai_flavor": flavor,
-                }
-
-            import time as _time
-            rounds = max(1, int(spec.rounds or 1))
-            success = 0
-            last_error = None
-            for rnd in range(1, rounds + 1):
-                if rounds > 1:
-                    log.info("\n" + "=" * 50 + "\n经典模式 · 第 " + str(rnd)
-                             + "/" + str(rounds) + " 轮\n" + "=" * 50)
-                try:
-                    if wf.run_single(on_extracted=_on_extracted,
-                                     on_story=_on_story):
-                        success += 1
-                except (WebLoginRequired, WebVerificationRequired):
-                    raise
-                except Exception as exc:
-                    last_error = exc
-                    log.warning("经典模式第 %d/%d 轮失败：%s",
-                                rnd, rounds, exc)
-                if rnd < rounds:
-                    _time.sleep(2)   # 轮间小憩
-            log.info(f"经典模式 {rounds} 轮完成：成功 {success}/{rounds}")
-            if not success and last_error is not None:
-                raise RuntimeError(f"经典模式未完成：{last_error}") from last_error
+                raise RuntimeError(f"{label}未完成：{last_error}") from last_error
             return success > 0
 
         if mode == "batch":
@@ -545,14 +510,16 @@ class TaskRunner:
 
         raise HTTPException(400, f"未知模式：{mode}")
 
-    def _finish(self, state, message, guide=None):
+    def _finish(self, state, message, guide=None, *, control):
         # 先清进度再改状态：SSE/轮询看到 state 时 progress 必已为空，
         # 前端不会用过期进度覆盖完成态
         with self._lock:
             self.progress = None  # 任务结束，进度清空
             if guide is not None:
                 self.guide_needed = guide  # 运行前检测失败：前端弹引导
-        self._set_state(state, message)
+            self._set_state(state, message)
+            control["terminal"] = self.status()
+            control["finished"].set()
         log.info("任务结束：%s", message)
 
     # ---------------- watchdog ----------------

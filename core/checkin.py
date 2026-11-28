@@ -24,6 +24,9 @@ import logging
 import os
 import re
 from datetime import datetime
+from threading import local
+
+from core.atomic_file import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -93,27 +96,12 @@ def replies_path():
 
 
 def _atomic_write(path, text):
-    '''原子写：先写 .tmp 再替换（断电/中途退出不留半截文件）。'''
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    for attempt in range(3):
-        try:
-            os.replace(tmp, path)
-            return True
-        except OSError as exc:
-            if attempt == 2:
-                log.warning('打卡状态写入失败（%s）：%s', os.path.basename(path), exc)
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                return False
-            import time as _t
-            _t.sleep(0.15 * (attempt + 1))
-    return False
+    '''原子写：使用同目录唯一临时文件并在替换失败后保留原文件。'''
+    try:
+        return bool(atomic_write_text(path, text, attempts=3))
+    except OSError as exc:
+        log.warning('打卡状态写入失败（%s）：%s', os.path.basename(path), exc)
+        return False
 
 
 def today_key(now=None):
@@ -485,58 +473,44 @@ def load_reply_runs(day='', limit=0):
 
 
 # ------------------------------------------------------------
-# 写草稿顺带互动的上下文（进程内单例，不做跨进程传递）
+# 写草稿顺带互动的上下文
 # ------------------------------------------------------------
-# **只有自动化调度器派出的 full_chain 作业会写这个上下文**
-# （automation/executor._full_chain）；用户在控制台手点的经典/纯净/批量
-# 链路走 run_manager 自己的入口，从不写上下文 → 钩子第一行就返回，
-# 连浏览器都不会碰（用户 2026-09-27 明确要求：手动写作绝不被干扰）。
-#
-# 三道保险，防止上下文「泄漏」到手动作业上：
-#   1) 执行器用 try/finally 包住整个作业，无论成功失败都清理；
-#   2) 上下文带时间戳，超过 TTL（默认 2 小时）自动视为失效；
-#   3) 每次读取都做时间校验，不依赖调用方记得清理。
-_context = None
-_context_at = None
+# 调度器把授权随任务交给 TaskRunner，运行器只在已接受的工作线程中设置和清理。
+_context = local()
 CONTEXT_TTL_MINUTES = 120
 
 
 def set_context(ctx, now=None):
     '''设置当前写草稿作业的打卡上下文（空值 = 不做互动）。'''
-    global _context, _context_at
-    if ctx:
-        _context = dict(ctx)
-        _context_at = now or datetime.now()
-    else:
-        _context = None
-        _context_at = None
-    return dict(_context) if _context else None
+    if not ctx:
+        clear_context()
+        return None
+    _context.current = (dict(ctx), now or datetime.now())
+    return dict(ctx)
 
 
 def get_context(now=None):
     '''读当前上下文；缺失或已过期返回 {}（过期即视为没有，绝不冒险动手）。'''
-    global _context, _context_at
-    if not _context:
+    item = getattr(_context, 'current', None)
+    if item is None:
         return {}
-    ts = _context_at or datetime.now()
+    data, ts = item
     age = ((now or datetime.now()) - ts).total_seconds() / 60.0
     if age > CONTEXT_TTL_MINUTES:
         log.info('打卡上下文已过期（%.0f 分钟），忽略', age)
-        _context = None
-        _context_at = None
+        clear_context()
         return {}
-    return dict(_context)
+    return dict(data)
 
 
 def context_age_minutes(now=None):
     '''当前上下文的年龄（分钟）；没有上下文返回 None。'''
-    if not _context or not _context_at:
+    item = getattr(_context, 'current', None)
+    if item is None:
         return None
-    return ((now or datetime.now()) - _context_at).total_seconds() / 60.0
+    return ((now or datetime.now()) - item[1]).total_seconds() / 60.0
 
 
 def clear_context():
-    global _context, _context_at
-    _context = None
-    _context_at = None
+    _context.current = None
 

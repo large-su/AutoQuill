@@ -41,6 +41,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
     """
 
     name = "base"
+    last_failure_reason = ""
 
     # ============================================================
     # 子类必须实现
@@ -70,7 +71,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
     def maybe_checkin_interact(self, question_url, story=None):
         """写草稿顺带完成打卡互动（关注 / 赞同 / 评论兜底）。
 
-        上下文由自动化的 full_chain 作业写入（core.checkin.set_context）：
+        上下文随自动化 full_chain 作业传入本次执行线程：
         没有上下文时**零开销、零行为变化**——手动跑完整链路不碰账号互动。
         失败只告警，绝不影响故事撰写与发布。
 
@@ -176,6 +177,9 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         立即调用（Web 控制台展示生成故事卡用；不保证已发布——
         格式不合规被跳过时同样回调，供人工核对废稿）。
         """
+        # 此字段由生成重试写入，必须在每次完整链路开始时清空，避免上一轮
+        # 废稿的原因被误展示为本轮失败原因。
+        self.last_failure_reason = ""
         url = self.select_topic()
         # footer（读者互动数据）在单条流程中用不上（此流程不走元学习入池），
         # 但签名必须对齐 extract_content 的返回值。★ url 取 extract_content
@@ -202,6 +206,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         story, _pass = self.generate_story_with_retry(title, answer)
 
         if not story:
+            if not self.last_failure_reason:
+                self.last_failure_reason = "故事生成失败（模型无输出）"
             log.error("故事生成失败（模型无输出），本轮未完成")
             return False
 
@@ -249,6 +255,8 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         on_extracted: 可选回调 fn(title, answer, footer, url)
         on_story: 可选回调 fn(story_text, md_path, audit)
         """
+        # 与经典模式一样，自动化只能展示本轮的审核结论。
+        self.last_failure_reason = ""
         url = self.select_topic_clean()
         title, answer, _footer, url = self.extract_content_clean()
         if on_extracted:
@@ -263,6 +271,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
         story, audit = self.generate_clean_with_retry(title, answer)
 
         if not story:
+            self.last_failure_reason = "故事生成失败（模型无输出）"
             log.error("纯净模式故事生成失败（模型无输出），本轮未完成")
             return False
 
@@ -275,6 +284,7 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
                 log.warning("on_story 回调失败", exc_info=True)
 
         if not audit or not audit.get("passed"):
+            self.last_failure_reason = self._clean_failure_reason(audit)
             log.warning("纯净模式原创审核未通过（%s），标记待人工核对，本轮未发布",
                         (audit or {}).get("verdict", "未知"))
             return False
@@ -291,6 +301,16 @@ class WorkflowBase(GenerationMixin, BatchGenerationMixin):
             log.debug("反馈闭环落账失败(不影响结果)", exc_info=True)
         log.info("纯净模式本轮完成！")
         return True
+
+    @staticmethod
+    def _clean_failure_reason(audit):
+        """把纯净模式已有审核结论压缩成台账可展示的失败说明。"""
+        if not isinstance(audit, dict):
+            return "纯净模式审核未返回结果"
+        verdict = str(audit.get("verdict") or "审核未通过").strip()
+        reasons = [str(reason).strip() for reason in (audit.get("reasons") or [])
+                   if str(reason).strip()]
+        return verdict + ("：" + "。".join(reasons[:3]) if reasons else "")
 
     def _collect_materials_single_style(self, target):
         """单轮式素材精选：循环执行单轮链路的选题+提取，收集 target 份。

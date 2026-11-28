@@ -911,11 +911,11 @@ class AutomationScheduler:
             # 线上进度事实（校核快照）：UI 只渲染，不自己算
             "site_progress": sp,
             # 单次任务轴 + 两张详情卡的数据（UI 用；缺数据时返回空结构不报错）
-            "single": _single_axis_payload(day, day_data, plan),
+            "single": _single_axis_payload(day, day_data, plan, now=now),
         }
 
 
-def _single_axis_payload(day, day_data, plan=None):
+def _single_axis_payload(day, day_data, plan=None, now=None):
     """「单次任务轴」+ 详情卡的数据（UI 只做渲染，不再自己拼业务）。
 
     组成：
@@ -949,25 +949,24 @@ def _single_axis_payload(day, day_data, plan=None):
         })
     axis.sort(key=lambda x: (x["stage"], x["planned_at"] or "~"))
     return {"axis": axis,
-            "checkin": _checkin_detail(),
+            "checkin": _checkin_detail(now=now),
             "replies": _reply_detail(day)}
 
 
-def _checkin_detail():
+def _checkin_detail(now=None):
     """打卡详情（读 core.checkin 的当日快照；读不到就返回空壳）。
 
     ★ 读之前先做一次**台账追溯**：今天真的发出去了的评论，即使打卡页统计还没
-      跟上，也要显示成达成（2026-10-01 用户反馈的显示 bug）。只补不删，
-      补上了立刻落盘，避免每次刷新都重算。
+    跟上，也要显示成达成（2026-10-01 用户反馈的显示 bug）。只补不删；
+      状态接口只做内存投影，不回写打卡快照，避免与真实任务争写。
     """
     try:
         from core import checkin
-        state = checkin.load_state()
-        healed = checkin.heal_from_ledger(state)
+        state = checkin.load_state(now=now)
+        healed = checkin.heal_from_ledger(state, now=now)
         if healed:
             summary = checkin.summary(state)
-            checkin.set_result(state, summary["ok"], summary["line"])
-            checkin.save_state(state)
+            checkin.set_result(state, summary["ok"], summary["line"], now=now)
             log.info("打卡台账追溯补记：%s", healed)
         return {
             "date": state.get("date") or "",

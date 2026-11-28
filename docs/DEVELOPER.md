@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 |---|---|
 | **适用版本** | v5.11.0 起 |
-| **最后更新** | 2026-11-27 |
+| **最后更新** | 2026-11-29 |
 | **状态** | 活跃 |
 | **说明** | 架构分层、运行方式、CLI 命令、配置参考与扩展指南 |
 
@@ -50,7 +50,8 @@ AutoQuill 是一套以 LLM 为认知中枢、以 **Playwright DOM 通道**为浏
 │   ├ capabilities.py  站内模型目录/选择/验收记录   │
 │   ├ site_options.py  模型菜单及绑定参数发现/应用   │
 │   └ session_ui.py    本任务会话归属与精确清理      │
-│  llm_api.py    →  API LLM 调用 + 风格双层注入     │
+│  llm_client.py → API LLM 接入，story_prompt.py    │
+│                   负责文风与参考素材注入          │
 ├──────────────────────────────────────────────────┤
 │  Layer 2: Core Capabilities (核心能力)            │
 │  core/story_text.py  →  故事文本管线（清洗/断句/   │
@@ -171,7 +172,7 @@ v5.13.0 起新增 `DATA_ROOT/data/state/story_models.jsonl`：按已发布作品
 
 v5.13.0 起，`core/story_text.py` 的 `story_content_issues()` 统一检查明确的模型元内容，`ensure_story_content()` 在发现问题时抛出 `StoryContentError`。规则覆盖全文，保留正常对白和题材用词。
 
-v5.14.0 增加 `core/story_editor.py`：默认开启 `STORY_EDITOR_ENABLE`，以当前通道接收完整稿件进行终稿编辑。可在设置→创作参数中关闭，状态保存在 `story_tunables`。正常稿增加一次请求；网页审核开启独立会话，隔离创作上下文，由现有驱动清理本任务自有会话。审核先登记简短人物、时间线与固定规则，再按题意、因果、关系、收束和重复检查；事实登记和意见均不进入故事。问题证据不能在本稿核对、超过 24,000 字符、通道不可用时保留本地稿并停止本篇发布。批量路径同时检查格式与编辑结果。
+`core/story_editor.py` 默认开启 `STORY_EDITOR_ENABLE`，以当前通道复核完整稿件。开关位于「设置 → 创作参数」，保存在 `story_tunables`。网页复核使用共享浏览器内的独立驱动和页面，修稿继续使用原创作会话。复核结果的格式或引文校验失败时，对同一份全文补审一次。复核仍不可用或超过 24,000 字符时，候选稿保留在本地。批量路径同样检查正文格式与编辑结论。
 
 默认读者契约模板只注入一处格式要求；参考、配方、作者签名及独立写作开关继续生效。`story_prompt.build_revision_prompt()` 接收完整 `previous_story` 与具体问题，不重新注入参考和配方；修订保留有效人物和情节，按实测正文字符数压缩或补充。API/Web及故障降级共用此接口。仅安全完整稿的格式或编辑问题可在既有次数预算内修订，污染与原创失败从头创作；每稿重新经过全部门槛。关闭全文编辑保留原格式重试行为，纯净修订不强制章节。编辑判断仍可能误拒或漏检，不能视为高赞或无逻辑问题的证明。
 
@@ -269,7 +270,7 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 
 ```
 采集（collector.py，断点续采）→ 提炼（author_profiler.py，统计+LLM 剖析）
-  → 双层注入（llm_api.build_story_prompt：通用层 + 作者层）
+  → 双层注入（story_prompt.build_story_prompt：通用层 + 作者层）
 ```
 
 样本权重 = log1p(点赞数) × 新鲜度衰减（90 天 1.0 → 730 天 0.3）。
@@ -287,6 +288,12 @@ ISCC installer/AutoQuill.iss    # 需要 Inno Setup 6（winget install JRSoftwar
 - 同类技术失败连续三次后，冷却状态写入当天排班，60 分钟内只阻止该类任务；用户计划中的开关、配额不变。重启保留剩余冷却，到期后在有效时段内重试，次日重新排班。手动开始/继续或指定立即执行可解除冷却。
 - 登录失效等必须人工处理的问题仍暂停并说明原因。发布等有副作用任务不会仅因遗留 `running` 状态就自动重放；只读反馈采集沿用同一任务键确认结果。
 - 排查安装版时读取 `%APPDATA%/AutoQuill/logs/` 与 `data/state/automation/`，不要只看源码目录日志。旧版已经关闭的任务开关需依据用户意图或事故证据恢复，不批量开启所有任务。
+
+### 6.6 自动化执行与状态写入
+
+- `automation/planner.py` 决定何时运行，`automation/executor.py` 将计划任务交给工作流或浏览器操作。Web 控制台与定时撰写共用 `TaskRunner`。经典和纯净模式在工作流记录当轮失败原因，由运行器写入任务状态和台账。
+- 排班、线上进度和打卡快照通过 `core/atomic_file.py` 写入。状态查询从快照与回复台账计算展示结果。实际任务负责更新打卡快照。
+- 打卡巡检和评论回复复用 `read_current_checkin_tasks()`。创作中心返回候选活动入口，读取活动标识及任务后更新缓存，换期时无需在代码中更新活动编号。
 
 ---
 

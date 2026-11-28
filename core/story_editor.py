@@ -29,6 +29,7 @@ EDITOR_PROMPT = """你是短篇故事的终稿编辑。下面给出问题和完�
 有意留白、超自然设定和不可靠叙述按题材解读；只有文本自身建立的条件被违反，
 才能判因果矛盾，不能仅因没有现实解释就要求悬疑或幻想故事改写。
 每项问题给出一到两处逐字原文证据，每处八到八十字；因果矛盾必须有两处相互冲突的证据。
+提交前逐条确认引文是稿件中连续出现的原文。直接复制原句，不补标点、不改字、不用省略号拼接。
 代词冲突应各引一处同一人物的“他”和“她”，不能两句都只引用“她”；日期冲突同样要各引一侧。
 不能引用原文的猜测不列入问题。没有反复提及某个动作，不等于该动作没有发生。
 不要混淆动作主体与作用范围，例如自己隔音并不等于让周围静音。
@@ -37,8 +38,8 @@ EDITOR_PROMPT = """你是短篇故事的终稿编辑。下面给出问题和完�
 只输出 JSON，不输出正文、推理或 Markdown。先用 facts 登记简短的文本事实，帮助前后核对：
 people 为主要人物及代词/亲属关系，timeline 为至多六条关键行动的实际先后，fixed_rules 为固定日期、排班或能力限制。事实登记合计不超过三百字。
 只登记文中确有的事实，不补写；再给 verdict 和 issues。facts 只供审核，不能作为故事输出。
-{"facts":{"people":[],"timeline":[],"fixed_rules":[]},"verdict":"pass或revise","issues":[{"kind":"上述分类","quotes":["逐字原文"],"problem":"具体问题","fix":"修正方向"}]}
-没有实质问题时 verdict=pass，issues=[]。revise 必须有问题与证据。
+无实质问题时返回 {"facts":{"people":[],"timeline":[],"fixed_rules":[]},"verdict":"pass","issues":[]}，facts 按原文填写。
+需修正时将 verdict 写为 "revise"，issues 每项包含 kind（上述分类）、quotes（原文字符串数组）、problem 和 fix。
 """
 
 
@@ -116,8 +117,33 @@ def length_review(question, story):
                 + '，不输出字数报告')}]}
 
 
+def _review_web(prompt, story):
+    from web_drivers import generate_isolated
+    from web_drivers.browser_pool import WebInteractionError, WebPromptNotConfirmed, WorkflowCancelled
+
+    for attempt in range(2):
+        try:
+            reply = generate_isolated(prompt)
+        except (WebInteractionError, WorkflowCancelled):
+            raise
+        except WebPromptNotConfirmed as exc:
+            return unavailable(str(exc))
+        except Exception as exc:
+            log.warning("网页全文编辑复核请求失败：%s", type(exc).__name__)
+            return unavailable("网页全文编辑复核请求失败")
+        if not reply:
+            return unavailable("全文编辑复核没有返回结果")
+        review = parse_review(reply, story)
+        if review["status"] != "unavailable" or attempt:
+            return review
+        log.info("全文编辑复核结果未通过校验，同一稿件重新复核一次：%s", review["reason"])
+        prompt += ("\n\n系统复核重试说明：上一份复核结果的问题是「" + review["reason"]
+                   + "」。请重新核对上面的完整稿件，只返回约定的 JSON。提交前逐条在原文核实引文，"
+                     "因果矛盾须引用两处不同、互相冲突的原句。根据本轮核对结果填写 verdict。")
+
+
 def review_story(question, story):
-    """One review request on the configured channel; no regeneration or publication."""
+    """Review the full draft through the configured channel."""
     from config.story import STORY_EDITOR_ENABLE
     if not STORY_EDITOR_ENABLE:
         return {"status": "disabled", "passed": True, "issues": [], "reason": ""}
@@ -134,25 +160,24 @@ def review_story(question, story):
               + "\n</question>\n<story>\n" + story + "\n</story>")
     from config import LLM_MODE
     if LLM_MODE == "web":
-        from story_scoring import _web_llm_generate
-        reply = _web_llm_generate(prompt, "全文编辑复核", reuse_session=False)
-    else:
-        from llm_client import call_llm_non_streaming, resolve_kb_llm_config
-        from web_drivers.browser_pool import WorkflowCancelled
-        key, base_url, model, extra = resolve_kb_llm_config()
-        if not key:
-            return unavailable("全文编辑复核未配置 API Key")
-        try:
-            reply, _, error = call_llm_non_streaming(
-                prompt, max_tokens=2400, temperature=0.1, timeout=150,
-                api_key=key, base_url=base_url, model=model, extra_body=extra)
-        except WorkflowCancelled:
-            raise
-        except Exception as exc:
-            log.warning("全文编辑复核请求失败：%s", type(exc).__name__)
-            return unavailable("全文编辑复核请求失败")
-        if error:
-            return unavailable("全文编辑复核请求失败")
+        return _review_web(prompt, story)
+
+    from llm_client import call_llm_non_streaming, resolve_kb_llm_config
+    from web_drivers.browser_pool import WorkflowCancelled
+    key, base_url, model, extra = resolve_kb_llm_config()
+    if not key:
+        return unavailable("全文编辑复核未配置 API Key")
+    try:
+        reply, _, error = call_llm_non_streaming(
+            prompt, max_tokens=2400, temperature=0.1, timeout=150,
+            api_key=key, base_url=base_url, model=model, extra_body=extra)
+    except WorkflowCancelled:
+        raise
+    except Exception as exc:
+        log.warning("全文编辑复核请求失败：%s", type(exc).__name__)
+        return unavailable("全文编辑复核请求失败")
+    if error:
+        return unavailable("全文编辑复核请求失败")
     if not reply:
         return unavailable("全文编辑复核没有返回结果")
     return parse_review(reply, story)

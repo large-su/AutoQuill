@@ -18,6 +18,7 @@
 import logging
 import re
 import time
+from urllib.parse import urlsplit
 
 from core import checkin
 from web_drivers.browser_pool import WorkflowCancelled
@@ -362,63 +363,78 @@ def _first_recommend_question(browser, max_cards=6):
 
 
 def read_current_checkin_tasks(browser, state, url='', progress=None):
-    '''读取已知活动；空页时回创作中心确认当期链接后只重试一次。
-
-    活动按期换 URL，过期页面会正常返回空 DOM（例如「活动未开始」），不能
-    将它误判为登录失效。只有新链接实际读到任务时才写回 state，避免首页的
-    其它活动链接污染下一次巡检。返回 (info, detail)，info 没有 tasks 即失败。
-    '''
+    '''优先读已知活动，换期时从创作中心核验候选，成功后才更新缓存。'''
     campaign = url or state.get('campaign_url') or ''
-    if not campaign:
+    first_detail = ''
+    if campaign:
         try:
-            found = browser.discover_campaign_url()
+            info = browser.read_checkin_tasks(campaign) or {}
         except WorkflowCancelled:
             raise
         except Exception as exc:                     # noqa: BLE001
-            return {}, '创作中心当期入口读取失败：%s' % exc
-        if not found.get('ok') or not found.get('url'):
-            return {}, found.get('detail') or '创作中心没有找到当期打卡入口'
-        campaign = found['url']
-        candidate_text = found.get('text') or ''
-    else:
-        candidate_text = ''
-    try:
-        info = browser.read_checkin_tasks(campaign) or {}
-    except WorkflowCancelled:
-        raise
-    except Exception as exc:                         # noqa: BLE001
-        return {}, '读取打卡页失败：%s' % exc
-    if info.get('tasks'):
-        if not state.get('campaign_url'):
-            checkin.set_campaign(state, campaign, candidate_text)
-        return info, ''
+            return {}, '读取打卡页失败：%s' % exc
+        if info.get('tasks') and (url or _is_checkin_campaign(info)):
+            if not state.get('campaign_url'):
+                checkin.set_campaign(state, campaign, info.get('title') or '')
+            return info, ''
+        first_detail = _checkin_page_detail(info)
 
-    # 旧活动页无任务时，重新从创作中心找入口。若还是同一地址，不重复读取。
-    first_detail = _checkin_empty_detail(info)
+    prefix = first_detail + '。' if first_detail else ''
     try:
-        found = browser.discover_campaign_url()
+        found = browser.discover_campaign_url() or {}
     except WorkflowCancelled:
         raise
     except Exception as exc:                         # noqa: BLE001
-        return {}, '%s；刷新当期入口失败：%s' % (first_detail, exc)
-    candidate = (found or {}).get('url') or ''
-    if not (found or {}).get('ok') or not candidate:
-        return {}, '%s；%s' % (first_detail,
-                                (found or {}).get('detail') or '创作中心没有找到当期打卡入口')
-    if candidate == campaign:
-        return {}, first_detail
-    try:
-        refreshed = browser.read_checkin_tasks(candidate) or {}
-    except WorkflowCancelled:
-        raise
-    except Exception as exc:                         # noqa: BLE001
-        return {}, '%s；新一期读取失败：%s' % (first_detail, exc)
-    if not refreshed.get('tasks'):
-        return {}, '%s；新一期仍未解析到任务：%s' % (
-            first_detail, _checkin_empty_detail(refreshed))
-    checkin.set_campaign(state, candidate, (found or {}).get('text') or '')
-    _say(progress, '打卡活动已换期，已切换到：%s' % (refreshed.get('title') or candidate))
-    return refreshed, ''
+        step = '刷新当期入口' if campaign else '创作中心当期入口读取'
+        return {}, f'{prefix}{step}失败：{exc}'
+    if not found.get('ok') or not found.get('url'):
+        return {}, prefix + (found.get('detail') or '创作中心没有找到当期打卡入口')
+
+    candidates = [found['url']]
+    for item in found.get('candidates') or []:
+        href = item.get('href') if isinstance(item, dict) else None
+        if isinstance(href, str) and href:
+            candidates.append(href)
+    seen = {urlsplit(campaign).path.rstrip('/')}
+    detail = ''
+    for candidate in candidates:
+        key = urlsplit(candidate).path.rstrip('/')
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            info = browser.read_checkin_tasks(candidate) or {}
+        except WorkflowCancelled:
+            raise
+        except Exception as exc:                     # noqa: BLE001
+            detail = f'读取候选活动失败：{exc}'
+            continue
+        title = info.get('title') or ''
+        if info.get('tasks') and _is_checkin_campaign(info):
+            label = title or '创作打卡挑战'
+            checkin.set_campaign(state, candidate, label)
+            _say(progress, f'已确认当期打卡活动：{label}')
+            return info, ''
+        detail = _checkin_page_detail(info)
+    if not detail:
+        return {}, first_detail or '创作中心没有找到当期打卡入口'
+    return {}, f'{prefix}新一期仍未解析到任务（已核验 {len(seen) - 1} 个候选入口）：{detail}'
+
+
+def _is_checkin_campaign(info):
+    if '创作打卡挑战' in (info.get('title') or ''):
+        return True
+    # 活动页也可能使用通用浏览器标题。核对页面标识及三项互动任务。
+    heading = (info.get('body_head') or '').splitlines()
+    return (any(line.strip() in ('打卡挑战', '创作打卡挑战') for line in heading)
+            and {'follow', 'vote', 'comment'} <= (info.get('tasks') or {}).keys())
+
+
+def _checkin_page_detail(info):
+    title = info.get('title') or ''
+    if info.get('tasks') and not _is_checkin_campaign(info):
+        return f'候选活动「{title[:40] or "未命名"}」未识别为创作打卡挑战'
+    return _checkin_empty_detail(info)
 
 
 def _checkin_empty_detail(info):
@@ -431,7 +447,7 @@ def _checkin_empty_detail(info):
         return '打卡页要求验证或暂时限制访问'
     if '活动未开始' in text or '活动已结束' in text:
         return '缓存的打卡活动已失效（%s）' % text[:40]
-    return '打卡页没解析到今日任务（可能改版或未登录）'
+    return '打卡页没解析到今日任务'
 
 
 def run_checkin_job(browser, url='', progress=None, now=None, is_last=True,
@@ -449,7 +465,7 @@ def run_checkin_job(browser, url='', progress=None, now=None, is_last=True,
     tasks = info.get('tasks') or {}
     if not tasks:
         return {'ok': False, 'units': 0,
-                'detail': failure or '打卡页没解析到今日任务（可能改版或未登录）',
+                'detail': failure or '打卡页没解析到今日任务',
                 'summary': checkin.summary(state)}
     checkin.update_tasks(state, tasks, now=now)
     checkin.heal_from_ledger(state, now=now)

@@ -496,7 +496,10 @@ function showAutoJob(key) {
       + "　<span class=\"k\">结束</span>" + esc(autoClock(last.finished_at))
       + "　<span class=\"k\">产出</span>" + (last.units || 0);
   }
-  if (job.note) html += "<br><span class=\"k\">说明</span>" + esc(job.note);
+  if (job.note) {
+    const label = job.status === "failed" ? "失败原因" : "说明";
+    html += "<br><span class=\"k\">" + label + "</span>" + esc(job.note);
+  }
   if (last && (last.artifacts || []).length) {
     html += "<br><span class=\"k\">产物</span>" + esc(last.artifacts.join("、"));
   }
@@ -517,11 +520,12 @@ function renderAutoHistory() {
   let html = "";
   rows.slice().reverse().forEach(function (r) {
     const m = per[r.type] || {};
+    const message = r.message || "";
     html += "<div class=\"auto-hist-row\"><span class=\"tm\">"
       + esc(autoClock(r.finished_at || r.started_at)) + "</span>"
       + "<span class=\"st " + r.status + "\">" + esc(AUTO_STATUS_TEXT[r.status] || r.status) + "</span>"
       + "<span>" + esc(m.label || r.type) + "</span>"
-      + "<span class=\"ms\">" + esc((r.message || "").slice(0, 90)) + "</span>"
+      + "<span class=\"ms\">" + esc(r.status === "failed" ? message : message.slice(0, 90)) + "</span>"
       + (r.units ? ("<span>" + r.units + " " + esc(m.unit || "") + "</span>") : "")
       + "</div>";
   });

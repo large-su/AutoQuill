@@ -330,6 +330,55 @@ class TestReplacedSessionCleanup(unittest.TestCase):
         self.assertEqual(deleted, ["old-id", "old-id", "new-id"])
         self.assertEqual(drv._pending_sessions, [])
 
+    def test_isolated_review_keeps_writer_session_for_revision(self):
+        """审稿须独占页面；随后修稿仍回到原创作会话。"""
+        writer = RecordDriver()
+        reviewer = RecordDriver()
+        writer._delete_result = reviewer._delete_result = True
+        writer.generate("创作初稿")
+
+        with mock.patch("web_drivers.get_driver", return_value=writer), \
+             mock.patch("web_drivers.create_driver", return_value=reviewer):
+            self.assertEqual(web_drivers.generate_isolated("全文编辑复核"), "故事正文")
+
+        writer.generate("根据编辑意见修稿")
+        self.assertEqual(writer.calls.count("open_session"), 1)
+        self.assertEqual(reviewer.calls.count("open_session"), 1)
+        self.assertTrue(reviewer._page is None, "审稿页面应关闭但不能关闭共享浏览器")
+        self.assertFalse(reviewer._session_owned, "成功审稿的自有会话应清理")
+
+    def test_isolated_review_cleans_up_after_cancellation(self):
+        from web_drivers.browser_pool import WorkflowCancelled
+        writer = RecordDriver()
+        reviewer = RecordDriver()
+        reviewer._delete_result = True
+        reviewer.send = mock.Mock(side_effect=WorkflowCancelled("停止"))
+
+        with mock.patch("web_drivers.get_driver", return_value=writer), \
+             mock.patch("web_drivers.create_driver", return_value=reviewer), \
+             self.assertRaises(WorkflowCancelled):
+            web_drivers.generate_isolated("全文编辑复核")
+
+        self.assertTrue(reviewer._page is None)
+        self.assertFalse(reviewer._session_owned,
+                         "取消后的审稿会话仍须走既有清理路径")
+
+    def test_isolated_review_transfers_failed_cleanup_to_writer(self):
+        writer = RecordDriver()
+        reviewer = RecordDriver()
+        writer._delete_result = True
+        reviewer._delete_result = False
+        reviewer._detect_session_id = lambda: "review-id"
+        writer.generate("创作初稿")
+
+        with mock.patch("web_drivers.get_driver", return_value=writer), \
+             mock.patch("web_drivers.create_driver", return_value=reviewer):
+            web_drivers.generate_isolated("全文编辑复核")
+
+        self.assertIn(("review-id", "全文编辑复核"), writer._pending_sessions)
+        self.assertTrue(writer.delete_current_session(),
+                        "任务末尾应能继续清理审稿残留会话")
+
     def test_send_error_keeps_ownership_for_cleanup(self):
         drv = RecordDriver()
         drv._delete_result = True

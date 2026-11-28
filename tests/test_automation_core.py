@@ -139,18 +139,23 @@ class StoreAtomicWriteTest(unittest.TestCase):
 
     def test_temp_name_is_unique_per_write(self):
         """同一进程的连续写入也不能复用临时文件名。"""
+        import os
+        from core import checkin
+
         target = self.tmp / "day.json"
-        replace = store.os.replace
+        replace = os.replace
         names = []
 
         def record(source, destination):
             names.append(source)
             return replace(source, destination)
 
-        with mock.patch.object(store.os, "replace", side_effect=record):
+        with mock.patch("os.replace", side_effect=record):
             store._atomic_write(target, '{"value": 1}')
             store._atomic_write(target, '{"value": 2}')
-        self.assertEqual(len(set(names)), 2)
+            checkin.save_state(checkin.fresh_state())
+            checkin.save_state(checkin.fresh_state())
+        self.assertEqual(len(set(names)), 4)
         self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["value"], 2)
 
     def test_write_never_raises_on_failure(self):
@@ -1168,6 +1173,19 @@ class SingleAxisPayloadTest(unittest.TestCase):
         from datetime import date as _date
         self.assertEqual(len(_ck.load_reply_runs(_date.today().isoformat())), 1)
         self.assertEqual(len(_ck.load_reply_runs("1999-01-01")), 0)
+
+    def test_status_projects_reply_completion_without_rewriting_checkin_state(self):
+        from core import checkin
+        from automation.scheduler import AutomationScheduler
+
+        now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+        checkin.save_state(checkin.fresh_state(now))
+        path = Path(checkin.state_path())
+        before = path.read_bytes()
+        checkin.append_reply({"sent": True, "dry_run": False, "at": now.isoformat()})
+        status = AutomationScheduler(now_fn=lambda: now).status()
+        self.assertTrue(status["single"]["checkin"]["done"]["comment"])
+        self.assertEqual(path.read_bytes(), before)
 
 
 class CheckinInteractWiringTest(unittest.TestCase):

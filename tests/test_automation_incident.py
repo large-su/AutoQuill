@@ -88,13 +88,42 @@ class IncidentReproductionTest(unittest.TestCase):
                 mock.patch.object(executor, "_browser_busy", return_value=[]), \
                 mock.patch.object(pool, "profile_in_use", return_value=False), \
                 mock.patch.object(executor, "_checkin_context", return_value={}), \
-                mock.patch.object(executor, "_set_checkin_context"), \
                 mock.patch.object(executor.time, "sleep") as sleep:
             result = executor._full_chain({"type": "full_chain"})
         self.assertEqual(fake_runner.status.call_count, 2)
         sleep.assert_called_once()
         self.assertEqual(result["status"], planner.STATUS_FAILED)
         self.assertIn("900s", result["message"])
+
+    def test_completed_automation_run_does_not_read_or_stop_later_manual_run(self):
+        runner = TaskRunner()
+        release = threading.Event()
+        entered = threading.Event()
+        self.addCleanup(release.set)
+
+        def dispatch(spec):
+            if spec.mode == "extract":
+                entered.set()
+                release.wait(3)
+            return True
+
+        with mock.patch.object(runner, "_dispatch", side_effect=dispatch), \
+                mock.patch("web_drivers.reset_driver"), \
+                mock.patch("web_drivers.browser_pool.close_shared_browser"):
+            finished = runner.start(_RunSpec(mode="select"))
+            runner._thread.join(timeout=3)
+            new_run = runner.start(_RunSpec(mode="extract"))
+            self.assertTrue(entered.wait(2))
+            try:
+                status = runner.status(run=finished)
+                self.assertEqual(status["state"], "done")
+                self.assertFalse(status["worker_alive"])
+                self.assertIn("select", status["message"])
+                runner.stop(run=finished)
+                self.assertEqual(runner.status(run=new_run)["state"], "running")
+            finally:
+                release.set()
+                runner._thread.join(timeout=3)
 
     def test_circuit_does_not_disable_user_plan_across_restart(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(paths, "DATA_ROOT", tmp):

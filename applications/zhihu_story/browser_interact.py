@@ -247,12 +247,19 @@ def _js(arg, body):
     return '(' + arg + ') => {' + _ZW_HELPERS + body + '}'
 
 
-# 创作中心首页 → 当期打卡页 URL（「去打卡」链接；退化取第一个 campaign 链接）
-_CAMPAIGN_ENTRY_JS = _js('', '''
-  const links = Array.from(document.querySelectorAll('a[href*="/parker/campaign/"]'))
-      .map(a => ({ text: txt(a), href: a.getAttribute('href') || '' }))
-      .filter(l => l.href);
-  const hit = links.find(l => l.text.indexOf('打卡') >= 0) || links[0];
+# 创作中心轮播同时包含打卡和其他活动，图片入口可能没有文字。
+_CAMPAIGN_ENTRY_JS = _js('', r'''
+  const byCampaign = new Map();
+  for (const a of document.querySelectorAll('a[href*="/parker/campaign/"]')) {
+    const url = new URL(a.href);
+    if (url.origin !== location.origin || !/^\/parker\/campaign\/\d+\/?$/.test(url.pathname)) continue;
+    const key = url.pathname.replace(/\/$/, '');
+    const text = txt(a) || a.getAttribute('aria-label') || a.querySelector('img')?.alt || '';
+    if (!byCampaign.has(key) || text.includes('打卡')) byCampaign.set(key, {text, href: url.href});
+  }
+  const links = [...byCampaign.values()].sort((a, b) =>
+    Number(b.text.includes('打卡')) - Number(a.text.includes('打卡')));
+  const hit = links[0];
   return { ok: !!hit, url: hit ? hit.href : '', text: hit ? hit.text : '',
            candidates: links.slice(0, 5) };
 ''')
@@ -445,14 +452,14 @@ class InteractMixin:
     # ---------------- 打卡页 ----------------
 
     def discover_campaign_url(self, timeout=40000):
-        '''创作中心首页 → 当期打卡页 URL（每期 campaign id 会变，这里自动跟上）。'''
+        '''返回创作中心首页的候选活动入口，供调用方核对当期打卡页。'''
         self.page.goto(CREATOR_HOME_URL, wait_until='domcontentloaded',
                        timeout=timeout)
         time.sleep(4)
         info = self._safe_evaluate(_CAMPAIGN_ENTRY_JS) or {}
         url = normalize_answer_url((info or {}).get('url'))
         if not url:
-            return {'ok': False, 'url': '', 'detail': '创作中心首页没找到「去打卡」链接'}
+            return {'ok': False, 'url': '', 'detail': '创作中心首页未找到活动入口'}
         return {'ok': True, 'url': url, 'text': (info or {}).get('text') or '',
                 'candidates': (info or {}).get('candidates') or []}
 

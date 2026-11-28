@@ -11,11 +11,11 @@
 import json
 import logging
 import os
-import uuid
 from datetime import datetime
 from pathlib import Path
 
 from automation.model import normalize_plan
+from core.atomic_file import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -50,25 +50,10 @@ def _atomic_write(path: Path, text: str, attempts: int = 3):
 
     最终仍失败只告警不抛（当日排班/计划丢了可以重建，不该让自动化崩掉）。
     """
-    import time as _time
-    for attempt in range(max(1, attempts)):
-        tmp = path.with_suffix("%s.%s.tmp" % (path.suffix, uuid.uuid4().hex))
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-            return
-        except OSError as exc:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            if attempt + 1 >= max(1, attempts):
-                log.warning("写入失败（%s）：%s", path.name, exc)
-                return
-            _time.sleep(0.2 * (2 ** attempt))
+    try:
+        atomic_write_text(path, text, attempts=attempts)
+    except OSError as exc:
+        log.warning("写入失败（%s）：%s", path.name, exc)
 
 
 def load_plan() -> dict:
